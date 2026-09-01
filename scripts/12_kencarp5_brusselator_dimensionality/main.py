@@ -42,10 +42,8 @@ from scripts.benchmark_common import (
     time_blocked_ms,
     timing_value_or_none,
 )
-from solvers.kencarp5jax import solve as kencarp5_solve
-from solvers.kencarp5numba import solve as kencarp5numba_solve
-from solvers.rodas5Pjax import solve as rodas5P_solve
-from solvers.rodas5Pnumba import solve as rodas5Pnumba_solve
+from solvers.kencarp5 import solve as kencarp5numba_solve
+from solvers.rodas5P import solve as rodas5Pnumba_solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -82,27 +80,6 @@ class Case(BenchmarkCase):
 
 CASES: tuple[Case, ...] = (
     Case(
-        key="modax kencarp5 array fp64",
-        color="#2b7be0",
-        marker="o",
-        solve_fn=kencarp5_solve,
-        mode="kencarp",
-        t_span=_T_SPAN,
-        kwargs=_SOLVER_KWARGS,
-        lu_precision="fp64",
-    ),
-    Case(
-        key="modax kencarp5 array fp32",
-        color="#2b7be0",
-        marker="D",
-        linestyle="--",
-        solve_fn=kencarp5_solve,
-        mode="kencarp",
-        t_span=_T_SPAN,
-        kwargs=_SOLVER_KWARGS,
-        lu_precision="fp32",
-    ),
-    Case(
         key="modax kencarp5 kernel fp64",
         color="#f0a202",
         marker="P",
@@ -119,17 +96,6 @@ CASES: tuple[Case, ...] = (
         linestyle="--",
         solve_fn=kencarp5numba_solve,
         mode="custom",
-        t_span=_T_SPAN,
-        kwargs=_SOLVER_KWARGS,
-        lu_precision="fp32",
-    ),
-    Case(
-        key="modax rodas5P array fp32",
-        color="#00a6a6",
-        marker="v",
-        linestyle="--",
-        solve_fn=rodas5P_solve,
-        mode="rodas",
         t_span=_T_SPAN,
         kwargs=_SOLVER_KWARGS,
         lu_precision="fp32",
@@ -216,15 +182,6 @@ def time_case(case: Case, dim: int, *, divergence: float) -> float:
             )
         y0_j = jnp.asarray(y0_batch)
         p_j = jnp.asarray(params)
-        if case.mode == "rodas":
-            return case.solve_fn(
-                ode_fn,
-                y0_j,
-                case.t_span,
-                p_j,
-                lu_precision=case.lu_precision,
-                **kwargs,
-            )
         return case.solve_fn(
             ex_fn,
             im_fn,

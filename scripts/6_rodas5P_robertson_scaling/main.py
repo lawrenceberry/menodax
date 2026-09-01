@@ -39,8 +39,7 @@ from scripts.benchmark_common import (
     time_blocked_ms,
     timing_value_or_none,
 )
-from solvers.rodas5Pjax import solve as rodas5P_solve
-from solvers.rodas5Pnumba import solve as rodas5Pnumba_solve
+from solvers.rodas5P import solve as rodas5Pnumba_solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -76,27 +75,6 @@ class Case(BenchmarkCase):
 
 
 CASES: tuple[Case, ...] = (
-    Case(
-        key="modax rodas5P array fp32",
-        color="#e02b2b",
-        marker="o",
-        linestyle="--",
-        solve_fn=rodas5P_solve,
-        ode_fn=robertson.ode_fn,
-        t_span=_T_SPAN,
-        kwargs=_SOLVER_KWARGS,
-        lu_precision="fp32",
-    ),
-    Case(
-        key="modax rodas5P array fp64",
-        color="#e02b2b",
-        marker="D",
-        solve_fn=rodas5P_solve,
-        ode_fn=robertson.ode_fn,
-        t_span=_T_SPAN,
-        kwargs=_SOLVER_KWARGS,
-        lu_precision="fp64",
-    ),
     Case(
         key="modax rodas5P kernel fp32",
         color="#8c564b",
@@ -253,10 +231,7 @@ def run_benchmarks(
             solver_cache = gpu_cache.setdefault(f"{scenario}_{case.key}", {})
             for size in _ENSEMBLE_SIZES:
                 if skip_reason := skip_case_size(case, size):
-                    print(
-                        f"  {case.key:<24} n={size:>7} ... skipped "
-                        f"({skip_reason})"
-                    )
+                    print(f"  {case.key:<24} n={size:>7} ... skipped ({skip_reason})")
                     if solver_cache.pop(str(size), None) is not None:
                         save_cache(_CACHE_PATH, cache)
                     continue

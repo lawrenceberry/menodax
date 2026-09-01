@@ -36,10 +36,9 @@ from scripts.benchmark_common import (
     time_blocked,
     timeout_cache_entry,
 )
-from solvers.rodas5Pjax import solve as rodas5P_solve
-from solvers.rodas5Pnumba import prepare_solve as rodas5Pnumba_prepare_solve
-from solvers.rodas5Pnumba import run_prepared as rodas5Pnumba_run_prepared
-from solvers.rodas5Pnumba import solve as rodas5Pnumba_solve
+from solvers.rodas5P import prepare_solve as rodas5Pnumba_prepare_solve
+from solvers.rodas5P import run_prepared as rodas5Pnumba_run_prepared
+from solvers.rodas5P import solve as rodas5Pnumba_solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -62,12 +61,6 @@ _DIVERGENCES = (
 )
 _SOLVER_KWARGS = {"first_step": 1e-4, "rtol": 1e-6, "atol": 1e-8}
 _DIFFRAX_SOLVER_KWARGS = {**_SOLVER_KWARGS, "max_steps": 1_000_000}
-_LOCAL_SOLVER_KWARGS = {
-    "first_step": 1e-4,
-    "rtol": 1e-6,
-    "atol": 1e-8,
-    "lu_precision": "fp32",
-}
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _CACHE_PATH = _SCRIPT_DIR / "results.json"
@@ -103,7 +96,6 @@ class Case:
 
 
 CASES = (
-    Case("modax rodas5P array fp32", "#2b7be0", "o", "stats"),
     Case("modax rodas5P kernel fp32", "#f0a202", "s", "stats"),
     Case(
         "modax rodas5P kernel fp32 (sorted)",
@@ -155,24 +147,15 @@ def make_data(divergence: float) -> tuple[np.ndarray, np.ndarray]:
 
 
 def solve_with_stats(solver: Case, y0: np.ndarray, params: np.ndarray):
-    if solver.key.startswith("modax rodas5P kernel"):
-        return rodas5Pnumba_solve(
-            robertson.ode_fn,
-            robertson.jac_fn,
-            y0=y0,
-            t_span=_T_SPAN,
-            params=params,
-            return_stats=True,
-            **_SOLVER_KWARGS,
-        )
-
-    return rodas5P_solve(
+    del solver
+    return rodas5Pnumba_solve(
         robertson.ode_fn,
-        y0=jnp.asarray(y0, dtype=jnp.float64),
+        robertson.jac_fn,
+        y0=y0,
         t_span=_T_SPAN,
-        params=jnp.asarray(params, dtype=jnp.float64),
+        params=params,
         return_stats=True,
-        **_LOCAL_SOLVER_KWARGS,
+        **_SOLVER_KWARGS,
     )
 
 

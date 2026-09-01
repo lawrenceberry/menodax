@@ -15,6 +15,9 @@ Run it with:
 uv run python examples/mukhanov_sasaki/main.py
 ```
 
+The modax solve runs as a Numba-CUDA kernel, so this needs a CUDA GPU.
+The `scipy` backend below is the CPU-only path.
+
 The perturbation equations and slow-roll approximation follow the conventions in Daniel Baumann's TASI lectures on inflation.
 
 ## Solver-backend benchmark
@@ -283,7 +286,7 @@ $$
 ## Ensemble Solve
 
 Each $k$-mode is an independent ODE system. The script batches all modes into
-one call to `tsit5_solve(...)` from `solvers.tsit5jax`.
+one call to `tsit5_solve(...)` from `solvers.tsit5`.
 
 Each mode has its own start and stop e-folds, so the script maps each trajectory
 to a normalized solver time

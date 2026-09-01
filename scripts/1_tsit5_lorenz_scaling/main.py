@@ -39,8 +39,7 @@ from scripts.benchmark_common import (
     time_blocked_ms,
     timing_value_or_none,
 )
-from solvers.tsit5jax import solve as tsit5_solve
-from solvers.tsit5numba import solve as tsit5numba_solve
+from solvers.tsit5 import solve as tsit5numba_solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -87,17 +86,6 @@ class Case(BenchmarkCase):
 
 
 CASES: tuple[Case, ...] = (
-    Case(
-        key="modax tsit5 array",
-        color="#2b7be0",
-        marker="o",
-        linestyle="-",
-        solve_fn=tsit5_solve,
-        ode_fn=lorenz.ode_fn,
-        y0=None,
-        t_span=_T_SPAN,
-        kwargs=_LOCAL_SOLVER_KWARGS,
-    ),
     Case(
         key="modax tsit5 kernel",
         color="#f0a202",

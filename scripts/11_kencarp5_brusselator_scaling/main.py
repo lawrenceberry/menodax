@@ -42,10 +42,8 @@ from scripts.benchmark_common import (
     time_blocked_ms,
     timing_value_or_none,
 )
-from solvers.kencarp5jax import solve as kencarp5_solve
-from solvers.kencarp5numba import solve as kencarp5numba_solve
-from solvers.rodas5Pjax import solve as rodas5P_solve
-from solvers.rodas5Pnumba import solve as rodas5Pnumba_solve
+from solvers.kencarp5 import solve as kencarp5numba_solve
+from solvers.rodas5P import solve as rodas5Pnumba_solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -95,31 +93,6 @@ class Case(BenchmarkCase):
 
 CASES: tuple[Case, ...] = (
     Case(
-        key="modax kencarp5 array fp64",
-        color="#2b7be0",
-        marker="o",
-        solve_fn=kencarp5_solve,
-        explicit_ode_fn=_EXPLICIT_ODE_FN,
-        implicit_ode_fn=_IMPLICIT_ODE_FN,
-        t_span=_T_SPAN,
-        kwargs=_SOLVER_KWARGS,
-        lu_precision="fp64",
-        coerce_jax=True,
-    ),
-    Case(
-        key="modax kencarp5 array fp32",
-        color="#2b7be0",
-        marker="D",
-        linestyle="--",
-        solve_fn=kencarp5_solve,
-        explicit_ode_fn=_EXPLICIT_ODE_FN,
-        implicit_ode_fn=_IMPLICIT_ODE_FN,
-        t_span=_T_SPAN,
-        kwargs=_SOLVER_KWARGS,
-        lu_precision="fp32",
-        coerce_jax=True,
-    ),
-    Case(
         key="modax kencarp5 kernel fp64",
         color="#f0a202",
         marker="P",
@@ -145,18 +118,6 @@ CASES: tuple[Case, ...] = (
         kwargs=_SOLVER_KWARGS,
         lu_precision="fp32",
         coerce_numpy=True,
-    ),
-    Case(
-        key="modax rodas5P array fp32",
-        color="#00a6a6",
-        marker="v",
-        linestyle="--",
-        solve_fn=rodas5P_solve,
-        ode_fn=_ODE_FN,
-        t_span=_T_SPAN,
-        kwargs=_SOLVER_KWARGS,
-        lu_precision="fp32",
-        coerce_jax=True,
     ),
     Case(
         key="modax rodas5P kernel fp32",
@@ -326,7 +287,9 @@ def plot(
     output_path: Path,
 ) -> None:
     configure_latex_plot_style(plt)
-    title = f"KenCarp5 scaling — Brusselator (n_grid={_N_GRID}, {scenario}) — {gpu_name}"
+    title = (
+        f"KenCarp5 scaling — Brusselator (n_grid={_N_GRID}, {scenario}) — {gpu_name}"
+    )
     print_plot_title(title)
     fig, ax = plt.subplots(figsize=(7, 5))
     for case in cases:

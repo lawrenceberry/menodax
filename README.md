@@ -3,21 +3,19 @@
 GPU-accelerated ODE solvers for **massive ensembles** (1-100k) of low-dimensional (<200D) ODE trajectories, built on
 JAX and Numba-CUDA. Applications include: Bayesian parameter inference, uncertainty quantification and the integration of physically uncoupled systems.
 
-Each solver ships in two interchangeable backends behind one API:
-
-- a **pure-JAX** backend (`*jax.py`) — `vmap`/`lax.while_loop` over the batch,
-  end-to-end differentiable and `jit`-friendly;
-- a **Numba-CUDA custom-kernel** backend (`*numba.py`) — one CUDA thread per
-  trajectory, hand-written step kernels with in-kernel LU factorisation, exposed
-  to JAX as a custom call.
+Every solver is a **Numba-CUDA custom kernel** (`*numba.py`): one CUDA thread
+per trajectory, hand-written step kernels with in-kernel LU factorisation,
+exposed to JAX as an XLA FFI custom call. That binding makes each solver an
+ordinary JAX primitive — `jit`-traceable, and `vmap` over a single solve lowers
+to one native ensemble launch.
 
 ## Solvers (`solvers/`)
 
-| Method      | Type                   | Use for           | Files                                |
-|-------------|------------------------|-------------------|--------------------------------------|
-| **Tsit5**   | Explicit RK (order 5)  | Non-stiff systems | `tsit5jax.py`, `tsit5numba.py`       |
-| **Rodas5P** | Rosenbrock-W (order 5) | Stiff systems     | `rodas5Pjax.py`, `rodas5Pnumba.py`   |
-| **KenCarp5**| ESDIRK (order 5)       | Stiff systems     | `kencarp5jax.py`, `kencarp5numba.py` |
+| Method      | Type                   | Use for           | File           |
+|-------------|------------------------|-------------------|----------------|
+| **Tsit5**   | Explicit RK (order 5)  | Non-stiff systems | `tsit5.py`     |
+| **Rodas5P** | Rosenbrock-W (order 5) | Stiff systems     | `rodas5P.py`   |
+| **KenCarp5**| ESDIRK (order 5)       | Stiff systems     | `kencarp5.py`  |
 
 Implicit solvers support an `lu_precision` (`"fp32"`/`"fp64"`) knob: the FP32
 factorisation halves shared-memory use without lowering method order, since the
@@ -25,15 +23,16 @@ Rosenbrock/SDIRK order conditions hold under an approximate Jacobian.
 
 ## API
 
-All backends expose a single `solve(...)` entry point that integrates an
+All solvers expose a single `solve(...)` entry point that integrates an
 ensemble in one call:
 
 ```python
-from solvers.rodas5Pjax import solve
+from solvers.rodas5P import solve
 
-# ode_fn(y, t, params) -> dy/dt
+# ode_fn / jac_fn are CUDA-device callables: (y, t, p) -> tuple
 y = solve(
     ode_fn,
+    jac_fn,
     y0,          # (n_vars,) or (N, n_vars)     initial state(s)
     t_span,      # (n_save,) output times (shared across the ensemble)
     params,      # (n_params,) or (N, n_params) per-trajectory parameters
@@ -48,14 +47,15 @@ y = solve(
 # y has shape (N, n_save, n_vars)
 ```
 
-Calling conventions per backend:
+Calling conventions:
 
-- **JAX implicit solvers** (`rodas5Pjax`, `kencarp5jax`) recompute the Jacobian
-  internally with `jax.jacfwd` — only `ode_fn` is needed.
-- **Numba implicit solvers** (`rodas5Pnumba`, `kencarp5numba`) take explicit
-  CUDA-device callables: `solve(ode_fn, jac_fn, y0, t_span, params, ...)`, with
-  an optional `time_jac_fn` (∂f/∂t) for non-autonomous systems.
-- **Tsit5** (explicit) needs no Jacobian on either backend.
+- The callbacks are compiled with `numba.cuda`, so they take and return fixed-size
+  tuples of scalars rather than arrays, and use `math` rather than `numpy`/`jax.numpy`.
+  Plain Python functions are jitted automatically; pre-`cuda.jit`ed ones are used as-is.
+- **Implicit solvers** (`rodas5P`, `kencarp5`) take an explicit
+  `jac_fn` alongside `ode_fn`, plus an optional `time_jac_fn` (∂f/∂t) that
+  non-autonomous systems need to retain full order.
+- **Tsit5** (explicit) needs no Jacobian.
 
 Importing `solvers` enables JAX float64.
 

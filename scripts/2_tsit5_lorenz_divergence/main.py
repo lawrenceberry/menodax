@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import jax
-import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -35,9 +34,8 @@ from scripts.benchmark_common import (
     time_blocked,
     timeout_cache_entry,
 )
-from solvers.tsit5jax import solve as tsit5_solve
-from solvers.tsit5numba import prepare_solve as tsit5numba_prepare_solve
-from solvers.tsit5numba import run_prepared as tsit5numba_run_prepared
+from solvers.tsit5 import prepare_solve as tsit5numba_prepare_solve
+from solvers.tsit5 import run_prepared as tsit5numba_run_prepared
 
 jax.config.update("jax_enable_x64", True)
 
@@ -92,7 +90,6 @@ class Case:
 
 
 CASES = (
-    Case("modax tsit5 array", "#2b7be0", "o", "stats"),
     Case("modax tsit5 kernel", "#f0a202", "s", "stats"),
     Case(
         "modax tsit5 kernel (sorted)",
@@ -128,27 +125,18 @@ def make_data(divergence: float) -> tuple[np.ndarray, np.ndarray]:
 
 
 def solve_with_stats(solver: Case, y0: np.ndarray, params: np.ndarray):
-    if solver.key.startswith("modax tsit5 kernel"):
-        prepared = tsit5numba_prepare_solve(
-            lorenz.ode_fn,
-            y0=y0,
-            t_span=lorenz.TIMES,
-            params=params,
-            **_SOLVER_KWARGS,
-        )
-        return tsit5numba_run_prepared(
-            prepared,
-            return_stats=True,
-            copy_solution=False,
-        )
-
-    return tsit5_solve(
+    del solver
+    prepared = tsit5numba_prepare_solve(
         lorenz.ode_fn,
-        y0=jnp.asarray(y0, dtype=jnp.float64),
+        y0=y0,
         t_span=lorenz.TIMES,
-        params=jnp.asarray(params, dtype=jnp.float64),
-        return_stats=True,
+        params=params,
         **_SOLVER_KWARGS,
+    )
+    return tsit5numba_run_prepared(
+        prepared,
+        return_stats=True,
+        copy_solution=False,
     )
 
 

@@ -42,8 +42,7 @@ from scripts.benchmark_common import (
     time_blocked_ms,
     timing_value_or_none,
 )
-from solvers.rodas5Pjax import solve as rodas5P_solve
-from solvers.rodas5Pnumba import solve as rodas5Pnumba_solve
+from solvers.rodas5P import solve as rodas5Pnumba_solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -66,7 +65,7 @@ _SCENARIOS = (
 @dataclass(frozen=True)
 class Case(BenchmarkCase):
     solve_fn: Callable[..., Any] | None = None
-    mode: str = "jax"
+    mode: str = "diffrax"
     t_span: Any = None
     kwargs: dict[str, Any] | None = None
     lu_precision: str | None = None
@@ -79,27 +78,6 @@ class Case(BenchmarkCase):
 
 
 CASES: tuple[Case, ...] = (
-    Case(
-        key="modax rodas5P array fp32",
-        color="#e02b2b",
-        marker="o",
-        linestyle="--",
-        solve_fn=rodas5P_solve,
-        mode="rodas",
-        t_span=_T_SPAN,
-        kwargs=_SOLVER_KWARGS,
-        lu_precision="fp32",
-    ),
-    Case(
-        key="modax rodas5P array fp64",
-        color="#e02b2b",
-        marker="D",
-        solve_fn=rodas5P_solve,
-        mode="rodas",
-        t_span=_T_SPAN,
-        kwargs=_SOLVER_KWARGS,
-        lu_precision="fp64",
-    ),
     Case(
         key="modax rodas5P kernel fp32",
         color="#8c564b",
@@ -200,15 +178,6 @@ def time_case(case: Case, dim: int, *, divergence: float) -> float:
     p_j = jnp.asarray(params)
 
     def run():
-        if case.mode == "rodas":
-            return case.solve_fn(
-                ode_fn,
-                y0_j,
-                case.t_span,
-                p_j,
-                lu_precision=case.lu_precision,
-                **kwargs,
-            )
         return case.solve_fn(
             ode_fn,
             y0=y0_j,

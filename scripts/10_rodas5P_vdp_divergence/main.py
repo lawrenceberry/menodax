@@ -38,8 +38,7 @@ from scripts.benchmark_common import (
     time_blocked,
     timeout_cache_entry,
 )
-from solvers.rodas5Pjax import solve as rodas5P_solve
-from solvers.rodas5Pnumba import solve as rodas5Pnumba_solve
+from solvers.rodas5P import solve as rodas5Pnumba_solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -87,7 +86,6 @@ class Case:
 
 
 CASES = (
-    Case("modax rodas5P array fp32", "#2b7be0", "o", "stats"),
     Case("modax rodas5P kernel fp32", "#f0a202", "s", "stats"),
     Case(
         "modax rodas5P kernel fp32 (sorted)",
@@ -109,23 +107,13 @@ def make_data(divergence: float) -> tuple[np.ndarray, np.ndarray]:
 
 
 def solve_with_stats(solver: Case, y0: np.ndarray, params: np.ndarray):
-    if solver.key.startswith("modax rodas5P kernel"):
-        return rodas5Pnumba_solve(
-            _ODE_FN,
-            _JAC_FN,
-            y0=y0,
-            t_span=_T_SPAN,
-            params=params,
-            return_stats=True,
-            **_SOLVER_KWARGS,
-        )
-
-    return rodas5P_solve(
+    del solver
+    return rodas5Pnumba_solve(
         _ODE_FN,
-        y0=jnp.asarray(y0, dtype=jnp.float64),
+        _JAC_FN,
+        y0=y0,
         t_span=_T_SPAN,
-        params=jnp.asarray(params),
-        lu_precision="fp32",
+        params=params,
         return_stats=True,
         **_SOLVER_KWARGS,
     )

@@ -40,6 +40,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import time
 from pathlib import Path
@@ -51,7 +52,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from solvers.rodas5Pjax import solve as rodas5P_solve
+from solvers.rodas5P import solve as rodas5P_solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -145,6 +146,148 @@ def bbn_ode(y, x, params):
 
 
 # ---------------------------------------------------------------------------
+# CUDA-device callbacks for the modax kernel solver
+# ---------------------------------------------------------------------------
+#
+# ``rodas5P`` compiles its right-hand side, Jacobian and time-derivative
+# with ``numba.cuda``, so these mirror ``bbn_ode`` above using ``math`` scalars
+# and fixed-size tuples instead of ``jnp`` arrays.  ``tests`` in
+# ``tests/test_examples.py`` checks all three against ``bbn_ode`` and its JAX
+# derivatives, so the duplication cannot drift silently.  Device code cannot
+# call a plain Python helper, so the shared term block is repeated inline.
+
+
+def bbn_ode_device(y, x, p):
+    """Device RHS: same equations as :func:`bbn_ode`, as a 4-tuple."""
+    log_eta10 = p[0]
+    N_eff = p[1]
+    eta = 10.0 ** (log_eta10 - 10.0)
+    T = Q / x
+
+    g_sm = 10.75 if T > 0.511 else 3.91
+    g = g_sm + (7.0 / 4.0) * (N_eff - N_EFF_SM)
+    H = math.sqrt(4.0 * math.pi**3 * g / 45.0) * T * T / M_PL
+
+    n_b = eta * (2.0 * ZETA3 / math.pi**2) * T**3
+
+    Gamma_np = (255.0 / TAU_N_MEV) * (12.0 + 6.0 * x + x * x) / x**5 + 1.0 / TAU_N_MEV
+    Gamma_pn = Gamma_np * math.exp(-x)
+
+    K_D = n_b * (3.0 / 4.0) * (4.0 * math.pi / (M_N * T)) ** 1.5 * math.exp(B_D / T)
+
+    rate_np = n_b * SIGMA_NP * (y[0] * y[1] - y[2] / K_D)
+    rate_dd = n_b * SIGMA_DD * y[2] * y[2]
+    denom = H * x
+    return (
+        (Gamma_pn * y[1] - Gamma_np * y[0] - rate_np) / denom,
+        (Gamma_np * y[0] - Gamma_pn * y[1] - rate_np) / denom,
+        (rate_np - 2.0 * rate_dd) / denom,
+        rate_dd / denom,
+    )
+
+
+def bbn_jac_device(y, x, p):
+    """Analytic df/dy for the four-species network, as a 4x4 nested tuple.
+
+    Only ``rate_np`` and ``rate_dd`` carry state dependence; with
+    ``a = n_b*SIGMA_NP``, ``b = n_b*SIGMA_DD`` and ``c = a/K_D``:
+
+        d(rate_np)/dy = ( a*y1,  a*y0, -c, 0 )
+        d(rate_dd)/dy = (    0,     0,  2*b*y2, 0 )
+    """
+    log_eta10 = p[0]
+    N_eff = p[1]
+    eta = 10.0 ** (log_eta10 - 10.0)
+    T = Q / x
+
+    g_sm = 10.75 if T > 0.511 else 3.91
+    g = g_sm + (7.0 / 4.0) * (N_eff - N_EFF_SM)
+    H = math.sqrt(4.0 * math.pi**3 * g / 45.0) * T * T / M_PL
+
+    n_b = eta * (2.0 * ZETA3 / math.pi**2) * T**3
+
+    Gamma_np = (255.0 / TAU_N_MEV) * (12.0 + 6.0 * x + x * x) / x**5 + 1.0 / TAU_N_MEV
+    Gamma_pn = Gamma_np * math.exp(-x)
+
+    K_D = n_b * (3.0 / 4.0) * (4.0 * math.pi / (M_N * T)) ** 1.5 * math.exp(B_D / T)
+
+    denom = H * x
+    a = n_b * SIGMA_NP
+    b = n_b * SIGMA_DD
+    c = a / K_D
+    return (
+        ((-Gamma_np - a * y[1]) / denom, (Gamma_pn - a * y[0]) / denom, c / denom, 0.0),
+        ((Gamma_np - a * y[1]) / denom, (-Gamma_pn - a * y[0]) / denom, c / denom, 0.0),
+        (
+            a * y[1] / denom,
+            a * y[0] / denom,
+            (-c - 4.0 * b * y[2]) / denom,
+            0.0,
+        ),
+        (0.0, 0.0, 2.0 * b * y[2] / denom, 0.0),
+    )
+
+
+def bbn_time_jac_device(y, x, p):
+    """Analytic df/dx, needed for Rodas5P to hold fifth order here.
+
+    Every coefficient (H, n_b, the weak rates and K_D) depends on x, so the
+    network is strongly non-autonomous.  With ``T = Q/x`` and g locally
+    constant (it steps only at ``T = m_e``), ``dT/dx = -T/x`` gives
+
+        dH/dx = -2H/x,   d(n_b)/dx = -3 n_b/x,   d(H*x)/dx = -H,
+        d(K_D)/dx = K_D * (B_D/T - 1.5) / x.
+    """
+    log_eta10 = p[0]
+    N_eff = p[1]
+    eta = 10.0 ** (log_eta10 - 10.0)
+    T = Q / x
+
+    g_sm = 10.75 if T > 0.511 else 3.91
+    g = g_sm + (7.0 / 4.0) * (N_eff - N_EFF_SM)
+    H = math.sqrt(4.0 * math.pi**3 * g / 45.0) * T * T / M_PL
+
+    n_b = eta * (2.0 * ZETA3 / math.pi**2) * T**3
+
+    Gamma_np = (255.0 / TAU_N_MEV) * (12.0 + 6.0 * x + x * x) / x**5 + 1.0 / TAU_N_MEV
+    Gamma_pn = Gamma_np * math.exp(-x)
+
+    K_D = n_b * (3.0 / 4.0) * (4.0 * math.pi / (M_N * T)) ** 1.5 * math.exp(B_D / T)
+
+    rate_np = n_b * SIGMA_NP * (y[0] * y[1] - y[2] / K_D)
+    rate_dd = n_b * SIGMA_DD * y[2] * y[2]
+    denom = H * x
+
+    # d(Gamma_np)/dx from the Bernstein polynomial; the constant decay term drops.
+    A = 255.0 / TAU_N_MEV
+    dGamma_np = A * ((6.0 + 2.0 * x) / x**5 - 5.0 * (12.0 + 6.0 * x + x * x) / x**6)
+    dGamma_pn = math.exp(-x) * (dGamma_np - Gamma_np)
+
+    d_rate_np = SIGMA_NP * (
+        -3.0 * n_b / x * (y[0] * y[1] - y[2] / K_D)
+        + n_b * y[2] * (B_D / T - 1.5) / (x * K_D)
+    )
+    d_rate_dd = -3.0 * rate_dd / x
+
+    dN0 = dGamma_pn * y[1] - dGamma_np * y[0] - d_rate_np
+    dN1 = dGamma_np * y[0] - dGamma_pn * y[1] - d_rate_np
+    dN2 = d_rate_np - 2.0 * d_rate_dd
+    dN3 = d_rate_dd
+
+    # f_i = N_i / (H*x) and d(H*x)/dx = -H, so df_i/dx = dN_i/(H*x) + f_i/x.
+    f0 = (Gamma_pn * y[1] - Gamma_np * y[0] - rate_np) / denom
+    f1 = (Gamma_np * y[0] - Gamma_pn * y[1] - rate_np) / denom
+    f2 = (rate_np - 2.0 * rate_dd) / denom
+    f3 = rate_dd / denom
+    return (
+        dN0 / denom + f0 / x,
+        dN1 / denom + f1 / x,
+        dN2 / denom + f2 / x,
+        dN3 / denom + f3 / x,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Forward model
 # ---------------------------------------------------------------------------
 
@@ -168,10 +311,12 @@ def initial_conditions():
 def predict_abundances(params):
     """Integrate BBN network and return [Y_P, D/H] for given params."""
     sol = rodas5P_solve(
-        bbn_ode,
+        bbn_ode_device,
+        bbn_jac_device,
         initial_conditions(),
         X_SAVE,
         params,
+        time_jac_fn=bbn_time_jac_device,
         lu_precision="fp32",
         rtol=SOLVER_RTOL,
         atol=SOLVER_ATOL,
@@ -201,27 +346,49 @@ def predict_abundances(params):
 def make_solver(backend):
     """Return a uniform ``solve(ode_fn, y0, t_span, params)`` for a backend."""
     if backend == "modax":
+        # The kernel solver takes its own CUDA-device callbacks rather than the
+        # traced ``bbn_ode``; ``f`` is ignored so every backend shares one
+        # ``solve(f, y0, ts, p)`` signature.
         return lambda f, y0, ts, p: rodas5P_solve(
-            f, y0, ts, p,
+            bbn_ode_device,
+            bbn_jac_device,
+            y0,
+            ts,
+            p,
+            time_jac_fn=bbn_time_jac_device,
             lu_precision="fp32",
-            rtol=SOLVER_RTOL, atol=SOLVER_ATOL,
-            first_step=SOLVER_FIRST_STEP, max_steps=SOLVER_MAX_STEPS,
+            rtol=SOLVER_RTOL,
+            atol=SOLVER_ATOL,
+            first_step=SOLVER_FIRST_STEP,
+            max_steps=SOLVER_MAX_STEPS,
         )
     if backend == "diffrax":
         from reference.solvers.python.diffrax_kvaerno5 import solve as diffrax_solve
+
         return lambda f, y0, ts, p: diffrax_solve(
-            f, y0, ts, p,
-            rtol=SOLVER_RTOL, atol=SOLVER_ATOL,
-            first_step=SOLVER_FIRST_STEP, max_steps=8192,
+            f,
+            y0,
+            ts,
+            p,
+            rtol=SOLVER_RTOL,
+            atol=SOLVER_ATOL,
+            first_step=SOLVER_FIRST_STEP,
+            max_steps=8192,
         )
     if backend == "scipy":
         from reference.solvers.python.scipy_solve_ivp import solve as scipy_solve
+
         # LSODA with an automatic initial step is what serial codes such as
         # ECHO21 use; an imposed first_step of 0.1 destabilises it here.
         return lambda f, y0, ts, p: scipy_solve(
-            f, y0, ts, p,
+            f,
+            y0,
+            ts,
+            p,
             method="LSODA",
-            rtol=SOLVER_RTOL, atol=SOLVER_ATOL, first_step=None,
+            rtol=SOLVER_RTOL,
+            atol=SOLVER_ATOL,
+            first_step=None,
         )
     raise ValueError(f"unknown backend: {backend}")
 
@@ -250,8 +417,14 @@ def time_solve(fn, repeats):
 def run_benchmark(n, backends, repeats):
     params = sample_grid_params(n)
     y0 = initial_conditions()
-    print(f"BBN forward-solve benchmark: N = {n:,} stiff 4-species universes\n", flush=True)
-    print(f"{'backend':>10}  {'wall (s)':>10}  {'per solve':>12}  Y_P(eta~6,Neff~3)", flush=True)
+    print(
+        f"BBN forward-solve benchmark: N = {n:,} stiff 4-species universes\n",
+        flush=True,
+    )
+    print(
+        f"{'backend':>10}  {'wall (s)':>10}  {'per solve':>12}  Y_P(eta~6,Neff~3)",
+        flush=True,
+    )
     print("-" * 60, flush=True)
     for backend in backends:
         solve_fn = make_solver(backend)
@@ -265,7 +438,10 @@ def run_benchmark(n, backends, repeats):
         # mid-grid sample for a sanity check on agreement across backends
         yp_mid = 4.0 * sol[n // 2, -1, 3]
         per = secs / n
-        print(f"{backend:>10}  {secs:10.3f}  {per * 1e3:9.4f} ms  {yp_mid:.5f}", flush=True)
+        print(
+            f"{backend:>10}  {secs:10.3f}  {per * 1e3:9.4f} ms  {yp_mid:.5f}",
+            flush=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -293,17 +469,19 @@ def log_prior(theta):
 
 
 def log_likelihood(theta):
+    # Select rather than branch. The sampler always evaluates this under
+    # jax.vmap, where lax.cond with a batched predicate is rewritten into a
+    # select that runs both branches anyway -- so this costs nothing extra --
+    # and the solver's custom_vmap rule cannot be traced inside a batched
+    # lax.cond (JAX asserts that a custom_vmap's captured constants are
+    # unbatched, which cond's batching rule violates).
     in_prior = jnp.all((theta >= LO) & (theta <= HI))
-
-    def _inside(_):
-        preds = predict_abundances(theta)
-        chi2 = ((preds[0] - Y_P_OBS) / SIGMA_YP) ** 2 + (
-            (preds[1] - DH_OBS) / SIGMA_DH
-        ) ** 2
-        ll = -0.5 * chi2
-        return jnp.where(jnp.isfinite(ll), ll, -jnp.inf)
-
-    return jax.lax.cond(in_prior, _inside, lambda _: -jnp.inf, operand=None)
+    preds = predict_abundances(theta)
+    chi2 = ((preds[0] - Y_P_OBS) / SIGMA_YP) ** 2 + (
+        (preds[1] - DH_OBS) / SIGMA_DH
+    ) ** 2
+    ll = -0.5 * chi2
+    return jnp.where(in_prior & jnp.isfinite(ll), ll, -jnp.inf)
 
 
 # ---------------------------------------------------------------------------

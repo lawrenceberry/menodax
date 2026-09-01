@@ -10,6 +10,9 @@ Run it with:
 uv run python examples/bbn_estimation/main.py
 ```
 
+The modax solve runs as a Numba-CUDA kernel, so this needs a CUDA GPU.
+The `scipy` backend below is the CPU-only path.
+
 ## Solver-backend benchmark
 
 The batched forward solve (the chi-squared grid / sampler-population inner loop)

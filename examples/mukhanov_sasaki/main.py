@@ -57,6 +57,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import time
 from pathlib import Path
@@ -67,7 +68,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from solvers.tsit5jax import solve as tsit5_solve
+from solvers.tsit5 import solve as tsit5_solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -129,13 +130,28 @@ def background_ode(y, n_efolds, params):
     return jnp.array([dphi_dn, d2phi_dn2])
 
 
+def background_ode_device(y, n_efolds, params):
+    """Device form of :func:`background_ode` for the modax kernel solver.
+
+    ``tsit5`` compiles its right-hand side with ``numba.cuda``, so this
+    returns a fixed-size tuple of scalars rather than a ``jnp`` array.
+    """
+    mass = params[0]
+    phi = y[0]
+    dphi_dn = y[1]
+    epsilon = 0.5 * dphi_dn * dphi_dn
+    h_sq = 0.5 * mass * mass * phi * phi / (3.0 - epsilon)
+    d2phi_dn2 = -(3.0 - epsilon) * dphi_dn - mass * mass * phi / h_sq
+    return (dphi_dn, d2phi_dn2)
+
+
 def solve_background():
     """Integrate the homogeneous inflationary background over e-fold time."""
     times = jnp.linspace(0.0, N_BACKGROUND_MAX, N_BACKGROUND_SAMPLES)
     y0 = jnp.array([PHI_INITIAL, D_PHI_DN_INITIAL], dtype=jnp.float64)
     params = jnp.array([MASS], dtype=jnp.float64)
     solution = tsit5_solve(
-        background_ode,
+        background_ode_device,
         y0,
         times,
         params,
@@ -256,6 +272,86 @@ def make_mode_ode(tables):
     return ModeODE(tables)
 
 
+def make_mode_ode_device(tables):
+    """Build the numba-cuda Mukhanov-Sasaki RHS for the modax kernel solver.
+
+    ``tsit5`` compiles the right-hand side with ``numba.cuda``, where
+    ``jnp.interp`` is unavailable, so the three background lookups are done by
+    hand.  ``build_background_tables`` keeps the uniform ``np.linspace`` grid
+    that ``solve_background`` produced (it only trims a trailing slice), so the
+    bracketing index is arithmetic rather than a search, and clamping at both
+    ends reproduces ``jnp.interp``'s behaviour outside the table.
+
+    The tables are closed over, which numba lowers into CUDA *constant* memory
+    -- a hard 64 KiB per module.  Two details keep the footprint at one copy of
+    the data: the three columns are packed into a single row-major ``(n, 3)``
+    array, and it is bound to a local before indexing.  Indexing a closed-over
+    array directly emits one constant copy per reference site, which for three
+    separate tables read twice each came to ~135 KiB and would not load.
+    Row-major packing also puts the three values for a given ``n`` adjacent,
+    so one bracket costs two cache lines rather than six.
+    """
+    n_table = np.ascontiguousarray(tables["n"], dtype=np.float64)
+    spacing = np.diff(n_table)
+    if not np.allclose(spacing, spacing[0], rtol=1e-10, atol=0.0):
+        raise ValueError("device mode RHS requires a uniformly spaced N grid")
+
+    table = np.ascontiguousarray(
+        np.stack(
+            [
+                np.asarray(tables["epsilon"], dtype=np.float64),
+                np.asarray(tables["log_a_h"], dtype=np.float64),
+                np.asarray(tables["q"], dtype=np.float64),
+            ]
+        ).T
+    )
+
+    n_first = float(n_table[0])
+    dn = float(spacing[0])
+    last = n_table.size - 1
+
+    def mode_ode_device(y, s, params):
+        tab = table  # bind once: see the constant-memory note above
+        code_k = params[0]
+        n_start = params[1]
+        n_stop = params[2]
+        delta_n = n_stop - n_start
+        n_now = n_start + s * delta_n
+
+        pos = (n_now - n_first) / dn
+        if pos <= 0.0:
+            i = 0
+            frac = 0.0
+        elif pos >= last:
+            i = last - 1
+            frac = 1.0
+        else:
+            i = int(pos)
+            frac = pos - i
+
+        epsilon = tab[i, 0] + frac * (tab[i + 1, 0] - tab[i, 0])
+        log_a_h = tab[i, 1] + frac * (tab[i + 1, 1] - tab[i, 1])
+        q = tab[i, 2] + frac * (tab[i + 1, 2] - tab[i, 2])
+
+        k_over_a_h = code_k * math.exp(-log_a_h)
+        omega_sq = k_over_a_h * k_over_a_h - q
+
+        v_re = y[0]
+        v_im = y[1]
+        dv_re = y[2]
+        dv_im = y[3]
+        d2v_re = -(1.0 - epsilon) * dv_re - omega_sq * v_re
+        d2v_im = -(1.0 - epsilon) * dv_im - omega_sq * v_im
+        return (
+            delta_n * dv_re,
+            delta_n * dv_im,
+            delta_n * d2v_re,
+            delta_n * d2v_im,
+        )
+
+    return mode_ode_device
+
+
 def make_solver(backend):
     """Return a uniform ``solve(ode_fn, y0, s_span, params)`` for a backend.
 
@@ -271,23 +367,40 @@ def make_solver(backend):
     """
     if backend == "modax":
         return lambda f, y0, ts, p: tsit5_solve(
-            f, y0, ts, p,
-            rtol=MODE_RTOL, atol=MODE_ATOL,
-            first_step=1.0e-5, max_steps=MODE_MAX_STEPS,
+            f,
+            y0,
+            ts,
+            p,
+            rtol=MODE_RTOL,
+            atol=MODE_ATOL,
+            first_step=1.0e-5,
+            max_steps=MODE_MAX_STEPS,
         )
     if backend == "diffrax":
         from reference.solvers.python.diffrax_tsit5 import solve as diffrax_solve
+
         return lambda f, y0, ts, p: diffrax_solve(
-            f, y0, ts, p,
-            rtol=MODE_RTOL, atol=MODE_ATOL,
-            first_step=1.0e-5, max_steps=MODE_MAX_STEPS,
+            f,
+            y0,
+            ts,
+            p,
+            rtol=MODE_RTOL,
+            atol=MODE_ATOL,
+            first_step=1.0e-5,
+            max_steps=MODE_MAX_STEPS,
         )
     if backend == "scipy":
         from reference.solvers.python.scipy_solve_ivp import solve as scipy_solve
+
         return lambda f, y0, ts, p: scipy_solve(
-            f, y0, ts, p,
+            f,
+            y0,
+            ts,
+            p,
             method="RK45",
-            rtol=MODE_RTOL, atol=MODE_ATOL, first_step=1.0e-5,
+            rtol=MODE_RTOL,
+            atol=MODE_ATOL,
+            first_step=1.0e-5,
         )
     raise ValueError(f"unknown backend: {backend}")
 
@@ -296,8 +409,13 @@ def solve_modes(tables, backend="modax", n_modes=N_MODES):
     """Solve all uncoupled Mukhanov-Sasaki Fourier modes as one ensemble."""
     physical_k, code_k, y0, params = prepare_mode_problem(tables, n_modes)
     solve_fn = make_solver(backend)
+    # The modax kernel solver compiles its RHS with numba-cuda; the reference
+    # backends trace the jnp form of the same equations.
+    ode_fn = (
+        make_mode_ode_device(tables) if backend == "modax" else make_mode_ode(tables)
+    )
     solution = solve_fn(
-        make_mode_ode(tables),
+        ode_fn,
         jnp.asarray(y0, dtype=jnp.float64),
         jnp.array([0.0, 1.0], dtype=jnp.float64),
         jnp.asarray(params, dtype=jnp.float64),
@@ -387,7 +505,10 @@ def run_benchmark(n_modes, backends, repeats):
     n_grid, background = solve_background()
     tables = build_background_tables(n_grid, background)
     physical_k, code_k, y0, params = prepare_mode_problem(tables, n_modes)
+    # The modax kernel solver compiles its RHS with numba-cuda; the reference
+    # backends trace the jnp form of the same equations.
     mode_ode = make_mode_ode(tables)
+    mode_ode_device = make_mode_ode_device(tables)
     y0 = jnp.asarray(y0, dtype=jnp.float64)
     params = jnp.asarray(params, dtype=jnp.float64)
     s_span = jnp.array([0.0, 1.0], dtype=jnp.float64)
@@ -396,7 +517,8 @@ def run_benchmark(n_modes, backends, repeats):
     print("-" * 56)
     for backend in backends:
         solve_fn = make_solver(backend)
-        run = lambda sf=solve_fn: sf(mode_ode, y0, s_span, params)
+        f = mode_ode_device if backend == "modax" else mode_ode
+        run = lambda sf=solve_fn, fn=f: sf(fn, y0, s_span, params)
         try:
             secs, sol = time_solve(run, repeats)
         except Exception as exc:  # noqa: BLE001

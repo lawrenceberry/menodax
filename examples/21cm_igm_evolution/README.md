@@ -12,6 +12,9 @@ Run it with:
 uv run python examples/21cm_igm_evolution/main.py
 ```
 
+The modax solve runs as a Numba-CUDA kernel, so this needs a CUDA GPU.
+The `scipy` backend below is the CPU-only path.
+
 The default run uses 50,000 trajectories.  Tests use a much smaller batch.
 
 ## Solver-backend benchmark
