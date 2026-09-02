@@ -187,7 +187,7 @@ def igm_ode(y, u, params):
 # ---------------------------------------------------------------------------
 #
 # ``rodas5P`` compiles its right-hand side, Jacobian and time derivative
-# with ``numba.cuda``, so the block below mirrors ``igm_ode`` using ``math``
+# with ``numba_cuda_mlir``, so the block below mirrors ``igm_ode`` using ``math``
 # scalars and fixed-size tuples instead of ``jnp`` arrays.  The clip and
 # maximum guards are reproduced exactly, including their zero derivatives
 # outside the active range.  Device code cannot call a plain Python helper, so

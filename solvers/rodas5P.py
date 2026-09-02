@@ -10,7 +10,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import numpy as np
-from numba import cuda, types
+from numba_cuda_mlir import cuda, types
 from nvmath.device import LUPivotSolver
 
 from solvers._jax_common import (

@@ -20,7 +20,7 @@ from typing import Any, Sequence
 import jax
 import jax.numpy as jnp
 import numpy as np
-from numba import types
+from numba_cuda_mlir import types
 
 _CAPSULE_NAME = b"xla._CUSTOM_CALL_TARGET"
 _TARGET_NAME = "modax_numba_cuda_launch"
@@ -140,13 +140,16 @@ static ffi::Error LaunchNumbaCuda(
   return ffi::Error::Success();
 }
 
+// numba-cuda-mlir lowers an array parameter to an MLIR MemRef descriptor,
+// passed flattened as {allocated, aligned, offset, sizes..., strides...} --
+// 3 + 2*rank kernel parameters.  The offset and strides count ELEMENTS, unlike
+// the byte strides of the numba-cuda array ABI this replaced (which also led
+// with a meminfo/parent pair, for 5 + 2*rank parameters).
 struct ArrayArg {
-  void* meminfo = nullptr;
-  void* parent = nullptr;
-  int64_t nitems = 0;
-  int64_t itemsize = 0;
-  void* data = nullptr;
-  std::vector<int64_t> dims;
+  void* allocated = nullptr;
+  void* aligned = nullptr;
+  int64_t offset = 0;
+  std::vector<int64_t> sizes;
   std::vector<int64_t> strides;
 };
 
@@ -159,24 +162,23 @@ struct KernelArgStorage {
 
 static void AddArrayParams(ffi::AnyBuffer buf, KernelArgStorage& storage,
                            std::vector<void*>& params) {
-  storage.array.nitems = static_cast<int64_t>(buf.element_count());
-  storage.array.itemsize = static_cast<int64_t>(ffi::ByteWidth(buf.element_type()));
-  storage.array.data = buf.untyped_data();
+  storage.array.allocated = buf.untyped_data();
+  storage.array.aligned = buf.untyped_data();
+  storage.array.offset = 0;
   auto dims = buf.dimensions();
-  storage.array.dims.assign(dims.begin(), dims.end());
-  storage.array.strides.resize(storage.array.dims.size());
-  int64_t stride = storage.array.itemsize;
-  for (int64_t i = static_cast<int64_t>(storage.array.dims.size()) - 1; i >= 0; --i) {
+  storage.array.sizes.assign(dims.begin(), dims.end());
+  storage.array.strides.resize(storage.array.sizes.size());
+  // Row-major element counts, so the innermost stride is 1.
+  int64_t stride = 1;
+  for (int64_t i = static_cast<int64_t>(storage.array.sizes.size()) - 1; i >= 0; --i) {
     storage.array.strides[static_cast<size_t>(i)] = stride;
-    stride *= storage.array.dims[static_cast<size_t>(i)];
+    stride *= storage.array.sizes[static_cast<size_t>(i)];
   }
 
-  params.push_back(&storage.array.meminfo);
-  params.push_back(&storage.array.parent);
-  params.push_back(&storage.array.nitems);
-  params.push_back(&storage.array.itemsize);
-  params.push_back(&storage.array.data);
-  for (int64_t& dim : storage.array.dims) params.push_back(&dim);
+  params.push_back(&storage.array.allocated);
+  params.push_back(&storage.array.aligned);
+  params.push_back(&storage.array.offset);
+  for (int64_t& size : storage.array.sizes) params.push_back(&size);
   for (int64_t& stride_value : storage.array.strides) params.push_back(&stride_value);
 }
 
@@ -348,22 +350,40 @@ def register_target() -> None:
     _REGISTERED = True
 
 
-def compile_raw_pointer_kernel(kernel: Any, argtypes: Sequence[Any]) -> int:
-    """Compile a ``cuda.jit`` kernel and return its legacy ``CUfunction`` pointer."""
+# Loaded modules are held for the process lifetime: the ``CUfunction`` handed to
+# the FFI target stays valid only while its module is loaded, and these kernels
+# live as long as the JAX primitives that launch them.
+_LOADED_MODULES: list[Any] = []
 
-    compiled = kernel.compile(tuple(argtypes))
-    cufunc = compiled.library.get_cufunc()
-    kernel_handle = int(cufunc.handle)
+
+def compile_raw_pointer_kernel(kernel: Any, argtypes: Sequence[Any]) -> int:
+    """Compile a ``cuda.jit`` kernel and return its ``CUfunction`` pointer.
+
+    numba-cuda-mlir exposes no ``get_cufunc()`` -- its ``MLIRLibrary`` only
+    offers the textual IR.  The linked cubin and the mangled entry name are on
+    the compile result's metadata instead, so load the module through the driver
+    and look the function up by name.
+    """
+
+    cres = kernel.compile(tuple(argtypes)).cres
+    cubin = cres.metadata["cubin"]
+    func_name = cres.metadata["func_name"]
+
     libcuda = ctypes.CDLL("libcuda.so.1")
-    cu_kernel_get_function = libcuda.cuKernelGetFunction
-    cu_kernel_get_function.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
-    cu_kernel_get_function.restype = ctypes.c_int
-    function = ctypes.c_void_p()
-    err = cu_kernel_get_function(ctypes.byref(function), ctypes.c_void_p(kernel_handle))
+    module = ctypes.c_void_p()
+    err = libcuda.cuModuleLoadData(ctypes.byref(module), ctypes.c_char_p(cubin))
     if err != 0:
-        raise RuntimeError(f"cuKernelGetFunction failed with CUDA driver error {err}")
+        raise RuntimeError(f"cuModuleLoadData failed with CUDA driver error {err}")
+    _LOADED_MODULES.append(module)
+
+    function = ctypes.c_void_p()
+    err = libcuda.cuModuleGetFunction(
+        ctypes.byref(function), module, func_name.encode()
+    )
+    if err != 0:
+        raise RuntimeError(f"cuModuleGetFunction failed with CUDA driver error {err}")
     if function.value is None:
-        raise RuntimeError("cuKernelGetFunction returned a null function pointer")
+        raise RuntimeError("cuModuleGetFunction returned a null function pointer")
     return int(function.value)
 
 

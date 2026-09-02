@@ -7,13 +7,13 @@ from examples.bbn_estimation import main as bbn
 
 def _have_cuda() -> bool:
     try:
-        from numba import cuda
+        from numba_cuda_mlir import cuda
     except ImportError:
         return False
     return bool(cuda.is_available())
 
 
-@pytest.mark.skipif(not _have_cuda(), reason="numba.cuda unavailable")
+@pytest.mark.skipif(not _have_cuda(), reason="numba_cuda_mlir unavailable")
 def test_bbn_log_likelihood_vmap_is_finite():
     key = jax.random.key(0)
     positions = jax.random.uniform(key, (8, 2)) * (bbn.HI - bbn.LO) + bbn.LO

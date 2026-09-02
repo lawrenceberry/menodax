@@ -1,9 +1,10 @@
 # modax
 
 GPU-accelerated ODE solvers for **massive ensembles** (1-100k) of low-dimensional (<200D) ODE trajectories, built on
-JAX and Numba-CUDA. Applications include: Bayesian parameter inference, uncertainty quantification and the integration of physically uncoupled systems.
+JAX and Numba-CUDA-MLIR. Applications include: Bayesian parameter inference, uncertainty quantification and the integration of physically uncoupled systems.
 
-Every solver is a **Numba-CUDA custom kernel** (`*numba.py`): one CUDA thread
+Every solver is a hand-written **CUDA custom kernel** compiled by
+Numba-CUDA-MLIR: one CUDA thread
 per trajectory, hand-written step kernels with in-kernel LU factorisation,
 exposed to JAX as an XLA FFI custom call. That binding makes each solver an
 ordinary JAX primitive — `jit`-traceable, and `vmap` over a single solve lowers
@@ -48,7 +49,7 @@ y = solve(
 
 Calling conventions:
 
-- The callbacks are compiled with `numba.cuda`, so they take and return fixed-size
+- The callbacks are compiled with `numba_cuda_mlir`, so they take and return fixed-size
   tuples of scalars rather than arrays, and use `math` rather than `numpy`/`jax.numpy`.
   Plain Python functions are jitted automatically; pre-`cuda.jit`ed ones are used as-is.
 - **Rodas5P** (implicit) takes an explicit

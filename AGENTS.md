@@ -5,8 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 GPU-accelerated ODE solvers for massive ensembles (1-100k) of low-dimensional
-(<200D) trajectories, built on JAX and Numba-CUDA. Each solver is a hand-written
-Numba-CUDA kernel running one CUDA thread per trajectory, exposed to JAX as an
+(<200D) trajectories, built on JAX and Numba-CUDA-MLIR. Each solver is a
+hand-written CUDA kernel running one CUDA thread per trajectory, exposed to JAX as an
 XLA FFI custom call. Applications: Bayesian parameter inference, uncertainty
 quantification, and integrating physically uncoupled systems.
 
@@ -29,7 +29,7 @@ uv run ruff format
 uv run ruff check --fix
 ```
 
-Most solver tests need a GPU and are skipped when `numba.cuda` is unavailable.
+Most solver tests need a GPU and are skipped when `numba_cuda_mlir` is unavailable.
 `tests/test_examples.py` runs anywhere: it compiles the examples' device
 callbacks with `cuda.compile_ptx`, which exercises the full numba typing and
 lowering pipeline without a device.
@@ -74,13 +74,17 @@ dict of per-trajectory step counters.
 
 ### Writing ODE callbacks
 
-Callbacks are compiled with `numba.cuda`, which constrains them:
+Callbacks are compiled with `numba_cuda_mlir`, which constrains them:
 
 - Take and return **fixed-size tuples of scalars**, not arrays. `jac_fn` returns
   a nested tuple (row-major); `ode_fn`/`time_jac_fn` return a flat tuple.
 - Use `math`, not `numpy`/`jax.numpy`.
 - **Device code cannot call a plain Python helper.** Either inline the shared
   work or pre-decorate the helper with `@cuda.jit(device=True)`.
+- A `jac_fn` returns a nested tuple, which MLIR cannot lower across a device
+  function boundary. That is fine in the solver, which consumes the rows via
+  `make_cuda_matrix_writer`, but a nested-tuple callback cannot be compiled
+  standalone with `cuda.compile_ptx` — compile the writer instead.
 - Closed-over arrays land in CUDA **constant memory** (64 KiB per module), and
   numba emits one copy *per reference site*. Pack related tables into a single
   array and bind it to a local before indexing — see `make_mode_ode_device` in

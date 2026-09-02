@@ -11,7 +11,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import numpy as np
-from numba import cuda, types
+from numba_cuda_mlir import cuda, types
 
 from solvers._jax_common import (
     make_custom_vmap_solver,

@@ -8,8 +8,8 @@ from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
-from numba import cuda
-from numba.cuda.dispatcher import CUDADispatcher
+from numba_cuda_mlir import cuda
+from numba_cuda_mlir.descriptor import MLIRDispatcher
 
 
 @dataclass
@@ -146,7 +146,7 @@ def block_threads_x(block_dim) -> int:
 
 @functools.cache
 def as_cuda_device(fn):
-    if isinstance(fn, CUDADispatcher):
+    if isinstance(fn, MLIRDispatcher):
         return fn
     return cuda.jit(device=True)(fn)
 

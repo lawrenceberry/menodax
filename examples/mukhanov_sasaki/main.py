@@ -133,7 +133,7 @@ def background_ode(y, n_efolds, params):
 def background_ode_device(y, n_efolds, params):
     """Device form of :func:`background_ode` for the modax kernel solver.
 
-    ``tsit5`` compiles its right-hand side with ``numba.cuda``, so this
+    ``tsit5`` compiles its right-hand side with ``numba_cuda_mlir``, so this
     returns a fixed-size tuple of scalars rather than a ``jnp`` array.
     """
     mass = params[0]
@@ -275,7 +275,7 @@ def make_mode_ode(tables):
 def make_mode_ode_device(tables):
     """Build the numba-cuda Mukhanov-Sasaki RHS for the modax kernel solver.
 
-    ``tsit5`` compiles the right-hand side with ``numba.cuda``, where
+    ``tsit5`` compiles the right-hand side with ``numba_cuda_mlir``, where
     ``jnp.interp`` is unavailable, so the three background lookups are done by
     hand.  ``build_background_tables`` keeps the uniform ``np.linspace`` grid
     that ``solve_background`` produced (it only trims a trailing slice), so the

@@ -10,9 +10,14 @@ dependencies = [
     "jax>=0.9.1",
     "matplotlib>=3.10.8",
     "numba>=0.61",
+    # numba-cuda is in maintenance mode and no longer compiles our kernels; it
+    # stays because nvmath.device's shared numba extension imports numba.cuda.
     "numba-cuda>=0.10",
+    "numba-cuda-mlir[cu13]>=0.5.1",
     "numpy>=2.4.3",
-    "nvmath-python[cu13,cu13-dx,dx,numba]>=0.9.0",
+    # 1.0.0 is the first release whose device APIs support numba-cuda-mlir
+    # (nvmath/device/cusolverdx_numba_cuda_mlir.py); its "dx" extra is gone.
+    "nvmath-python[cu13,cu13-dx,numba]>=1.0.0",
     "scipy>=1.17.1",
 ]
 

@@ -2,7 +2,7 @@
 
 Each example carries two forms of the same equations: a ``jnp`` one traced by
 the Diffrax/scipy reference backends, and a ``math``/tuple one that
-``numba.cuda`` compiles for the modax kernel solver.  Nothing forces the two to
+``numba_cuda_mlir`` compiles for the modax kernel solver.  Nothing forces the two to
 agree, and the implicit examples additionally hand-derive an analytic Jacobian
 and time derivative, so these tests pin all of it down:
 
@@ -30,13 +30,27 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-cuda = pytest.importorskip("numba.cuda")
-types = pytest.importorskip("numba.types")
+cuda = pytest.importorskip("numba_cuda_mlir.cuda")
+types = pytest.importorskip("numba_cuda_mlir.types")
 
 _EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 
 # ``(y_row, t, p_row)`` -- the signature the solvers call these callbacks with.
 _DEVICE_SIG = (types.float64[:], types.float64, types.float64[:])
+
+# A ``jac_fn`` returns a nested tuple, and numba-cuda-mlir cannot lower that
+# across a device-function boundary ("func.return must be a Value").  That is no
+# obstacle in practice because the solver never returns one: it calls the
+# callback through the writer below, which consumes the rows in place.
+# Compiling the writer therefore both exercises the real path and stays within
+# what MLIR supports.
+_MATRIX_WRITER_SIG = (
+    types.float64[:, ::1],
+    types.float64,
+    types.float64[:, ::1],
+    types.float64[:, :, ::1],
+    types.int64,
+)
 
 # CUDA constant memory is 64 KiB per module.
 _CONST_LIMIT_BYTES = 64 * 1024
@@ -53,10 +67,18 @@ def _load_example(name: str):
 
 
 def _compile_device(fn):
-    """Compile a device callback and return ``(ptx, constant_memory_bytes)``."""
+    """Compile a flat tuple-returning device callback -> ``(ptx, const_bytes)``."""
     ptx, _ = cuda.compile_ptx(fn, _DEVICE_SIG, device=True, cc=(8, 0))
     const_bytes = sum(int(n) for n in re.findall(r"\.const .*?\[(\d+)\]", ptx))
     return ptx, const_bytes
+
+
+def _compile_jacobian(fn, n_vars):
+    """Compile a nested-tuple ``jac_fn`` the way the solver actually uses it."""
+    from solvers._numba_common import make_cuda_matrix_writer
+
+    writer = make_cuda_matrix_writer(fn, n_vars).py_func
+    cuda.compile_ptx(writer, _MATRIX_WRITER_SIG, device=True, cc=(8, 0))
 
 
 def _max_rel_error(actual, desired):
@@ -111,8 +133,9 @@ def _bbn_samples(n=120):
 
 
 def test_bbn_device_callbacks_compile(bbn):
-    for fn in (bbn.bbn_ode_device, bbn.bbn_jac_device, bbn.bbn_time_jac_device):
+    for fn in (bbn.bbn_ode_device, bbn.bbn_time_jac_device):
         _compile_device(fn)
+    _compile_jacobian(bbn.bbn_jac_device, 4)
 
 
 def test_bbn_device_rhs_matches_jnp(bbn):
@@ -171,8 +194,9 @@ def _igm_samples(igm, n=120):
 
 
 def test_igm_device_callbacks_compile(igm):
-    for fn in (igm.igm_ode_device, igm.igm_jac_device, igm.igm_time_jac_device):
+    for fn in (igm.igm_ode_device, igm.igm_time_jac_device):
         _compile_device(fn)
+    _compile_jacobian(igm.igm_jac_device, 3)
 
 
 def test_igm_device_rhs_matches_jnp(igm):

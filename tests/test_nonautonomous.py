@@ -3,7 +3,7 @@
 For a Rosenbrock-Wanner method to retain its order on a non-autonomous ODE,
 each stage must include the explicit ``dt * d_i * df/dt`` correction in
 addition to evaluating ``f`` at the stage time.  These tests use a linear
-non-autonomous problem with a closed-form solution to verify the numba/CUDA
+non-autonomous problem with a closed-form solution to verify the numba-cuda-mlir/CUDA
 Rodas5P implementation.
 
 Reference ODE:  dy/dt = -lambda * y + forcing * t,   y(0) = 0
@@ -13,7 +13,7 @@ Closed form:    y(t) = forcing * (lambda * t - 1 + exp(-lambda t)) / lambda**2
 import jax
 import numpy as np
 import pytest
-from numba import cuda
+from numba_cuda_mlir import cuda
 
 from solvers.rodas5P import solve as rodas5Pnumba_solve
 

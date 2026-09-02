@@ -150,7 +150,8 @@ def bbn_ode(y, x, params):
 # ---------------------------------------------------------------------------
 #
 # ``rodas5P`` compiles its right-hand side, Jacobian and time-derivative
-# with ``numba.cuda``, so these mirror ``bbn_ode`` above using ``math`` scalars
+# with ``numba_cuda_mlir``, so these mirror ``bbn_ode`` above using ``math``
+# scalars
 # and fixed-size tuples instead of ``jnp`` arrays.  ``tests`` in
 # ``tests/test_examples.py`` checks all three against ``bbn_ode`` and its JAX
 # derivatives, so the duplication cannot drift silently.  Device code cannot
