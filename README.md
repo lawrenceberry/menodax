@@ -15,11 +15,10 @@ to one native ensemble launch.
 |-------------|------------------------|-------------------|----------------|
 | **Tsit5**   | Explicit RK (order 5)  | Non-stiff systems | `tsit5.py`     |
 | **Rodas5P** | Rosenbrock-W (order 5) | Stiff systems     | `rodas5P.py`   |
-| **KenCarp5**| ESDIRK (order 5)       | Stiff systems     | `kencarp5.py`  |
 
-Implicit solvers support an `lu_precision` (`"fp32"`/`"fp64"`) knob: the FP32
+Rodas5P supports an `lu_precision` (`"fp32"`/`"fp64"`) knob: the FP32
 factorisation halves shared-memory use without lowering method order, since the
-Rosenbrock/SDIRK order conditions hold under an approximate Jacobian.
+Rosenbrock order conditions hold under an approximate Jacobian.
 
 ## API
 
@@ -52,7 +51,7 @@ Calling conventions:
 - The callbacks are compiled with `numba.cuda`, so they take and return fixed-size
   tuples of scalars rather than arrays, and use `math` rather than `numpy`/`jax.numpy`.
   Plain Python functions are jitted automatically; pre-`cuda.jit`ed ones are used as-is.
-- **Implicit solvers** (`rodas5P`, `kencarp5`) take an explicit
+- **Rodas5P** (implicit) takes an explicit
   `jac_fn` alongside `ode_fn`, plus an optional `time_jac_fn` (∂f/∂t) that
   non-autonomous systems need to retain full order.
 - **Tsit5** (explicit) needs no Jacobian.

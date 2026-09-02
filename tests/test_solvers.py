@@ -1,7 +1,6 @@
 import jax.numpy as jnp
 import pytest
 
-from solvers.kencarp5 import solve as kencarp5numba_solve
 from solvers.rodas5P import solve as rodas5Pnumba_solve
 from solvers.tsit5 import solve as tsit5numba_solve
 from tests.benchmark_helpers import (
@@ -43,25 +42,6 @@ def test_tsit5_shared_matches_global():
     shared = tsit5numba_solve(ode_fn, y0, t_span, params, backend="shared", **kw)
     glob = tsit5numba_solve(ode_fn, y0, t_span, params, backend="global", **kw)
     assert float(jnp.max(jnp.abs(shared - glob))) == 0.0
-
-
-@parametrize_system_cases
-@pytest.mark.parametrize("lu_precision", ("fp32", "fp64"))
-def test_kencarp5_reference_system(benchmark, case, lu_precision):
-    result = benchmark_solve(
-        benchmark,
-        lambda: kencarp5numba_solve(
-            case.explicit_ode_fn,
-            case.implicit_ode_fn,
-            case.implicit_jac_fn,
-            case.y0,
-            case.t_span,
-            case.params,
-            lu_precision=lu_precision,
-            **case.kwargs,
-        ),
-    )
-    assert_case_output(result, case)
 
 
 @parametrize_system_cases

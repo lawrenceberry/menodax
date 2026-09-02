@@ -25,11 +25,7 @@ def _build_numba_callbacks():
     def decay_jac_device(y, t, p):
         return ((-p[0],),)
 
-    @cuda.jit(device=True)
-    def zero_rhs_device(y, t, p):
-        return (0.0,)
-
-    return decay_device, decay_jac_device, zero_rhs_device
+    return decay_device, decay_jac_device
 
 
 def _plain_numba_decay(y, t, p):
@@ -40,23 +36,17 @@ def _plain_numba_decay_jac(y, t, p):
     return ((-p[0],),)
 
 
-def _plain_numba_zero_rhs(y, t, p):
-    return (0.0,)
-
-
 def _solver_cases():
     if not _have_cuda():
         return []
 
-    from solvers.kencarp5 import solve as kencarp5numba_solve
     from solvers.rodas5P import solve as rodas5Pnumba_solve
     from solvers.tsit5 import solve as tsit5numba_solve
 
-    decay, decay_jac, zero_rhs = _build_numba_callbacks()
+    decay, decay_jac = _build_numba_callbacks()
     return [
         ("tsit5", tsit5numba_solve, (decay,), {}),
         ("rodas5P", rodas5Pnumba_solve, (decay, decay_jac), {}),
-        ("kencarp5", kencarp5numba_solve, (zero_rhs, decay, decay_jac), {}),
     ]
 
 
@@ -117,7 +107,6 @@ def test_solver_vmap_over_y0_and_params_matches_native_ensemble(
 
 @pytest.mark.skipif(not _have_cuda(), reason="numba.cuda unavailable")
 def test_solvers_auto_jit_plain_python_callbacks():
-    from solvers.kencarp5 import solve as kencarp5numba_solve
     from solvers.rodas5P import solve as rodas5Pnumba_solve
     from solvers.tsit5 import solve as tsit5numba_solve
 
@@ -141,26 +130,15 @@ def test_solvers_auto_jit_plain_python_callbacks():
         params,
         **solve_kwargs,
     )
-    kencarp5_sol = kencarp5numba_solve(
-        _plain_numba_zero_rhs,
-        _plain_numba_decay,
-        _plain_numba_decay_jac,
-        y0,
-        t_span,
-        params,
-        **solve_kwargs,
-    )
-
     np.testing.assert_allclose(tsit5_sol[:, :, 0], expected, rtol=2e-5, atol=2e-7)
     np.testing.assert_allclose(rodas5P_sol[:, :, 0], expected, rtol=2e-5, atol=2e-7)
-    np.testing.assert_allclose(kencarp5_sol[:, :, 0], expected, rtol=5e-5, atol=2e-7)
 
 
 @pytest.mark.skipif(not _have_cuda(), reason="numba.cuda unavailable")
 def test_solver_vmap_return_stats_shapes():
     from solvers.rodas5P import solve as rodas5Pnumba_solve
 
-    decay, decay_jac, _ = _build_numba_callbacks()
+    decay, decay_jac = _build_numba_callbacks()
 
     y0 = jnp.array([1.0])
     t_span = jnp.array([0.0, 0.5, 1.0])

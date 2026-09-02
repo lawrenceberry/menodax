@@ -42,7 +42,6 @@ from scripts.benchmark_common import (
     time_blocked_ms,
     timing_value_or_none,
 )
-from solvers.kencarp5 import solve as kencarp5numba_solve
 from solvers.rodas5P import solve as rodas5Pnumba_solve
 
 jax.config.update("jax_enable_x64", True)
@@ -79,27 +78,6 @@ class Case(BenchmarkCase):
 
 
 CASES: tuple[Case, ...] = (
-    Case(
-        key="modax kencarp5 kernel fp64",
-        color="#f0a202",
-        marker="P",
-        solve_fn=kencarp5numba_solve,
-        mode="custom",
-        t_span=_T_SPAN,
-        kwargs=_SOLVER_KWARGS,
-        lu_precision="fp64",
-    ),
-    Case(
-        key="modax kencarp5 kernel fp32",
-        color="#f0a202",
-        marker="X",
-        linestyle="--",
-        solve_fn=kencarp5numba_solve,
-        mode="custom",
-        t_span=_T_SPAN,
-        kwargs=_SOLVER_KWARGS,
-        lu_precision="fp32",
-    ),
     Case(
         key="modax rodas5P kernel fp32",
         color="#8c564b",
@@ -156,20 +134,9 @@ def time_case(case: Case, dim: int, *, divergence: float) -> float:
         )
 
     assert case.solve_fn is not None
-    ex_fn, im_fn, ode_fn, _, im_jac_fn, jac_fn = brusselator.make_system(n_grid)
+    ex_fn, im_fn, ode_fn, _, _, jac_fn = brusselator.make_system(n_grid)
 
     def run():
-        if case.mode == "custom":
-            return case.solve_fn(
-                ex_fn,
-                im_fn,
-                im_jac_fn,
-                y0=y0_batch,
-                t_span=case.t_span,
-                params=params,
-                lu_precision=case.lu_precision,
-                **kwargs,
-            )
         if case.mode == "rodas_kernel":
             return case.solve_fn(
                 ode_fn,

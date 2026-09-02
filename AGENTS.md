@@ -42,7 +42,6 @@ lowering pipeline without a device.
 |----------|------------------------|-------------------|---------------|
 | Tsit5    | Explicit RK (order 5)  | Non-stiff systems | `tsit5.py`    |
 | Rodas5P  | Rosenbrock-W (order 5) | Stiff systems     | `rodas5P.py`  |
-| KenCarp5 | ESDIRK (order 5)       | Stiff systems     | `kencarp5.py` |
 
 Shared support modules:
 
@@ -89,7 +88,7 @@ Callbacks are compiled with `numba.cuda`, which constrains them:
 
 `lu_precision` (`"fp32"`/`"fp64"`) selects the LU precision for implicit
 solvers. The `"fp32"` default does not lower the method's order — the
-Rosenbrock/SDIRK order conditions hold under an approximate Jacobian — while
+Rosenbrock order conditions hold under an approximate Jacobian — while
 halving the LU shared-memory footprint.
 
 ### Kernel design

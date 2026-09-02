@@ -42,7 +42,6 @@ from scripts.benchmark_common import (
     time_blocked_ms,
     timing_value_or_none,
 )
-from solvers.kencarp5 import solve as kencarp5numba_solve
 from solvers.rodas5P import solve as rodas5Pnumba_solve
 
 jax.config.update("jax_enable_x64", True)
@@ -74,7 +73,6 @@ class Case(BenchmarkCase):
     solve_fn: Callable[..., Any] | None = None
     explicit_ode_fn: Callable[..., Any] | None = None
     implicit_ode_fn: Callable[..., Any] | None = None
-    implicit_jac_fn: Callable[..., Any] | None = None
     ode_fn: Callable[..., Any] | None = None
     jac_fn: Callable[..., Any] | None = None
     t_span: Any = None
@@ -92,33 +90,6 @@ class Case(BenchmarkCase):
 
 
 CASES: tuple[Case, ...] = (
-    Case(
-        key="modax kencarp5 kernel fp64",
-        color="#f0a202",
-        marker="P",
-        solve_fn=kencarp5numba_solve,
-        explicit_ode_fn=_EXPLICIT_ODE_FN,
-        implicit_ode_fn=_IMPLICIT_ODE_FN,
-        implicit_jac_fn=_IMPLICIT_JAC_FN,
-        t_span=_T_SPAN,
-        kwargs=_SOLVER_KWARGS,
-        lu_precision="fp64",
-        coerce_numpy=True,
-    ),
-    Case(
-        key="modax kencarp5 kernel fp32",
-        color="#f0a202",
-        marker="X",
-        linestyle="--",
-        solve_fn=kencarp5numba_solve,
-        explicit_ode_fn=_EXPLICIT_ODE_FN,
-        implicit_ode_fn=_IMPLICIT_ODE_FN,
-        implicit_jac_fn=_IMPLICIT_JAC_FN,
-        t_span=_T_SPAN,
-        kwargs=_SOLVER_KWARGS,
-        lu_precision="fp32",
-        coerce_numpy=True,
-    ),
     Case(
         key="modax rodas5P kernel fp32",
         color="#8c564b",
@@ -186,17 +157,6 @@ def time_case(case: Case, y0, params) -> float:
     assert case.solve_fn is not None
 
     def run():
-        if case.implicit_jac_fn is not None:
-            return case.solve_fn(
-                case.explicit_ode_fn,
-                case.implicit_ode_fn,
-                case.implicit_jac_fn,
-                y0=solve_y0,
-                t_span=case.t_span,
-                params=solve_params,
-                lu_precision=case.lu_precision,
-                **kwargs,
-            )
         if case.ode_fn is not None and case.jac_fn is not None:
             return case.solve_fn(
                 case.ode_fn,
