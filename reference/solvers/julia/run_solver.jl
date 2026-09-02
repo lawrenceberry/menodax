@@ -8,32 +8,6 @@ using StaticArrays
 include("common.jl")
 include("../../systems/julia/registry.jl")
 
-# Why we don't IMEX on Julia EnsembleGPUArray:
-#
-# DiffEqGPU 3.13's `EnsembleGPUArray` only ships a `generate_problem`
-# method for ODEFunction (not SplitFunction), so passing a
-# SplitODEProblem crashes immediately with
-# `FieldError: type SplitFunction has no field f`.
-#
-# A type-piracy override of `generate_problem` that wraps `f.f1`/`f.f2`
-# in separate GPU kernels gets further but trips deeper integration
-# issues: OrdinaryDiffEq's W-matrix / Jacobian setup paths in
-# OrdinaryDiffEqDifferentiation still reach into `f.f1.f` and `f.f2.f`
-# expecting the *original* Julia closures (for autodiff / linearity
-# detection / Wfact fallback), so even when both halves are GPU-wrapped
-# the JVPCache/derivative paths fail compiling for Dual-typed `t` on the
-# GPU.
-#
-# Patching this end-to-end would require overriding several
-# OrdinaryDiffEqDifferentiation entry points too — out of scope.
-#
-# Practical fallback: for `kencarp5 + EnsembleGPUArray`, pass the
-# combined full ODEProblem instead of the split problem.  Julia's
-# KenCarp5 then treats the whole RHS implicitly (no IMEX advantage),
-# which is *slower* than the IMEX path my JAX solver uses but is the
-# only thing DiffEqGPU 3.13 actually runs.  The comparison is therefore
-# labelled `julia kencarp5 (fully-implicit)` in scripts 11/12/14.
-
 function parse_first_step(value::String)
     return value == "none" ? nothing : parse(Float64, value)
 end
@@ -42,8 +16,6 @@ function make_solver_algorithm(solver_name::String, ensemble_backend::String)
     if ensemble_backend == "EnsembleGPUArray"
         if solver_name == "tsit5"
             return Tsit5()
-        elseif solver_name == "kencarp5"
-            return KenCarp5()
         elseif solver_name == "rodas5P"
             return Rodas5P()
         elseif solver_name == "kvaerno5"
@@ -82,11 +54,6 @@ const SOLVE_TIMED_RUNS = 1
 
 function make_problem(spec::ReferenceSystemSpec, solver_name::String, ensemble_backend::String, y0, tspan, p0)
     if ensemble_backend == "EnsembleGPUArray"
-        # See the "Why we don't IMEX on Julia EnsembleGPUArray" comment
-        # at the top of this file. kencarp5 + EnsembleGPUArray is run on
-        # the *full* (non-split) ODEProblem; Julia treats the RHS as
-        # fully implicit. The comparison in scripts/11,12,14 labels this
-        # row accordingly.
         return spec.build_array_full_problem(y0, tspan, p0)
     end
     return spec.build_kernel_full_problem(y0, tspan, p0)

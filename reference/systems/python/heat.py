@@ -34,7 +34,6 @@ from reference.systems.python._tuple_codegen import (
     mul,
     p,
     y,
-    zero_tuple,
 )
 
 TIMES = jnp.array((0.0, 0.025, 0.05, 0.075, 0.1), dtype=jnp.float64)
@@ -61,7 +60,6 @@ def make_system(n_vars):
         values.append(mul(p(0), add(*terms)))
 
     ode_fn = make_tuple_callback("ode_fn", values)
-    zero_fn = make_tuple_callback("zero_ode_fn", zero_tuple(n_vars))
     jac_fn = make_matrix_callback(
         "jac_fn",
         [
@@ -76,20 +74,14 @@ def make_system(n_vars):
     return {
         "n_vars": n_vars,
         "ode_fn": ode_fn,
-        "explicit_ode_fn": zero_fn,
-        "implicit_ode_fn": ode_fn,
         "jac_fn": jac_fn,
-        "implicit_jac_fn": jac_fn,
         "y0": y0,
     }
 
 
 _DEFAULT = make_system(4)
 ode_fn = _DEFAULT["ode_fn"]
-explicit_ode_fn = _DEFAULT["explicit_ode_fn"]
-implicit_ode_fn = _DEFAULT["implicit_ode_fn"]
 jac_fn = _DEFAULT["jac_fn"]
-implicit_jac_fn = _DEFAULT["implicit_jac_fn"]
 
 
 def make_params(size, seed=42):

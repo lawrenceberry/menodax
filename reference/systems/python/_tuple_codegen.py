@@ -74,10 +74,6 @@ def make_matrix_callback(name: str, rows: Sequence[Sequence[Expr]]):
     )
 
 
-def zero_tuple(size: int) -> list[Expr]:
-    return [const(0.0) for _ in range(size)]
-
-
 def zero_matrix(n_rows: int, n_cols: int) -> list[list[Expr]]:
     return [[const(0.0) for _ in range(n_cols)] for _ in range(n_rows)]
 

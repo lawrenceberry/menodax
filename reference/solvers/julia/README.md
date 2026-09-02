@@ -10,15 +10,13 @@ here: https://github.com/SciML/DiffEqGPU.jl.
 
 `EnsembleGPUArray`
 uses the ordinary SciML solver implementations on GPU-backed arrays. It supports a
-wider range of algorithms, including `KenCarp5`, but stiff methods generally need the
-problem to provide analytical derivative helpers such as Jacobians and time
-derivatives.
+wider range of algorithms, but stiff methods generally need the problem to provide
+analytical derivative helpers such as Jacobians and time derivatives.
 
 `EnsembleGPUKernel`
 uses specialized GPU kernels for a smaller set of compatible solvers. It can be
 faster when the ODE function fits the kernel restrictions, but it requires out-of-place
-`StaticArrays`-style system definitions and it does not offer a direct `KenCarp5`
-kernel implementation in DiffEqGPU today.
+`StaticArrays`-style system definitions.
 
 In this test harness:
 
@@ -27,8 +25,6 @@ In this test harness:
 - `Rodas5` runs as `Rodas5()` on `EnsembleGPUArray` and can run as `GPURodas5P()` on
   `EnsembleGPUKernel` for a limited validated subset in this harness:
   `stiff_scalar` and `nn_reactions` with `n_vars=5`.
-- `KenCarp5` runs only on `EnsembleGPUArray`; the kernel case is skipped from Python with
-  an explicit reason.
 
 ## Environment
 

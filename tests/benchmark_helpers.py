@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from typing import Callable
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -28,44 +27,12 @@ class SystemCase:
     t_span: np.ndarray
     params: np.ndarray
     ode_fn: Callable
-    explicit_ode_fn: Callable
-    implicit_ode_fn: Callable
     jac_fn: Callable
-    implicit_jac_fn: Callable
     system_config: dict
     kwargs: dict
     linear_implicit: bool
     expected_shape: tuple[int, int, int]
     assert_solution: Callable[[np.ndarray, "SystemCase"], None]
-
-
-def zero_ode_fn(y, t, p):
-    return jnp.zeros_like(y)
-
-
-def zero3_ode_fn(y, t, p):
-    return (0.0, 0.0, 0.0)
-
-
-def zero4_ode_fn(y, t, p):
-    return (0.0, 0.0, 0.0, 0.0)
-
-
-def zero3_jac_fn(y, t, p):
-    return (
-        (0.0, 0.0, 0.0),
-        (0.0, 0.0, 0.0),
-        (0.0, 0.0, 0.0),
-    )
-
-
-def zero4_jac_fn(y, t, p):
-    return (
-        (0.0, 0.0, 0.0, 0.0),
-        (0.0, 0.0, 0.0, 0.0),
-        (0.0, 0.0, 0.0, 0.0),
-        (0.0, 0.0, 0.0, 0.0),
-    )
 
 
 def _bateman_case():
@@ -87,10 +54,7 @@ def _bateman_case():
         t_span=t_span,
         params=params,
         ode_fn=system["ode_fn"],
-        explicit_ode_fn=system["explicit_ode_fn"],
-        implicit_ode_fn=system["implicit_ode_fn"],
         jac_fn=system["jac_fn"],
-        implicit_jac_fn=system["implicit_jac_fn"],
         system_config={"n_vars": 4, "stiffness": 1e2},
         kwargs={"first_step": 1e-4, "rtol": 1e-5, "atol": 1e-7},
         linear_implicit=True,
@@ -100,7 +64,7 @@ def _bateman_case():
 
 
 def _brusselator_case():
-    explicit, implicit, ode, _, implicit_jac, jac = brusselator.make_system(4)
+    ode, _, jac = brusselator.make_system(4)
     y0, params = brusselator.make_scenario(4, ENSEMBLE_SIZE, divergence=0.0)
     t_span = np.asarray(brusselator.TIMES[:3], dtype=np.float64)
     return SystemCase(
@@ -109,10 +73,7 @@ def _brusselator_case():
         t_span=t_span,
         params=np.asarray(params, dtype=np.float64),
         ode_fn=ode,
-        explicit_ode_fn=explicit,
-        implicit_ode_fn=implicit,
         jac_fn=jac,
-        implicit_jac_fn=implicit_jac,
         system_config={"n_grid": 4},
         kwargs={"first_step": 1e-3, "rtol": 1e-5, "atol": 1e-7},
         linear_implicit=True,
@@ -137,10 +98,7 @@ def _heat_case():
         t_span=t_span,
         params=params,
         ode_fn=system["ode_fn"],
-        explicit_ode_fn=system["explicit_ode_fn"],
-        implicit_ode_fn=system["implicit_ode_fn"],
         jac_fn=system["jac_fn"],
-        implicit_jac_fn=system["implicit_jac_fn"],
         system_config={"n_vars": 4},
         kwargs={"first_step": 1e-4, "rtol": 1e-5, "atol": 1e-7},
         linear_implicit=True,
@@ -165,10 +123,7 @@ def _kaps_case():
         t_span=t_span,
         params=params,
         ode_fn=system["ode_fn"],
-        explicit_ode_fn=system["explicit_ode_fn"],
-        implicit_ode_fn=system["implicit_ode_fn"],
         jac_fn=system["jac_fn"],
-        implicit_jac_fn=system["implicit_jac_fn"],
         system_config={"n_pairs": 2, "epsilon_min": 1e-2},
         kwargs={"first_step": 1e-3, "rtol": 1e-5, "atol": 1e-7},
         linear_implicit=False,
@@ -186,10 +141,7 @@ def _lorenz_case():
         t_span=t_span,
         params=np.asarray(params, dtype=np.float64),
         ode_fn=lorenz.ode_fn,
-        explicit_ode_fn=lorenz.ode_fn,
-        implicit_ode_fn=zero3_ode_fn,
         jac_fn=lorenz.jac_fn,
-        implicit_jac_fn=zero3_jac_fn,
         system_config={},
         kwargs={"first_step": 1e-4, "rtol": 1e-5, "atol": 1e-7},
         linear_implicit=True,
@@ -207,10 +159,7 @@ def _robertson_case():
         t_span=t_span,
         params=np.asarray(params, dtype=np.float64),
         ode_fn=robertson.ode_fn,
-        explicit_ode_fn=robertson.ode_fn,
-        implicit_ode_fn=zero3_ode_fn,
         jac_fn=robertson.jac_fn,
-        implicit_jac_fn=zero3_jac_fn,
         system_config={},
         kwargs={"first_step": 1e-8, "rtol": 1e-5, "atol": 1e-7, "max_steps": 10000},
         linear_implicit=True,
@@ -231,10 +180,7 @@ def _vdp_case():
         t_span=t_span,
         params=np.asarray(params, dtype=np.float64),
         ode_fn=ode,
-        explicit_ode_fn=ode,
-        implicit_ode_fn=zero4_ode_fn,
         jac_fn=jac,
-        implicit_jac_fn=zero4_jac_fn,
         system_config={"n_osc": 2},
         kwargs={"first_step": 1e-3, "rtol": 1e-5, "atol": 1e-7},
         linear_implicit=True,

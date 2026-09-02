@@ -80,15 +80,12 @@ a JAX-compatible benchmark for the project's IMEX solvers. Specifics:
 - State layout is interleaved: ``y[2i] = u_i``, ``y[2i+1] = v_i`` for
   ``i in [0, n_grid)``. ``jnp.roll(u, ±1)`` realises the periodic 3-point
   stencil ``u_{i+1} - 2*u_i + u_{i-1}`` directly on the ``u`` slice.
-- The Laplacian Jacobian is linear and constant, so kencarp5 can run it
+- The Laplacian Jacobian is linear and constant, so a solver can run it
   with ``linear=True`` (one LU per stage, no Newton iteration).
 - ``params[0]`` is a per-trajectory reaction-rate **scale** that multiplies
-  both ``A`` and ``B`` (and only acts on the explicit reaction half).
-  Used by ``make_scenario(..., divergence=...)`` to spread step counts across
-  the ensemble.
-- The split is exact: ``ode_fn(y, t, p) == explicit_ode_fn(y, t, p) +
-  implicit_ode_fn(y, t, p)`` everywhere, so any non-split solver can use
-  ``ode_fn`` directly.
+  both ``A`` and ``B``, acting only on the reaction terms. Used by
+  ``make_scenario(..., divergence=...)`` to spread step counts across the
+  ensemble.
 
 Pattern-formation regime: at the default ``A = 1.0``, ``B = 3.0`` the
 homogeneous fixed point ``u* = A``, ``v* = B / A`` is unstable (Hopf), so
@@ -146,20 +143,17 @@ def make_system(
     alpha: float = ALPHA,
     length: float = L,
 ):
-    """Return ``(explicit_ode_fn, implicit_ode_fn, ode_fn, y0)`` closed over ``n_grid``.
+    """Return ``(ode_fn, y0, jac_fn)`` closed over ``n_grid``.
 
     ``p[0]`` is a reaction-rate scale that multiplies ``a`` and ``b``; it acts
-    only on the explicit (reaction) half. ``divergent`` scenarios perturb it.
+    only on the reaction terms. ``divergent`` scenarios perturb it.
     """
     dx = length / n_grid
     diff_coeff = alpha / (dx * dx)
     y0 = jnp.asarray(_equilibrium(n_grid, a, b), dtype=jnp.float64)
 
-    explicit_values = []
-    implicit_values = []
     ode_values = []
     n_vars = 2 * n_grid
-    implicit_jac_rows = zero_matrix(n_vars, n_vars)
     jac_rows = zero_matrix(n_vars, n_vars)
     for g in range(n_grid):
         left = (g - 1) % n_grid
@@ -186,8 +180,6 @@ def make_system(
             const(diff_coeff),
             add(y(v_left), mul(const(-2.0), v_y), y(v_right)),
         )
-        explicit_values.extend([exp_u, exp_v])
-        implicit_values.extend([imp_u, imp_v])
         ode_values.extend([add(exp_u, imp_u), add(exp_v, imp_v)])
 
         for row, self_col, left_col, right_col in (
@@ -198,9 +190,7 @@ def make_system(
             coeffs.setdefault(left_col, []).append(const(diff_coeff))
             coeffs.setdefault(right_col, []).append(const(diff_coeff))
             for col, terms in coeffs.items():
-                coeff = add(*terms)
-                implicit_jac_rows[row][col] = coeff
-                jac_rows[row][col] = coeff
+                jac_rows[row][col] = add(*terms)
 
         jac_rows[u][u] = add(
             jac_rows[u][u],
@@ -215,23 +205,13 @@ def make_system(
         )
         jac_rows[v][v] = sub(jac_rows[v][v], square(u_y))
 
-    explicit_ode_fn = make_tuple_callback("explicit_ode_fn", explicit_values)
-    implicit_ode_fn = make_tuple_callback("implicit_ode_fn", implicit_values)
     ode_fn = make_tuple_callback("ode_fn", ode_values)
-    implicit_jac_fn = make_matrix_callback("implicit_jac_fn", implicit_jac_rows)
     jac_fn = make_matrix_callback("jac_fn", jac_rows)
 
-    return explicit_ode_fn, implicit_ode_fn, ode_fn, y0, implicit_jac_fn, jac_fn
+    return ode_fn, y0, jac_fn
 
 
-(
-    explicit_ode_fn,
-    implicit_ode_fn,
-    ode_fn,
-    _,
-    implicit_jac_fn,
-    jac_fn,
-) = make_system(N_GRID)
+ode_fn, _, jac_fn = make_system(N_GRID)
 
 
 def make_params(size: int, seed: int = 42) -> np.ndarray:

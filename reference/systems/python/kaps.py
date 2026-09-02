@@ -45,10 +45,7 @@ def make_system(n_pairs, epsilon_min):
     y0 = jnp.array([1.0, 1.0] * n_pairs, dtype=jnp.float64)
 
     ode_values = []
-    explicit_values = []
-    implicit_values = []
     jac_rows = zero_matrix(n_vars, n_vars)
-    implicit_jac_rows = zero_matrix(n_vars, n_vars)
     for pair, eps in enumerate(np.asarray(epsilon)):
         base = 2 * pair
         inv_eps = 1.0 / float(eps)
@@ -67,18 +64,6 @@ def make_system(n_pairs, epsilon_min):
                 mul(p(0), sub(sub(y_base, y_next), y_next_sq)),
             ]
         )
-        explicit_values.extend(
-            [
-                mul(p(0), const(-2.0), y_base),
-                mul(p(0), sub(sub(y_base, y_next), y_next_sq)),
-            ]
-        )
-        implicit_values.extend(
-            [
-                mul(p(0), neg(const(inv_eps)), sub(y_base, y_next_sq)),
-                const(0.0),
-            ]
-        )
         jac_rows[base][base] = mul(p(0), neg(const(inv_eps + 2.0)))
         jac_rows[base][base + 1] = mul(p(0), const(2.0 * inv_eps), y_next)
         jac_rows[base + 1][base] = p(0)
@@ -86,34 +71,23 @@ def make_system(n_pairs, epsilon_min):
             p(0),
             add(const(-1.0), mul(const(-2.0), y_next)),
         )
-        implicit_jac_rows[base][base] = mul(neg(const(inv_eps)), p(0))
-        implicit_jac_rows[base][base + 1] = mul(const(2.0 * inv_eps), p(0), y_next)
 
     ode_fn = make_tuple_callback("ode_fn", ode_values)
-    explicit_ode_fn = make_tuple_callback("explicit_ode_fn", explicit_values)
-    implicit_ode_fn = make_tuple_callback("implicit_ode_fn", implicit_values)
     jac_fn = make_matrix_callback("jac_fn", jac_rows)
-    implicit_jac_fn = make_matrix_callback("implicit_jac_fn", implicit_jac_rows)
 
     return {
         "n_pairs": n_pairs,
         "epsilon_min": epsilon_min,
         "n_vars": n_vars,
         "ode_fn": ode_fn,
-        "explicit_ode_fn": explicit_ode_fn,
-        "implicit_ode_fn": implicit_ode_fn,
         "jac_fn": jac_fn,
-        "implicit_jac_fn": implicit_jac_fn,
         "y0": y0,
     }
 
 
 _DEFAULT = make_system(2, 1e-2)
 ode_fn = _DEFAULT["ode_fn"]
-explicit_ode_fn = _DEFAULT["explicit_ode_fn"]
-implicit_ode_fn = _DEFAULT["implicit_ode_fn"]
 jac_fn = _DEFAULT["jac_fn"]
-implicit_jac_fn = _DEFAULT["implicit_jac_fn"]
 
 
 def make_params(size, seed=42):
