@@ -845,7 +845,7 @@ dependencies = [
     { name = "numba" },
 ]
 wheels = [
-    { filename = "numba_enzyme-0.1.3-cp313-cp313-linux_x86_64.whl", hash = "sha256:fbe2aca749578e3abf987d63a24b6a477a6e307f98ba0b32f3bebc6d737bb720" },
+    { filename = "numba_enzyme-0.1.3-cp313-cp313-linux_x86_64.whl", hash = "sha256:97d669f5133deb1bab4e8903365b75cf287936333c83327c108a2263e01bb027" },
 ]
 
 [package.optional-dependencies]

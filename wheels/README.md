@@ -50,13 +50,13 @@ it afterwards if you do not want it in `git status` there.
 
 The checkout this wheel is built from carries changes that are not upstream:
 
-- **`jacfwd`** — forward-mode Jacobian of a *vector-valued* primal, one that
+- **`jacfwd` / `jacfwd_column`** — forward-mode Jacobian of a *vector-valued* primal, one that
   writes its outputs through a leading array argument. `jvp` differentiates a
   scalar-output primal, so a sweep yields a single Jacobian entry; a sweep of a
-  vector-valued one yields a whole column. It emits the whole matrix by
-  default, or a single column chosen by a run-time index with `column=True`.
-  The solver uses the column shape: the whole matrix would have to live in
-  per-thread local memory. See `solvers/_enzyme_jacobian.py`.
+  vector-valued one yields a whole column. `jacfwd` fills the whole matrix,
+  one sweep per column; `jacfwd_column` fills a single column chosen by a
+  run-time index. The solver uses the latter: the whole matrix would have to
+  live in per-thread local memory. See `solvers/_enzyme_jacobian.py`.
 - **LTO IR instead of PTX** — the derivative is emitted as NVVM LTO IR, which
   makes numba-cuda-mlir compile the calling kernel to LTO IR too, so nvJitLink
   inlines the derivative rather than leaving an opaque call carrying a

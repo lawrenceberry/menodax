@@ -95,10 +95,10 @@ MLIR cannot lower a tuple return across an `abi="c"` boundary — and
 forward-differentiates it with [numba-enzyme][ne]. Seeding a unit vector gives a
 whole Jacobian column per sweep; seeding the time argument gives the whole
 `df/dt`, so `n_vars + 1` sweeps supply both matrices the kernel needs.
-`jacfwd` also has a whole-matrix shape, which the kernel does not use: it would
-put `n_vars ** 2` doubles in per-thread local memory, where asking for one
-column at a time keeps the working set at `O(n_vars)` and lets each column fold
-straight into the shared LU buffer.
+numba-enzyme also exposes `jacfwd`, which fills the whole matrix; the kernel
+uses `jacfwd_column` because that matrix would put `n_vars ** 2` doubles in
+per-thread local memory, where one column at a time keeps the working set at
+`O(n_vars)` and lets each column fold straight into the shared LU buffer.
 
 Forward mode is what makes a sweep worth a whole column: a sweep of a
 scalar-output primal yields one Jacobian *entry*. Reverse mode reaches a whole
