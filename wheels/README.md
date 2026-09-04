@@ -57,6 +57,11 @@ The checkout this wheel is built from carries changes that are not upstream:
   seed is built inside the derivative, so the caller passes an integer rather
   than a tangent vector. It is what the solver uses. See
   `solvers/_enzyme_jacobian.py`.
+- **LTO IR instead of PTX** — the derivative is emitted as NVVM LTO IR, which
+  makes numba-cuda-mlir compile the calling kernel to LTO IR too, so nvJitLink
+  inlines the derivative rather than leaving an opaque call carrying a
+  parameter per primal argument. That inlining is what lets the caller's column
+  buffers live in registers instead of local memory.
 - **selective entry points** — `synthesise_cuda`/`build_cuda`/`differentiate_cuda`
   take a `modes` argument, and each public entry point requests only its own.
   Every emitted entry point carries its own Enzyme marker call, so building

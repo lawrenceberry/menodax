@@ -118,6 +118,10 @@ Three things to know when touching this:
   closes over. That is safe because numba-enzyme keys its derivative cache on
   the primal's lowered IR and gives the primal internal linkage; both are local
   changes to that package, so check `wheels/README.md` before upgrading it.
+- The derivative is linked as NVVM LTO IR, not PTX, so nvJitLink inlines it
+  into the kernel. That is what keeps the per-column buffers in registers —
+  linked as PTX they cost `2 * n_vars` doubles of local memory per thread, and
+  the solve is 10-20% slower.
 
 The wheel this depends on is not on PyPI — see `wheels/README.md`, which lists
 every local change made to numba-enzyme.

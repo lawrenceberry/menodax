@@ -28,6 +28,11 @@ differentiations against forward's one apiece, and ``O(n_vars ** 2)`` generated
 device source against ``O(n_vars)``: a cold first solve at 96 state variables
 took 171 s that way against 49 s this way, and the gap widens with dimension.
 
+numba-enzyme emits the derivative as NVVM LTO IR, so nvJitLink inlines it into
+the kernel rather than leaving a call with a parameter per primal argument.
+That is why ``out`` and ``dout`` cost no local memory: inlined, they promote to
+registers.
+
 The parameter partials are never seeded, so they cost nothing. Seeding
 direction ``n_vars + 1 + j`` instead would give ``df/dp_j`` as a whole column,
 which is what a forward sensitivity analysis of the trajectory would need.
