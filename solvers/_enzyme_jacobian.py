@@ -16,6 +16,14 @@ gives the whole ``df/dt`` vector, so ``n_vars + 1`` sweeps supply both matrices
 the kernel needs. The seed is built inside the derivative from a column index,
 so nothing here materialises a tangent vector.
 
+``jacfwd`` also has a shape returning the whole ``n_vars`` by ``n_vars + 1 +
+n_params`` matrix at once. The kernel does not use it: the matrix would have to
+live in per-thread local memory, which costs nothing below about 16 state
+variables and then jumps to ``n ** 2`` doubles a thread. Asking for one column
+at a time keeps the working set at ``O(n_vars)`` by construction, and lets each
+column be folded into the shared LU buffer as it arrives instead of being
+staged.
+
 Forward mode is what makes one sweep worth a whole column. A sweep of a
 *scalar*-output primal — the shape Enzyme's CUDA backend otherwise requires —
 yields a single directional derivative, so it would take one sweep per Jacobian
@@ -43,7 +51,7 @@ from __future__ import annotations
 import functools
 
 from numba_cuda_mlir import cuda, types
-from numba_enzyme import jacfwd_column
+from numba_enzyme import jacfwd
 
 from solvers._numba_common import as_cuda_device
 
@@ -101,7 +109,9 @@ def make_jacobian_column(ode_fn, n_vars: int, n_params: int):
     )
     primal = cuda.jit(device=True)(namespace["_ode_vector"])
 
-    column_namespace = {"_jacfwd": jacfwd_column(primal, signature=signature)}
+    column_namespace = {
+        "_jacfwd": jacfwd(primal, signature=signature, column=True)
+    }
     call_args = ", ".join(
         ["out", "dout"]
         + [f"y[{j}]" for j in range(n_vars)]
