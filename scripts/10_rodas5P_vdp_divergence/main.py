@@ -53,7 +53,7 @@ _SOLVER_KWARGS = {"first_step": 1e-4, "rtol": 1e-6, "atol": 1e-8}
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _CACHE_PATH = _SCRIPT_DIR / "results.json"
 
-_ODE_FN, _, _JAC_FN = vdp.make_system(_N_OSC)
+_ODE_FN, _, _ = vdp.make_system(_N_OSC)
 
 _CSV_FIELDS = (
     "gpu",
@@ -110,7 +110,6 @@ def solve_with_stats(solver: Case, y0: np.ndarray, params: np.ndarray):
     del solver
     return rodas5Pnumba_solve(
         _ODE_FN,
-        _JAC_FN,
         y0=y0,
         t_span=_T_SPAN,
         params=params,

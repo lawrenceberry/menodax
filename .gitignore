@@ -3,7 +3,7 @@ __pycache__/
 *.py[oc]
 build/
 dist/
-wheels/
+wheels/*.whl
 *.egg-info
 
 # Virtual environments

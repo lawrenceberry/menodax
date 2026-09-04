@@ -186,14 +186,14 @@ def igm_ode(y, u, params):
 # CUDA-device callbacks for the modax kernel solver
 # ---------------------------------------------------------------------------
 #
-# ``rodas5P`` compiles its right-hand side, Jacobian and time derivative
-# with ``numba_cuda_mlir``, so the block below mirrors ``igm_ode`` using ``math``
-# scalars and fixed-size tuples instead of ``jnp`` arrays.  The clip and
-# maximum guards are reproduced exactly, including their zero derivatives
-# outside the active range.  Device code cannot call a plain Python helper, so
-# the shared background/state block is repeated inline in each callback;
-# ``tests/test_examples.py`` checks all three against ``igm_ode`` and its JAX
-# derivatives so the duplication cannot drift silently.
+# ``rodas5P`` compiles its right-hand side with ``numba_cuda_mlir``, so the
+# block below mirrors ``igm_ode`` using ``math`` scalars and fixed-size tuples
+# instead of ``jnp`` arrays.  The clip and maximum guards are reproduced
+# exactly, including their zero derivatives outside the active range, which
+# matters because the solver differentiates this callback with Enzyme to get
+# the Jacobian and ``df/du`` rather than being handed them.
+# ``tests/test_examples.py`` checks it against ``igm_ode`` so the duplication
+# cannot drift silently.
 #
 # Background terms depend on u only through z = (1+Z_INITIAL) exp(-u) - 1, so
 # dz/du = -(1+z) and every (1+z)^n factor contributes -n times itself per unit
@@ -252,180 +252,6 @@ def igm_ode_device(y, u, p):
     )
 
 
-def igm_jac_device(y, u, p):
-    """Analytic df/dy as a 3x3 nested tuple.
-
-    The background carries no state dependence, so the only couplings are
-    T_k -> the thermal and recombination terms and x_e -> Compton heating; Q
-    decouples entirely.  Physical-space derivatives are converted to
-    state-space ones by the chain factors of the log/logit encoding, which are
-    zero wherever the corresponding clip is saturated.
-    """
-    log10_f_star = p[0]
-    log10_f_X = p[1]
-    log10_tvir = p[2]
-
-    z = (1.0 + Z_INITIAL) * math.exp(-u) - 1.0
-    opz = 1.0 + z
-    H = H0_S * math.sqrt(OMEGA_M * opz**3 + OMEGA_L)
-    T_gamma = T_CMB0 * opz
-
-    f_star = 10.0**log10_f_star
-    f_X = 10.0**log10_f_X
-    turn_on_z = 31.0 - 7.0 * (log10_tvir - 4.0)
-    turn_on = 1.0 / (1.0 + math.exp(-(turn_on_z - z) / 2.0))
-    decline = 1.0 / (1.0 + math.exp(-(z - 5.8) / 0.7))
-    growth = (opz / 20.0) ** -1.7
-    source = 10.0 * f_star * turn_on * decline * growth
-
-    log_Tk = y[0]
-    clipped = min(max(log_Tk, _LOG_TK_MIN), _LOG_TK_MAX)
-    T_k = math.exp(clipped)
-    dTk = T_k if _LOG_TK_MIN < log_Tk < _LOG_TK_MAX else 0.0
-    x_e = 1.0 / (1.0 + math.exp(-min(max(y[1], -40.0), 40.0)))
-    dxe = x_e * (1.0 - x_e) if -40.0 < y[1] < 40.0 else 0.0
-    Q = 1.0 / (1.0 + math.exp(-min(max(y[2], -40.0), 40.0)))
-    dQd = Q * (1.0 - Q) if -40.0 < y[2] < 40.0 else 0.0
-
-    compton_rate = 8.0e-20 * opz**4 * x_e / (1.0 + X_HE + x_e)
-    dTdt = (
-        -2.0 * H * T_k
-        + compton_rate * (T_gamma - T_k)
-        + 3.5e-16 * f_X * source
-        + 1.2e-17 * (f_star / 0.01) * source
-    )
-    n_h = N_H0_CM3 * opz**3
-    alpha_b = 2.6e-13 * (max(T_k, 10.0) / 1.0e4) ** -0.7
-    dxedt = -alpha_b * n_h * x_e * x_e + 1.8e-17 * f_X * source * (1.0 - x_e)
-    recomb_factor = (opz / 8.0) ** 3
-    dQdt = (
-        1.1e-16 * source * (f_star / 0.01) * (1.0 - Q) - 2.0e-17 * recomb_factor * Q * Q
-    )
-
-    w_x = x_e * (1.0 - x_e)
-    w_q = Q * (1.0 - Q)
-    den_T = H * T_k
-    den_x = H * max(w_x, LOGIT_EPS)
-    den_q = H * max(w_q, LOGIT_EPS)
-
-    d_compton_dxe = 8.0e-20 * opz**4 * (1.0 + X_HE) / (1.0 + X_HE + x_e) ** 2
-    f0 = dTdt / den_T
-    # f0 = dTdt/(H*T_k), so d/dT_k also picks up the -f0/T_k denominator term.
-    df0_dTk = (-2.0 * H - compton_rate) / den_T - f0 / T_k
-    df0_dxe = d_compton_dxe * (T_gamma - T_k) / den_T
-
-    # alpha_b freezes below T_k = 10, killing the only T_k path into dxedt.
-    dalpha_dTk = -0.7 * alpha_b / T_k if T_k > 10.0 else 0.0
-    f1 = dxedt / den_x
-    df1_dTk = -dalpha_dTk * n_h * x_e * x_e / den_x
-    df1_dxe = (-2.0 * alpha_b * n_h * x_e - 1.8e-17 * f_X * source) / den_x
-    if w_x > LOGIT_EPS:
-        # The denominator itself depends on x_e once the guard is inactive.
-        df1_dxe -= f1 * (1.0 - 2.0 * x_e) / w_x
-
-    f2 = dQdt / den_q
-    df2_dQ = (
-        -1.1e-16 * source * (f_star / 0.01) - 2.0 * 2.0e-17 * recomb_factor * Q
-    ) / den_q
-    if w_q > LOGIT_EPS:
-        df2_dQ -= f2 * (1.0 - 2.0 * Q) / w_q
-
-    return (
-        (df0_dTk * dTk, df0_dxe * dxe, 0.0),
-        (df1_dTk * dTk, df1_dxe * dxe, 0.0),
-        (0.0, 0.0, df2_dQ * dQd),
-    )
-
-
-def igm_time_jac_device(y, u, p):
-    """Analytic df/du, needed for Rodas5P to hold fifth order here.
-
-    This is the dominant correction: the state is frozen and only H, T_gamma,
-    n_h, the Compton prefactor, ``source`` and the recombination factor vary
-    with u.  Each ``(1+z)^n`` factor contributes ``-n`` times itself.
-    """
-    log10_f_star = p[0]
-    log10_f_X = p[1]
-    log10_tvir = p[2]
-
-    z = (1.0 + Z_INITIAL) * math.exp(-u) - 1.0
-    opz = 1.0 + z
-    H = H0_S * math.sqrt(OMEGA_M * opz**3 + OMEGA_L)
-    # dH/dz = 3*OMEGA_M*(1+z)^2 * H0_S^2 / (2H), then dz/du = -(1+z).
-    dH_du = -(3.0 * OMEGA_M * opz**3 * H0_S * H0_S) / (2.0 * H)
-    T_gamma = T_CMB0 * opz
-    dT_gamma_du = -T_gamma
-
-    f_star = 10.0**log10_f_star
-    f_X = 10.0**log10_f_X
-    turn_on_z = 31.0 - 7.0 * (log10_tvir - 4.0)
-    turn_on = 1.0 / (1.0 + math.exp(-(turn_on_z - z) / 2.0))
-    decline = 1.0 / (1.0 + math.exp(-(z - 5.8) / 0.7))
-    growth = (opz / 20.0) ** -1.7
-    source = 10.0 * f_star * turn_on * decline * growth
-    dsource_dz = (
-        10.0
-        * f_star
-        * (
-            -0.5 * turn_on * (1.0 - turn_on) * decline * growth
-            + turn_on * decline * (1.0 - decline) / 0.7 * growth
-            + turn_on * decline * (-1.7 * growth / opz)
-        )
-    )
-    dsource_du = -opz * dsource_dz
-
-    clipped = min(max(y[0], _LOG_TK_MIN), _LOG_TK_MAX)
-    T_k = math.exp(clipped)
-    x_e = 1.0 / (1.0 + math.exp(-min(max(y[1], -40.0), 40.0)))
-    Q = 1.0 / (1.0 + math.exp(-min(max(y[2], -40.0), 40.0)))
-
-    compton_rate = 8.0e-20 * opz**4 * x_e / (1.0 + X_HE + x_e)
-    dTdt = (
-        -2.0 * H * T_k
-        + compton_rate * (T_gamma - T_k)
-        + 3.5e-16 * f_X * source
-        + 1.2e-17 * (f_star / 0.01) * source
-    )
-    n_h = N_H0_CM3 * opz**3
-    alpha_b = 2.6e-13 * (max(T_k, 10.0) / 1.0e4) ** -0.7
-    dxedt = -alpha_b * n_h * x_e * x_e + 1.8e-17 * f_X * source * (1.0 - x_e)
-    recomb_factor = (opz / 8.0) ** 3
-    dQdt = (
-        1.1e-16 * source * (f_star / 0.01) * (1.0 - Q) - 2.0e-17 * recomb_factor * Q * Q
-    )
-
-    den_T = H * T_k
-    den_x = H * max(x_e * (1.0 - x_e), LOGIT_EPS)
-    den_q = H * max(Q * (1.0 - Q), LOGIT_EPS)
-    dlogH_du = dH_du / H
-
-    # compton_rate ~ (1+z)^4 -> d/du = -4 * compton_rate.
-    dTdt_du = (
-        -2.0 * dH_du * T_k
-        + (-4.0 * compton_rate) * (T_gamma - T_k)
-        + compton_rate * dT_gamma_du
-        + 3.5e-16 * f_X * dsource_du
-        + 1.2e-17 * (f_star / 0.01) * dsource_du
-    )
-    # n_h ~ (1+z)^3 -> d/du = -3 * n_h.
-    dxedt_du = 3.0 * alpha_b * n_h * x_e * x_e + 1.8e-17 * f_X * dsource_du * (
-        1.0 - x_e
-    )
-    # recomb_factor ~ (1+z)^3 -> d/du = -3 * recomb_factor.
-    dQdt_du = (
-        1.1e-16 * dsource_du * (f_star / 0.01) * (1.0 - Q)
-        + 3.0 * 2.0e-17 * recomb_factor * Q * Q
-    )
-
-    # f_i = rate_i / (H * scale_i) with the scale frozen, so the denominator
-    # contributes -f_i * dlogH/du.
-    return (
-        dTdt_du / den_T - (dTdt / den_T) * dlogH_du,
-        dxedt_du / den_x - (dxedt / den_x) * dlogH_du,
-        dQdt_du / den_q - (dQdt / den_q) * dlogH_du,
-    )
-
-
 def sample_parameters(key, n_samples=N_SAMPLES):
     """Draw prior samples [log10_f_star, log10_f_X, log10_Tvir]."""
     unit = jax.random.uniform(key, (n_samples, 3), dtype=jnp.float64)
@@ -458,11 +284,9 @@ def make_solver(backend):
         # ``solve(f, y0, ts, p)`` signature.
         return lambda f, y0, ts, p: rodas5P_solve(
             igm_ode_device,
-            igm_jac_device,
             y0,
             ts,
             p,
-            time_jac_fn=igm_time_jac_device,
             lu_precision="fp32",
             rtol=SOLVER_RTOL,
             atol=SOLVER_ATOL,
@@ -508,11 +332,9 @@ def solve_histories(params, n_save=N_SAVE, backend="modax"):
     if backend == "modax":
         return rodas5P_solve(
             igm_ode_device,
-            igm_jac_device,
             initial_state(),
             u_span,
             params,
-            time_jac_fn=igm_time_jac_device,
             lu_precision="fp32",
             rtol=SOLVER_RTOL,
             atol=SOLVER_ATOL,

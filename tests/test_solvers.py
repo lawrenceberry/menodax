@@ -51,7 +51,6 @@ def test_rodas5P_reference_system(benchmark, case, lu_precision):
         benchmark,
         lambda: rodas5Pnumba_solve(
             case.ode_fn,
-            case.jac_fn,
             case.y0,
             case.t_span,
             case.params,

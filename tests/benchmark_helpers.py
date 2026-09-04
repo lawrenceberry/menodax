@@ -27,6 +27,9 @@ class SystemCase:
     t_span: np.ndarray
     params: np.ndarray
     ode_fn: Callable
+    # No solver consumes this any more -- rodas5P derives its Jacobian from
+    # ode_fn with Enzyme. It stays as the reference that
+    # tests/test_enzyme_jacobian.py checks that derivation against.
     jac_fn: Callable
     system_config: dict
     kwargs: dict

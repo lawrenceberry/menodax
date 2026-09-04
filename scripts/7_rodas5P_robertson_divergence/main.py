@@ -150,7 +150,6 @@ def solve_with_stats(solver: Case, y0: np.ndarray, params: np.ndarray):
     del solver
     return rodas5Pnumba_solve(
         robertson.ode_fn,
-        robertson.jac_fn,
         y0=y0,
         t_span=_T_SPAN,
         params=params,
@@ -191,7 +190,6 @@ def time_solve(
     if solver.key.startswith("modax rodas5P kernel"):
         prepared = rodas5Pnumba_prepare_solve(
             robertson.ode_fn,
-            robertson.jac_fn,
             y0=y0,
             t_span=_T_SPAN,
             params=params,
