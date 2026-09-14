@@ -57,6 +57,15 @@ The checkout this wheel is built from carries changes that are not upstream:
   one sweep per column; `jacfwd_column` fills a single column chosen by a
   run-time index. The solver uses the latter: the whole matrix would have to
   live in per-thread local memory. See `solvers/_enzyme_jacobian.py`.
+- **reverse-mode vector APIs** — `vjp`, `jacrev` and `jacrev_row`, the
+  reverse counterparts of `jvp`/`jacfwd`/`jacfwd_column`. modax does not use
+  them; see `solvers/_enzyme_jacobian.py` for why the solver is forward-mode.
+- **optional `signature`** — CUDA derivatives now specialise lazily at each
+  call site; passing `signature` only constrains that. A call of more than 30
+  positional arguments, which CPython compiles as a star call that numba's
+  inliner rejects, is compiled as a separate function instead of inlined, and
+  nvJitLink's LTO recovers the cost: modax's derivative call at `n_vars=48`
+  carries 53 arguments and solves no slower than the earlier raw extern.
 - **LTO IR instead of PTX** — the derivative is emitted as NVVM LTO IR, which
   makes numba-cuda-mlir compile the calling kernel to LTO IR too, so nvJitLink
   inlines the derivative rather than leaving an opaque call carrying a
