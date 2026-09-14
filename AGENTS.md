@@ -47,8 +47,6 @@ Shared support modules:
 
 - **`_numba_common.py`** — host-side helpers: input normalisation, initial step
   selection, error weights, and the `cuda.jit` coercion for user callbacks.
-- **`_enzyme_jacobian.py`** — differentiates `ode_fn` with numba-enzyme so the
-  implicit solvers need no hand-written Jacobian. See "Derived Jacobians".
 - **`_jax_numba_custom_call.py`** — the XLA FFI shim. Compiles a raw-pointer
   launcher, registers it as an FFI target, and exposes `ffi_call`/`ffi_abi_call`
   so a numba kernel becomes a JAX primitive.
@@ -89,8 +87,8 @@ Callbacks are compiled with `numba_cuda_mlir`, which constrains them:
 
 ### Derived Jacobians
 
-`rodas5P` takes no `jac_fn`. `_enzyme_jacobian.py` forward-differentiates
-`ode_fn` with [numba-enzyme][ne], as it stands and with no adapter around it: a
+`rodas5P` takes no `jac_fn`. `_make_kernel` forward-differentiates `ode_fn`
+with [numba-enzyme][ne], as it stands and with no adapter around it: a
 callback of the documented shape already reaches Enzyme as a function of flat
 scalars returning a struct, because numba-cuda-mlir flattens a tuple argument
 into one scalar parameter per element and lowers a tuple return to a struct
@@ -118,7 +116,8 @@ Things to know when touching this:
   `y[i]` and `p[i]` rows it already passes to `ode_fn`, and the call is five
   arguments at any `n_vars`; numba-enzyme's entry point loads the scalars out
   of those rows before handing them to Enzyme. There is no generated Python
-  here at all — `make_jacobian_column` is a signature and one call.
+  here at all, and no module either: the derivative is a signature and one
+  `jacfwd_column` call inside `_make_kernel`.
 - The column index runs over the primal's **flattened** arguments, which is why
   `df/dt` is free: `t` is the argument after the state. It is a run-time
   argument and the unit seed is built inside the derivative, so this is one

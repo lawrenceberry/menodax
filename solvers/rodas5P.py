@@ -11,9 +11,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from numba_cuda_mlir import cuda, types
+from numba_enzyme import jacfwd_column
 from nvmath.device import LUPivotSolver
 
-from solvers._enzyme_jacobian import make_jacobian_column
 from solvers._jax_common import (
     make_custom_vmap_solver,
     normalize_y0_params,
@@ -29,6 +29,7 @@ from solvers._jax_numba_custom_call import (
 from solvers._numba_common import (
     NumbaWorkspace,
     PreparedNumbaSolve,
+    as_cuda_device,
     as_launch_block_dim,
     block_threads_x,
     build_error_weights,
@@ -203,7 +204,26 @@ def _make_kernel(
         n_vars, precision=lu_dtype, batches_per_block=batches_per_block
     )
     ode_write = make_cuda_striped_vector_writer(ode_fn, n_vars)
-    jacobian_column = make_jacobian_column(ode_fn, n_vars, n_params)
+
+    # df/dy and df/dt, forward-differentiated out of ode_fn by Enzyme. The
+    # callback is the primal as written: numba-cuda-mlir flattens its tuple
+    # arguments into one scalar parameter per element and lowers its tuple
+    # return to a struct returned by value, which is the flat-scalar shape
+    # Enzyme differentiates. The signature is what says so -- the kernel's own
+    # calls specialise ode_fn for array arguments instead -- and it is required,
+    # since an array cannot say how long the tuple it stands for is. Each sweep
+    # seeds one flattened argument, so the call below reads a column of df/dy
+    # for col < n_vars and df/dt at col == n_vars, where t sits. See
+    # "Derived Jacobians" in CLAUDE.md for why this is forward mode, why it is
+    # one column at a time, and what it costs.
+    jacobian_column = jacfwd_column(
+        as_cuda_device(ode_fn),
+        signature=types.UniTuple(types.float64, n_vars)(
+            types.UniTuple(types.float64, n_vars),
+            types.float64,
+            types.UniTuple(types.float64, n_params),
+        ),
+    )
 
     @cuda.jit(device=True)
     def assemble_lu(y, t, p, lu_buf, a_off, dtgamma_inv, dT, i, lane, stride):
@@ -957,8 +977,7 @@ def solve(
     Only the right-hand side is supplied. The Jacobian ``df/dy``, and the
     partial time derivative ``df/dt`` that a non-autonomous system needs to
     keep fifth-order accuracy, are both differentiated out of ``ode_fn`` with
-    Enzyme (see :mod:`solvers._enzyme_jacobian`), so a non-autonomous problem
-    needs nothing extra from the caller.
+    Enzyme, so a non-autonomous problem needs nothing extra from the caller.
 
     ``lu_precision`` (``"fp32"`` or ``"fp64"``) selects the precision of the
     per-step LU factorisation and triangular solves. The state, right-hand

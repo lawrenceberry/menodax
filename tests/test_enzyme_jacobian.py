@@ -1,11 +1,13 @@
 """The Enzyme-derived Jacobian must match the analytic one, system by system.
 
-``rodas5P`` no longer takes a ``jac_fn``: it differentiates the right-hand side
-with Enzyme instead (see :mod:`solvers._enzyme_jacobian`). The reference systems
-still carry hand-written Jacobians, which makes them the natural check on that
-derivation — and on the ``df/dt`` the solver takes from the same sweeps, which
-no reference system supplies but which is zero for all of them, every one being
-autonomous.
+``rodas5P`` no longer takes a ``jac_fn``: it forward-differentiates the
+right-hand side with Enzyme instead. The reference systems still carry
+hand-written Jacobians, which makes them the natural check on that derivation —
+and on the ``df/dt`` the solver takes from the same sweeps, which no reference
+system supplies but which is zero for all of them, every one being autonomous.
+
+The derivative is built here exactly as ``rodas5P._make_kernel`` builds it, so
+this pins the call shape the kernel depends on as well as the values.
 
 """
 
@@ -26,14 +28,22 @@ def evaluate_derivatives(ode_fn, y, t, params):
     are ``(n, n_vars, n_vars)`` and ``(n, n_vars)``.
     """
     from numba_cuda_mlir import types
+    from numba_enzyme import jacfwd_column
 
-    from solvers._enzyme_jacobian import make_jacobian_column
+    from solvers._numba_common import as_cuda_device
 
     y = np.ascontiguousarray(y, dtype=np.float64)
     params = np.ascontiguousarray(params, dtype=np.float64)
     n, n_vars = y.shape
     n_params = params.shape[1]
-    jacobian_column = make_jacobian_column(ode_fn, n_vars, n_params)
+    jacobian_column = jacfwd_column(
+        as_cuda_device(ode_fn),
+        signature=types.UniTuple(types.float64, n_vars)(
+            types.UniTuple(types.float64, n_vars),
+            types.float64,
+            types.UniTuple(types.float64, n_params),
+        ),
+    )
 
     @cuda.jit
     def kernel(y, t, p, jacobian, time_jacobian):
