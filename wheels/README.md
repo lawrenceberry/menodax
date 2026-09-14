@@ -56,6 +56,17 @@ The checkout this wheel is built from carries changes that are not upstream:
   differentiate an internal `sum_k w_k * f_k(x)` with the weights inactive,
   since Enzyme rejects an aggregate differential return. Nothing is staged
   through an output array, so the solver hands the derivative its own callback.
+- **tuple *arguments*** — a primal may also take homogeneous tuples, and every
+  derivative call then mirrors its argument list, each tuple supplied as a
+  contiguous array whose elements the entry point loads before the Enzyme
+  marker. That is what lets the solver differentiate `ode_fn` as written, with
+  no adapter, and call the result with a fixed five arguments at any `n_vars`.
+  Such a primal needs an explicit `signature`, since an array cannot say how
+  long the tuple it stands for is.
+- **qualname-mangled primal symbol** — `lower_cuda` derives the primal's symbol
+  the way numba-cuda-mlir does, from `__qualname__` rather than `__name__`.
+  They coincide only for module-level functions, so a nested or generated
+  callback was previously looked up under a symbol the module never defined.
 - **`jacfwd` / `jacfwd_column`** — forward-mode Jacobian of a tuple-returning
   primal. `jvp` differentiates a scalar-output primal, so a sweep yields a
   single Jacobian entry; a sweep of a multi-output one yields a whole column.

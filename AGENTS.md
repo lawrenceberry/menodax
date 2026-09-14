@@ -89,14 +89,14 @@ Callbacks are compiled with `numba_cuda_mlir`, which constrains them:
 
 ### Derived Jacobians
 
-`rodas5P` takes no `jac_fn`. `_enzyme_jacobian.py` compiles `ode_fn` once into a
-flat-argument adapter that returns the callback's tuple unchanged, and
-forward-differentiates it with [numba-enzyme][ne]. Enzyme needs flat scalar
-arguments, but a tuple return is fine: numba-cuda-mlir lowers it to an LLVM
-struct returned by value, which Enzyme differentiates directly, so nothing has
-to be staged through an output array. Seeding a unit vector gives a
-whole Jacobian column per sweep; seeding the time argument gives the whole
-`df/dt`, so `n_vars + 1` sweeps supply both matrices the kernel needs.
+`rodas5P` takes no `jac_fn`. `_enzyme_jacobian.py` forward-differentiates
+`ode_fn` with [numba-enzyme][ne], as it stands and with no adapter around it: a
+callback of the documented shape already reaches Enzyme as a function of flat
+scalars returning a struct, because numba-cuda-mlir flattens a tuple argument
+into one scalar parameter per element and lowers a tuple return to a struct
+returned by value. Seeding a unit vector gives a whole Jacobian column per
+sweep; seeding the time argument gives the whole `df/dt`, so `n_vars + 1`
+sweeps supply both matrices the kernel needs.
 numba-enzyme also exposes `jacfwd`, which fills the whole matrix; the kernel
 uses `jacfwd_column` because that matrix would put `n_vars ** 2` doubles in
 per-thread local memory, where one column at a time keeps the working set at
@@ -113,29 +113,35 @@ device source against `O(n_vars)`. A cold first solve at 96 state variables took
 
 Things to know when touching this:
 
-- Enzyme's CUDA backend takes **flat scalar arguments**, so the state and
-  parameter tuples are rebuilt inside the generated adapter's body. Only the
-  column buffer crosses the call; the adapter's tuple return needs no output
-  array of its own.
-- The column index is a run-time argument and the unit seed is built inside the
-  derivative, so this stays one call site and one Enzyme build at any `n_vars`,
-  and nothing here materialises a tangent vector.
-- Every generated primal has identical source and differs only in what it
-  closes over. That is safe because numba-enzyme keys its derivative cache on
-  the primal's lowered IR and gives the primal internal linkage; both are local
-  changes to that package, so check `wheels/README.md` before upgrading it.
+- The derivative's call shape **mirrors the primal's argument list**, each
+  tuple argument supplied as a contiguous array. So the kernel passes the same
+  `y[i]` and `p[i]` rows it already passes to `ode_fn`, and the call is five
+  arguments at any `n_vars`; numba-enzyme's entry point loads the scalars out
+  of those rows before handing them to Enzyme. There is no generated Python
+  here at all — `make_jacobian_column` is a signature and one call.
+- The column index runs over the primal's **flattened** arguments, which is why
+  `df/dt` is free: `t` is the argument after the state. It is a run-time
+  argument and the unit seed is built inside the derivative, so this is one
+  Enzyme build at any `n_vars`, and nothing materialises a tangent vector.
+- numba-enzyme keys its derivative cache on the primal's lowered IR and gives
+  the primal internal linkage, so two ODEs that differ only in what they close
+  over cannot share a derivative. Both are local changes to that package —
+  check `wheels/README.md` before upgrading it.
 - The derivative is linked as NVVM LTO IR, not PTX, so nvJitLink inlines it
   into the kernel. That is what keeps the per-column buffers in registers —
   linked as PTX they cost `2 * n_vars` doubles of local memory per thread, and
   the solve is 10-20% slower.
-- The derivative is built eagerly with `differentiate_cuda` and called through
-  `externals["jacfwd_column"]`, not through the public `jacfwd_column`. Both
-  reach the same Enzyme entry point, but the public one goes via an overload
-  placeholder that resolves to a wrapper, and at `n_vars=48` the call is a star
-  call that numba-cuda-mlir will not inline — so the wrapper survives into the
-  kernel under a name built from an `id()`, the device code differs in every
-  process, and the CUDA JIT cache never hits. Warm compile at `n_vars=48` is
-  10.1 s this way against 13.0 s through the placeholder.
+- An explicit signature is **required**, and not only because an array cannot
+  say how long the tuple it stands for is. The callbacks are duck-typed on
+  indexing, so the kernel's own calls specialise `ode_fn` for array arguments
+  (see `make_cuda_striped_vector_writer`); only the signature says the
+  derivative wants the tuple form.
+- The five-argument call inlines, so the kernel's PTX is byte-identical across
+  processes and the CUDA JIT cache hits. Spelling the state out as one scalar
+  per component instead makes the call a star call at `n_vars=48`, which
+  numba-cuda-mlir will not inline, leaving a wrapper in the kernel named after
+  an `id()` that changes every process — that cost 13.0 s a warm compile
+  against 10.1 s here.
 
 The wheel this depends on is not on PyPI — see `wheels/README.md`, which lists
 every local change made to numba-enzyme.

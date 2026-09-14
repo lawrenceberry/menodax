@@ -7,15 +7,20 @@ differentiates ``ode_fn`` with `numba-enzyme
 <https://github.com/Qruise-ai/numba-enzyme>`_, which runs Enzyme over the
 device function's LLVM IR and hands back a device-callable derivative.
 
-The right-hand side is compiled once into a flat-argument adapter that returns
-the callback's tuple unchanged. Enzyme's CUDA backend differentiates functions
-of flat scalar arguments, and Numba-CUDA-MLIR lowers a tuple return to an LLVM
-struct returned by value, which Enzyme differentiates directly — so the adapter
-needs no output array. Forward-differentiating it and seeding a unit vector
-gives a whole Jacobian column per sweep; seeding the time argument instead
-gives the whole ``df/dt`` vector, so ``n_vars + 1`` sweeps supply both matrices
-the kernel needs. The seed is built inside the derivative from a column index,
-so nothing here materialises a tangent vector.
+``ode_fn`` is differentiated as it stands, with no adapter around it.
+Numba-CUDA-MLIR flattens a tuple argument into one scalar parameter per element
+under the C ABI and lowers a tuple return to an LLVM struct returned by value,
+so a callback of the documented shape already reaches Enzyme as a function of
+flat scalars returning a struct — which is exactly what Enzyme differentiates.
+Forward-differentiating it and seeding a unit vector gives a whole Jacobian
+column per sweep; seeding the time argument instead gives the whole ``df/dt``
+vector, so ``n_vars + 1`` sweeps supply both matrices the kernel needs.
+
+The derivative's call shape mirrors the primal's argument list, with each
+tuple argument supplied as a contiguous array — so the kernel passes the same
+``y[i]`` and ``p[i]`` rows it already passes to ``ode_fn`` itself, and the call
+is five arguments at any ``n_vars``. numba-enzyme's entry point loads the
+scalars out of those rows before handing them to Enzyme.
 
 numba-enzyme's ``jacfwd`` would return the whole ``n_vars`` by ``n_vars + 1 +
 n_params`` matrix at once. The kernel uses ``jacfwd_column`` instead, because
@@ -38,20 +43,14 @@ took 171 s that way against 49 s this way, and the gap widens with dimension.
 
 numba-enzyme emits the derivative as NVVM LTO IR, so nvJitLink inlines it into
 the kernel rather than leaving a call with a parameter per primal argument.
-That is why ``dout`` costs no local memory: inlined, it promotes to registers.
+That is why ``dout`` costs no local memory: inlined, it promotes to registers,
+and so do the loads the derivative makes out of ``y`` and ``p``.
 
-The derivative is built eagerly, through ``differentiate_cuda``, and the kernel
-calls its external declaration rather than the lazy ``jacfwd_column``
-placeholder. The public transform would resolve the same derivative at call-site
-typing time, but it resolves to a wrapper, and this call carries more than 30
-arguments — a star call, which Numba-CUDA-MLIR's inliner refuses, so the wrapper
-survives into the kernel as its own device function named after an ``id()`` that
-changes every process. That makes the kernel's device code differ in every run
-and miss the CUDA JIT cache; calling the external directly deletes the wrapper,
-and its symbol comes from the derivative's cache key. Warm compile at
-``n_vars=48`` is 10.1 s that way against 13.0 s through the placeholder. Nothing
-is lost by resolving early: everything the placeholder exists to infer — the
-shape, the mode, the primal signature — is fixed here already.
+An explicit signature is required, because an array cannot say how long the
+tuple it stands for is. It also pins the specialisation: the callbacks are
+duck-typed on indexing, so the kernel's own calls specialise ``ode_fn`` for
+array arguments, and only the signature says the derivative wants the tuple
+form.
 
 The parameter partials are never seeded, so they cost nothing. Seeding
 direction ``n_vars + 1 + j`` instead would give ``df/dp_j`` as a whole column,
@@ -62,73 +61,33 @@ from __future__ import annotations
 
 import functools
 
-from numba_cuda_mlir import cuda, types
-from numba_enzyme.cuda import differentiate_cuda
+from numba_cuda_mlir import types
+from numba_enzyme import jacfwd_column
 
 from solvers._numba_common import as_cuda_device
-
-
-def _adapter_source(n_vars: int, n_params: int) -> str:
-    """Source for the flat-argument form of the ODE right-hand side.
-
-    Enzyme's arguments have to be flat scalars, so the state and parameter
-    tuples the callback expects are rebuilt inside the body. Its tuple is
-    returned unchanged.
-    """
-    args = [f"y{j}" for j in range(n_vars)] + ["t"] + [f"p{j}" for j in range(n_params)]
-    y_tuple = "({},)".format(", ".join(f"y{j}" for j in range(n_vars)))
-    p_tuple = (
-        "({},)".format(", ".join(f"p{j}" for j in range(n_params)))
-        if n_params
-        else "()"
-    )
-    return (
-        f"def _ode_flat({', '.join(args)}):\n    return _ode({y_tuple}, t, {p_tuple})\n"
-    )
 
 
 @functools.cache
 def make_jacobian_column(ode_fn, n_vars: int, n_params: int):
     """Return a device callable writing one column of the ODE's derivatives.
 
-    The result is called as ``jacobian_column(dout, y, t, p, col)`` — with
-    ``y`` and ``p`` indexable by component. For ``col < n_vars`` it fills
+    The result is called as ``jacobian_column(dout, y, t, p, col)``, where
+    ``y`` and ``p`` are the trajectory's state and parameter rows — the same
+    arrays the kernel passes to ``ode_fn``. For ``col < n_vars`` it fills
     ``dout`` with column ``col`` of ``df/dy``; at ``col == n_vars`` it fills
     ``dout`` with ``df/dt``. ``dout`` must hold ``n_vars`` float64s.
 
-    ``col`` is passed straight through to the derivative, which builds the unit
-    seed itself, so this is one call site and one Enzyme build whatever
-    ``n_vars`` is. Specialising the seed to a literal per column would let
-    constant folding drop the zero tangents — a genuine column-wise sparsity
-    compression — but at the cost of one derivative per column, which is the
-    build cost this arrangement exists to avoid.
+    ``col`` indexes the primal's flattened argument list, which is why the time
+    derivative comes free: ``t`` is the argument after the state. It is a
+    run-time argument and the unit seed is built inside the derivative, so this
+    is one Enzyme build whatever ``n_vars`` is. Specialising the seed to a
+    literal per column would let constant folding drop the zero tangents — a
+    genuine column-wise sparsity compression — but at the cost of one
+    derivative per column, which is the build cost this arrangement avoids.
     """
-    ode_device = as_cuda_device(ode_fn)
-    n_args = n_vars + 1 + n_params
-    signature = types.UniTuple(types.float64, n_vars)(*([types.float64] * n_args))
-
-    namespace = {"_ode": ode_device}
-    exec(  # noqa: S102
-        compile(_adapter_source(n_vars, n_params), "<enzyme ode adapter>", "exec"),
-        namespace,
+    signature = types.UniTuple(types.float64, n_vars)(
+        types.UniTuple(types.float64, n_vars),
+        types.float64,
+        types.UniTuple(types.float64, n_params),
     )
-    primal = cuda.jit(device=True)(namespace["_ode_flat"])
-
-    built = differentiate_cuda(primal, signature=signature, modes=("jacfwd_column",))
-    column_namespace = {"_jacfwd": built.externals["jacfwd_column"]}
-    call_args = ", ".join(
-        ["dout"]
-        + [f"y[{j}]" for j in range(n_vars)]
-        + ["t"]
-        + [f"p[{j}]" for j in range(n_params)]
-        + ["col"]
-    )
-    exec(  # noqa: S102
-        compile(
-            f"def _jacobian_column(dout, y, t, p, col):\n    _jacfwd({call_args})\n",
-            "<enzyme jacobian column>",
-            "exec",
-        ),
-        column_namespace,
-    )
-    return cuda.jit(device=True)(column_namespace["_jacobian_column"])
+    return jacfwd_column(as_cuda_device(ode_fn), signature=signature)
