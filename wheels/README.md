@@ -50,6 +50,13 @@ it afterwards if you do not want it in `git status` there.
 
 The checkout this wheel is built from carries changes that are not upstream:
 
+- **tuple-returning primals** — a CUDA primal may return a homogeneous tuple
+  instead of writing through a leading output array. numba-cuda-mlir lowers
+  that to an LLVM struct returned by value; forward modes take Enzyme's tangent
+  struct directly, and reverse modes differentiate an internal
+  `sum_k w_k * f_k(x)` with the weights inactive, since Enzyme rejects an
+  aggregate differential return. The solver uses this, so it hands the
+  derivative its own callback rather than an array-output rewrite.
 - **`jacfwd` / `jacfwd_column`** — forward-mode Jacobian of a *vector-valued* primal, one that
   writes its outputs through a leading array argument. `jvp` differentiates a
   scalar-output primal, so a sweep yields a single Jacobian entry; a sweep of a

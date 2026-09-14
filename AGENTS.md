@@ -90,9 +90,11 @@ Callbacks are compiled with `numba_cuda_mlir`, which constrains them:
 ### Derived Jacobians
 
 `rodas5P` takes no `jac_fn`. `_enzyme_jacobian.py` compiles `ode_fn` once into a
-vector-valued primal that writes its outputs through a leading array argument —
-MLIR cannot lower a tuple return across an `abi="c"` boundary — and
-forward-differentiates it with [numba-enzyme][ne]. Seeding a unit vector gives a
+flat-argument adapter that returns the callback's tuple unchanged, and
+forward-differentiates it with [numba-enzyme][ne]. Enzyme needs flat scalar
+arguments, but a tuple return is fine: numba-cuda-mlir lowers it to an LLVM
+struct returned by value, which Enzyme differentiates directly, so nothing has
+to be staged through an output array. Seeding a unit vector gives a
 whole Jacobian column per sweep; seeding the time argument gives the whole
 `df/dt`, so `n_vars + 1` sweeps supply both matrices the kernel needs.
 numba-enzyme also exposes `jacfwd`, which fills the whole matrix; the kernel
@@ -112,9 +114,9 @@ device source against `O(n_vars)`. A cold first solve at 96 state variables took
 Three things to know when touching this:
 
 - Enzyme's CUDA backend takes **flat scalar arguments**, so the state and
-  parameter tuples are rebuilt inside the generated primal's body. The output
-  array's shadow inherits the primal's offset and stride, so the two arrays
-  passed to the derivative must match in layout.
+  parameter tuples are rebuilt inside the generated adapter's body. Only the
+  column buffer crosses the call; the adapter's tuple return needs no output
+  array of its own.
 - The column index is a run-time argument and the unit seed is built inside the
   derivative, so this stays one call site and one Enzyme build at any `n_vars`,
   and nothing here materialises a tangent vector.

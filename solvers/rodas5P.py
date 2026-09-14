@@ -220,10 +220,9 @@ def _make_kernel(
         # as a whole vector from one more sweep rather than per row.
         y_row = y[i]
         p_row = p[i]
-        values = cuda.local.array(n_vars, types.float64)
         column = cuda.local.array(n_vars, types.float64)
         for col in range(lane, n_vars + 1, stride):
-            jacobian_column(values, column, y_row, t, p_row, col)
+            jacobian_column(column, y_row, t, p_row, col)
             if col == n_vars:
                 for row in range(n_vars):
                     dT[i, row] = column[row]

@@ -7,10 +7,11 @@ differentiates ``ode_fn`` with `numba-enzyme
 <https://github.com/Qruise-ai/numba-enzyme>`_, which runs Enzyme over the
 device function's LLVM IR and hands back a device-callable derivative.
 
-The right-hand side is compiled once into a **vector-valued primal** that
-writes its outputs through a leading array argument — Numba-CUDA-MLIR cannot
-lower a tuple return across an ``abi="c"`` boundary, but it does lower a
-leading array. Forward-differentiating that primal and seeding a unit vector
+The right-hand side is compiled once into a flat-argument adapter that returns
+the callback's tuple unchanged. Enzyme's CUDA backend differentiates functions
+of flat scalar arguments, and Numba-CUDA-MLIR lowers a tuple return to an LLVM
+struct returned by value, which Enzyme differentiates directly — so the adapter
+needs no output array. Forward-differentiating it and seeding a unit vector
 gives a whole Jacobian column per sweep; seeding the time argument instead
 gives the whole ``df/dt`` vector, so ``n_vars + 1`` sweeps supply both matrices
 the kernel needs. The seed is built inside the derivative from a column index,
@@ -37,8 +38,14 @@ took 171 s that way against 49 s this way, and the gap widens with dimension.
 
 numba-enzyme emits the derivative as NVVM LTO IR, so nvJitLink inlines it into
 the kernel rather than leaving a call with a parameter per primal argument.
-That is why ``out`` and ``dout`` cost no local memory: inlined, they promote to
-registers.
+That is why ``dout`` costs no local memory: inlined, it promotes to registers.
+
+The derivative is requested with an explicit signature, which makes
+numba-enzyme hand back its external declaration rather than a call-site
+placeholder. The call carries more than 30 arguments, so a placeholder could
+not be inlined, and Numba-CUDA-MLIR names out-of-line overloads after an
+``id()`` that changes every process — the kernel's LTO IR would never match a
+cached compile.
 
 The parameter partials are never seeded, so they cost nothing. Seeding
 direction ``n_vars + 1 + j`` instead would give ``df/dp_j`` as a whole column,
@@ -55,12 +62,12 @@ from numba_enzyme import jacfwd_column
 from solvers._numba_common import as_cuda_device
 
 
-def _vector_source(n_vars: int, n_params: int) -> str:
-    """Source for the vector-valued device form of the ODE right-hand side.
+def _adapter_source(n_vars: int, n_params: int) -> str:
+    """Source for the flat-argument form of the ODE right-hand side.
 
-    Enzyme needs the outputs in memory rather than in a tuple, and its
-    arguments have to be flat scalars, so the state and parameter tuples the
-    callback expects are rebuilt inside the body.
+    Enzyme's arguments have to be flat scalars, so the state and parameter
+    tuples the callback expects are rebuilt inside the body. Its tuple is
+    returned unchanged.
     """
     args = [f"y{j}" for j in range(n_vars)] + ["t"] + [f"p{j}" for j in range(n_params)]
     y_tuple = "({},)".format(", ".join(f"y{j}" for j in range(n_vars)))
@@ -69,11 +76,8 @@ def _vector_source(n_vars: int, n_params: int) -> str:
         if n_params
         else "()"
     )
-    stores = "\n".join(f"    out[{j}] = values[{j}]" for j in range(n_vars))
     return (
-        f"def _ode_vector(out, {', '.join(args)}):\n"
-        f"    values = _ode({y_tuple}, t, {p_tuple})\n"
-        f"{stores}\n"
+        f"def _ode_flat({', '.join(args)}):\n    return _ode({y_tuple}, t, {p_tuple})\n"
     )
 
 
@@ -81,13 +85,10 @@ def _vector_source(n_vars: int, n_params: int) -> str:
 def make_jacobian_column(ode_fn, n_vars: int, n_params: int):
     """Return a device callable writing one column of the ODE's derivatives.
 
-    The result is called as ``jacobian_column(out, dout, y, t, p, col)`` — with
+    The result is called as ``jacobian_column(dout, y, t, p, col)`` — with
     ``y`` and ``p`` indexable by component. For ``col < n_vars`` it fills
     ``dout`` with column ``col`` of ``df/dy``; at ``col == n_vars`` it fills
-    ``dout`` with ``df/dt``. ``out`` receives the right-hand side itself and is
-    otherwise unused. Both arrays must hold ``n_vars`` float64s and share a
-    layout, since Enzyme is handed the array's offset and stride as inactive
-    and the shadow inherits them.
+    ``dout`` with ``df/dt``. ``dout`` must hold ``n_vars`` float64s.
 
     ``col`` is passed straight through to the derivative, which builds the unit
     seed itself, so this is one call site and one Enzyme build whatever
@@ -98,19 +99,18 @@ def make_jacobian_column(ode_fn, n_vars: int, n_params: int):
     """
     ode_device = as_cuda_device(ode_fn)
     n_args = n_vars + 1 + n_params
-    array = types.float64[::1]
-    signature = types.void(array, *([types.float64] * n_args))
+    signature = types.UniTuple(types.float64, n_vars)(*([types.float64] * n_args))
 
     namespace = {"_ode": ode_device}
     exec(  # noqa: S102
-        compile(_vector_source(n_vars, n_params), "<enzyme ode vector>", "exec"),
+        compile(_adapter_source(n_vars, n_params), "<enzyme ode adapter>", "exec"),
         namespace,
     )
-    primal = cuda.jit(device=True)(namespace["_ode_vector"])
+    primal = cuda.jit(device=True)(namespace["_ode_flat"])
 
     column_namespace = {"_jacfwd": jacfwd_column(primal, signature=signature)}
     call_args = ", ".join(
-        ["out", "dout"]
+        ["dout"]
         + [f"y[{j}]" for j in range(n_vars)]
         + ["t"]
         + [f"p[{j}]" for j in range(n_params)]
@@ -118,7 +118,7 @@ def make_jacobian_column(ode_fn, n_vars: int, n_params: int):
     )
     exec(  # noqa: S102
         compile(
-            f"def _jacobian_column(out, dout, y, t, p, col):\n    _jacfwd({call_args})\n",
+            f"def _jacobian_column(dout, y, t, p, col):\n    _jacfwd({call_args})\n",
             "<enzyme jacobian column>",
             "exec",
         ),

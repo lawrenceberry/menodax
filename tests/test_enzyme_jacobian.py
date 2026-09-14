@@ -39,10 +39,9 @@ def evaluate_derivatives(ode_fn, y, t, params):
     def kernel(y, t, p, jacobian, time_jacobian):
         i = cuda.grid(1)
         if i < y.shape[0]:
-            values = cuda.local.array(n_vars, types.float64)
             column = cuda.local.array(n_vars, types.float64)
             for col in range(n_vars + 1):
-                jacobian_column(values, column, y[i], t, p[i], col)
+                jacobian_column(column, y[i], t, p[i], col)
                 if col == n_vars:
                     for row in range(n_vars):
                         time_jacobian[i, row] = column[row]
