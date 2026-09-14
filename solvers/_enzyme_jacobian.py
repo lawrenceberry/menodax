@@ -40,12 +40,18 @@ numba-enzyme emits the derivative as NVVM LTO IR, so nvJitLink inlines it into
 the kernel rather than leaving a call with a parameter per primal argument.
 That is why ``dout`` costs no local memory: inlined, it promotes to registers.
 
-The derivative is requested with an explicit signature, which makes
-numba-enzyme hand back its external declaration rather than a call-site
-placeholder. The call carries more than 30 arguments, so a placeholder could
-not be inlined, and Numba-CUDA-MLIR names out-of-line overloads after an
-``id()`` that changes every process — the kernel's LTO IR would never match a
-cached compile.
+The derivative is built eagerly, through ``differentiate_cuda``, and the kernel
+calls its external declaration rather than the lazy ``jacfwd_column``
+placeholder. The public transform would resolve the same derivative at call-site
+typing time, but it resolves to a wrapper, and this call carries more than 30
+arguments — a star call, which Numba-CUDA-MLIR's inliner refuses, so the wrapper
+survives into the kernel as its own device function named after an ``id()`` that
+changes every process. That makes the kernel's device code differ in every run
+and miss the CUDA JIT cache; calling the external directly deletes the wrapper,
+and its symbol comes from the derivative's cache key. Warm compile at
+``n_vars=48`` is 10.1 s that way against 13.0 s through the placeholder. Nothing
+is lost by resolving early: everything the placeholder exists to infer — the
+shape, the mode, the primal signature — is fixed here already.
 
 The parameter partials are never seeded, so they cost nothing. Seeding
 direction ``n_vars + 1 + j`` instead would give ``df/dp_j`` as a whole column,
@@ -57,7 +63,7 @@ from __future__ import annotations
 import functools
 
 from numba_cuda_mlir import cuda, types
-from numba_enzyme import jacfwd_column
+from numba_enzyme.cuda import differentiate_cuda
 
 from solvers._numba_common import as_cuda_device
 
@@ -108,7 +114,8 @@ def make_jacobian_column(ode_fn, n_vars: int, n_params: int):
     )
     primal = cuda.jit(device=True)(namespace["_ode_flat"])
 
-    column_namespace = {"_jacfwd": jacfwd_column(primal, signature=signature)}
+    built = differentiate_cuda(primal, signature=signature, modes=("jacfwd_column",))
+    column_namespace = {"_jacfwd": built.externals["jacfwd_column"]}
     call_args = ", ".join(
         ["dout"]
         + [f"y[{j}]" for j in range(n_vars)]

@@ -111,7 +111,7 @@ differentiations against forward's one apiece, with `O(n_vars ** 2)` generated
 device source against `O(n_vars)`. A cold first solve at 96 state variables took
 171 s that way against 49 s this way.
 
-Three things to know when touching this:
+Things to know when touching this:
 
 - Enzyme's CUDA backend takes **flat scalar arguments**, so the state and
   parameter tuples are rebuilt inside the generated adapter's body. Only the
@@ -128,6 +128,14 @@ Three things to know when touching this:
   into the kernel. That is what keeps the per-column buffers in registers —
   linked as PTX they cost `2 * n_vars` doubles of local memory per thread, and
   the solve is 10-20% slower.
+- The derivative is built eagerly with `differentiate_cuda` and called through
+  `externals["jacfwd_column"]`, not through the public `jacfwd_column`. Both
+  reach the same Enzyme entry point, but the public one goes via an overload
+  placeholder that resolves to a wrapper, and at `n_vars=48` the call is a star
+  call that numba-cuda-mlir will not inline — so the wrapper survives into the
+  kernel under a name built from an `id()`, the device code differs in every
+  process, and the CUDA JIT cache never hits. Warm compile at `n_vars=48` is
+  10.1 s this way against 13.0 s through the placeholder.
 
 The wheel this depends on is not on PyPI — see `wheels/README.md`, which lists
 every local change made to numba-enzyme.

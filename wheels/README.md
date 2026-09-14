@@ -50,23 +50,26 @@ it afterwards if you do not want it in `git status` there.
 
 The checkout this wheel is built from carries changes that are not upstream:
 
-- **tuple-returning primals** — a CUDA primal may return a homogeneous tuple
-  instead of writing through a leading output array. numba-cuda-mlir lowers
-  that to an LLVM struct returned by value; forward modes take Enzyme's tangent
-  struct directly, and reverse modes differentiate an internal
-  `sum_k w_k * f_k(x)` with the weights inactive, since Enzyme rejects an
-  aggregate differential return. The solver uses this, so it hands the
-  derivative its own callback rather than an array-output rewrite.
-- **`jacfwd` / `jacfwd_column`** — forward-mode Jacobian of a *vector-valued* primal, one that
-  writes its outputs through a leading array argument. `jvp` differentiates a
-  scalar-output primal, so a sweep yields a single Jacobian entry; a sweep of a
-  vector-valued one yields a whole column. `jacfwd` fills the whole matrix,
-  one sweep per column; `jacfwd_column` fills a single column chosen by a
-  run-time index. The solver uses the latter: the whole matrix would have to
-  live in per-thread local memory. See `solvers/_enzyme_jacobian.py`.
-- **reverse-mode vector APIs** — `vjp`, `jacrev` and `jacrev_row`, the
+- **tuple-returning primals** — a CUDA primal with several outputs returns a
+  homogeneous tuple. numba-cuda-mlir lowers that to an LLVM struct returned by
+  value; forward modes take Enzyme's tangent struct directly, and reverse modes
+  differentiate an internal `sum_k w_k * f_k(x)` with the weights inactive,
+  since Enzyme rejects an aggregate differential return. Nothing is staged
+  through an output array, so the solver hands the derivative its own callback.
+- **`jacfwd` / `jacfwd_column`** — forward-mode Jacobian of a tuple-returning
+  primal. `jvp` differentiates a scalar-output primal, so a sweep yields a
+  single Jacobian entry; a sweep of a multi-output one yields a whole column.
+  `jacfwd` fills the whole matrix, one sweep per column; `jacfwd_column` fills
+  a single column chosen by a run-time index. The solver uses the latter: the
+  whole matrix would have to live in per-thread local memory. See
+  `solvers/_enzyme_jacobian.py`.
+- **reverse-mode multi-output APIs** — `vjp`, `jacrev` and `jacrev_row`, the
   reverse counterparts of `jvp`/`jacfwd`/`jacfwd_column`. modax does not use
   them; see `solvers/_enzyme_jacobian.py` for why the solver is forward-mode.
+- **`CUDADifferentiable.externals`** — the `cuda.declare_device` handle behind
+  each tuple implementation, reached through `differentiate_cuda`. The solver
+  calls it rather than the lazy `jacfwd_column` placeholder; see
+  `solvers/_enzyme_jacobian.py` for why.
 - **optional `signature`** — CUDA derivatives now specialise lazily at each
   call site; passing `signature` only constrains that. A call of more than 30
   positional arguments, which CPython compiles as a star call that numba's
