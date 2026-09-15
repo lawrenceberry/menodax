@@ -204,7 +204,9 @@ def _make_body(
         n_save = times.shape[0]
         t = times[0]
         tf = times[n_save - 1]
-        dt = dt0
+        # A non-positive dt0 is the "no first step given" sentinel: start from
+        # 1e-6 of the integration window.
+        dt = dt0 if dt0 > 0.0 else (tf - t) * 1e-6
         save_idx = 1
         n_steps = 0
         accepted_steps = 0
@@ -643,6 +645,10 @@ def solve(
     The solve is an XLA custom call into the numba-cuda kernel and is opaque to
     autodiff.
 
+    ``first_step`` pins the initial step size; the default ``None`` (like any
+    non-positive value) lets the kernel start from 1e-6 of the integration
+    window.
+
     ``error_weights`` is an optional per-component weight array, shape
     ``(n_vars,)`` or ``(N, n_vars)``, applied in the weighted RMS step-size
     error norm; a weight of 0 excludes that component from step-size control.
@@ -695,7 +701,7 @@ def _solve_impl(
     y0_arr, params_arr, n, n_vars = normalize_y0_params(y0, params)
     times = jnp.asarray(t_span, dtype=jnp.float64)
     n_save = times.shape[0]
-    dt0 = initial_step(times, first_step)
+    dt0 = initial_step(first_step)
     weights_arr = jnp.asarray(build_error_weights(error_weights, n, n_vars))
 
     uses_shared = _use_shared_backend(n, n_vars, backend)

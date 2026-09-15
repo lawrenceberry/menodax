@@ -94,7 +94,7 @@ def normalize_inputs(y0, t_span, params, first_step):
         np.ascontiguousarray(y0_arr),
         times,
         np.ascontiguousarray(params_arr),
-        initial_step(times, first_step),
+        initial_step(first_step),
     )
 
 
@@ -115,12 +115,16 @@ def build_error_weights(error_weights, n: int, n_vars: int) -> np.ndarray:
     return np.ascontiguousarray(weights, dtype=np.float64)
 
 
-def initial_step(times, first_step):
-    return (
-        np.float64(first_step)
-        if first_step is not None
-        else np.float64((times[-1] - times[0]) * 1e-6)
-    )
+def initial_step(first_step):
+    """The ``dt0`` scalar the kernels take, from a user ``first_step``.
+
+    ``dt0`` is a launch-time scalar, so it cannot be derived here from the save
+    times: under ``jit`` (and under the ``custom_vmap`` rule, which traces
+    unconditionally) those are tracers. A caller that pins no first step passes
+    the non-positive sentinel instead, and each kernel takes 1e-6 of its own
+    integration window off the ``times`` array it already reads.
+    """
+    return np.float64(0.0 if first_step is None else first_step)
 
 
 def get_workspace(

@@ -75,6 +75,11 @@ y = solve(ode_fn, y0, t_span, params, lu_precision="fp32")
 `(N, n_params)`; the result is `(N, n_save, n_vars)`. `return_stats=True` adds a
 dict of per-trajectory step counters.
 
+`first_step` reaches the kernel as a launch-time scalar, so it cannot be
+derived on the host from `t_span` — that argument is traced. Omitting it (or
+passing a non-positive value) hands the kernel a sentinel, and it starts from
+1e-6 of its own integration window.
+
 ### Writing ODE callbacks
 
 Callbacks are compiled with `numba_cuda_mlir`, which constrains them:

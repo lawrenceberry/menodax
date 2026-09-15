@@ -242,6 +242,9 @@ def _make_kernel(
 
         n_save = times.shape[0]
         tf = times[n_save - 1]
+        # A non-positive dt0 is the "no first step given" sentinel: start from
+        # 1e-6 of the integration window.
+        dt_init = dt0 if dt0 > 0.0 else (tf - times[0]) * 1e-6
         v_offset = batch * n_vars
         a_offset = batch * n_vars * n_vars
         b_offset = batch * n_vars
@@ -290,7 +293,7 @@ def _make_kernel(
             else:
                 smem_t[batch] = tf
                 smem_save_idx[batch] = n_save
-            smem_dt[batch] = dt0
+            smem_dt[batch] = dt_init
             smem_n_steps[batch] = 0
             smem_accepted[batch] = 0
             smem_rejected[batch] = 0
@@ -320,8 +323,8 @@ def _make_kernel(
                     smem_inv_dt[batch] = 1.0 / dt_use
                     smem_t_end[batch] = smem_t[batch] + dt_use
                 else:
-                    smem_dt_use[batch] = dt0
-                    smem_inv_dt[batch] = 1.0 / dt0
+                    smem_dt_use[batch] = dt_init
+                    smem_inv_dt[batch] = 1.0 / dt_init
                     smem_t_end[batch] = smem_t[batch]
             cuda.syncthreads()
 
@@ -887,6 +890,10 @@ def solve(
     ``"fp64"`` is available for ill-conditioned systems where the FP32
     factorisation degrades step-size control.
 
+    ``first_step`` pins the initial step size; the default ``None`` (like any
+    non-positive value) lets the kernel start from 1e-6 of the integration
+    window.
+
     ``error_weights`` is an optional per-component weight array, shape
     ``(n_vars,)`` or ``(N, n_vars)``, applied in the weighted RMS step-size
     error norm; a weight of 0 excludes that component from step-size control.
@@ -944,7 +951,7 @@ def _solve_impl(
     times = jnp.asarray(t_span, dtype=jnp.float64)
     n_save = times.shape[0]
     n_params = params_arr.shape[1]
-    dt0 = initial_step(times, first_step)
+    dt0 = initial_step(first_step)
     weights_arr = jnp.asarray(build_error_weights(error_weights, n, n_vars))
 
     launch = _make_jax_launch(
