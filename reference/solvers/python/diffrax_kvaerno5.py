@@ -50,7 +50,9 @@ def solve(
     tf = save_times[-1]
 
     def _solve_one(y0_single, p):
-        term = diffrax.ODETerm(lambda t, y, args: ode_fn(y, t, p))
+        # ode_fn may return a tuple (unified RHS format); diffrax's ODETerm
+        # requires the vector field to match y0's array pytree structure.
+        term = diffrax.ODETerm(lambda t, y, args: jnp.asarray(ode_fn(y, t, p)))
         solver = diffrax.Kvaerno5()
         controller = diffrax.PIDController(rtol=rtol, atol=atol)
         sol = diffrax.diffeqsolve(
