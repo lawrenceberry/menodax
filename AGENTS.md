@@ -45,11 +45,14 @@ lowering pipeline without a device.
 
 Shared support modules:
 
-- **`_numba_common.py`** — host-side helpers: input normalisation, initial step
-  selection, error weights, and the `cuda.jit` coercion for user callbacks.
-- **`_jax_numba_custom_call.py`** — the XLA FFI shim. Compiles a raw-pointer
-  launcher, registers it as an FFI target, and exposes `ffi_call`/`ffi_abi_call`
-  so a numba kernel becomes a JAX primitive.
+- **`_numba_common.py`** — host-side helpers shared by both kernels: input
+  normalisation, initial step selection, error weights, the device workspace,
+  the shared kernel signature and its two launch paths (`run_kernel` for a
+  direct numba launch, `ensemble_ffi_call` for the JAX one), and the `cuda.jit`
+  coercion for user callbacks.
+- **`_jax_numba_custom_call.py`** — the XLA FFI shim. Compiles a launcher,
+  registers it as an FFI target, and exposes `ffi_abi_call` so a numba kernel
+  becomes a JAX primitive.
 - **`_jax_common.py`** — the JAX-facing glue: ensemble shape normalisation and
   `make_custom_vmap_solver`, whose `custom_vmap` rule lowers an outer
   `jax.vmap` over a single solve into one native ensemble launch.

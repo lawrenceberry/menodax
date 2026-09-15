@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import functools
 import math
-from dataclasses import dataclass
-from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -14,30 +12,21 @@ from numba_cuda_mlir import cuda, types
 from numba_enzyme import jacfwd_column
 from nvmath.device import LUPivotSolver
 
-from solvers._jax_common import (
-    make_custom_vmap_solver,
-    normalize_y0_params,
-    per_trajectory_stats_postprocess,
-)
-from solvers._jax_numba_custom_call import (
-    ABI_ARRAY,
-    ABI_SCALAR_F64,
-    ABI_SCALAR_I32,
-    ffi_abi_call,
-    make_launch,
-)
+from solvers._jax_common import make_custom_vmap_solver, normalize_y0_params
+from solvers._jax_numba_custom_call import make_launch
 from solvers._numba_common import (
-    NumbaWorkspace,
+    SCRATCH_ARGTYPE,
+    SOLVER_ARGTYPES,
     PreparedNumbaSolve,
     as_cuda_device,
-    as_launch_block_dim,
-    block_threads_x,
     build_error_weights,
     copy_workspace_inputs,
+    ensemble_ffi_call,
+    get_workspace,
     initial_step,
-    jax_stats,
     make_cuda_striped_vector_writer,
-    numpy_stats,
+    run_kernel,
+    solver_stats,
 )
 from solvers._numba_common import (
     normalize_inputs as _normalize_inputs,
@@ -121,20 +110,6 @@ EXPONENT = -1.0 / 6.0
 _WORKSPACE_CACHE: dict[tuple[int, int, int, int], object] = {}
 
 
-@dataclass
-class Workspace(NumbaWorkspace):
-    work: list[Any]
-    dT_dev: Any
-    weights_dev: Any
-
-
-@dataclass(frozen=True)
-class PreparedSolve(PreparedNumbaSolve):
-    kernel: Any
-    lu_solver: Any
-    workspace: Workspace
-
-
 def make_lu_solver(
     n_vars: int,
     *,
@@ -150,30 +125,6 @@ def make_lu_solver(
         batches_per_block=batches_per_block,
         block_dim=block_dim,
     )
-
-
-def get_workspace(
-    cache: dict, n: int, n_vars: int, n_save: int, n_params: int
-) -> Workspace:
-    key = (n, n_vars, n_save, n_params)
-    workspace = cache.get(key)
-    if workspace is not None:
-        return workspace
-
-    workspace = Workspace(
-        y0_dev=cuda.device_array((n, n_vars), dtype=np.float64),
-        times_dev=cuda.device_array(n_save, dtype=np.float64),
-        params_dev=cuda.device_array((n, n_params), dtype=np.float64),
-        hist_dev=cuda.device_array((n, n_save, n_vars), dtype=np.float64),
-        accepted_dev=cuda.device_array(n, dtype=np.int32),
-        rejected_dev=cuda.device_array(n, dtype=np.int32),
-        loop_dev=cuda.device_array(n, dtype=np.int32),
-        work=[cuda.device_array((n, n_vars), dtype=np.float64) for _ in range(10)],
-        dT_dev=cuda.device_array((n, n_vars), dtype=np.float64),
-        weights_dev=cuda.device_array((n, n_vars), dtype=np.float64),
-    )
-    cache[key] = workspace
-    return workspace
 
 
 @functools.cache
@@ -254,10 +205,8 @@ def _make_kernel(
                     else:
                         lu_buf[a_off + row * n_vars + col] = lu_dtype(-v)
 
-    batches_per_block = int(lu_solver.batches_per_block)
-
-    block_dim = as_launch_block_dim(lu_solver.block_dim)
-    block_threads = block_threads_x(block_dim)
+    batches_per_block = lu_solver.batches_per_block
+    block_threads = lu_solver.block_dim[0]
     vec_size = batches_per_block * n_vars
     a_size = int(lu_solver.a_size())
     b_size = int(lu_solver.b_size())
@@ -768,9 +717,7 @@ def _make_kernel(
                             + 4.883087185713722 * smem_k8[v_offset + j]
                         )
                         y_new_j = smem_u[v_offset + j] + smem_k8[v_offset + j]
-                        hist[i, save_idx, j] = theta1 * smem_y[
-                            v_offset + j
-                        ] + theta * (
+                        hist[i, save_idx, j] = theta1 * smem_y[v_offset + j] + theta * (
                             y_new_j + theta1 * (h1 + theta * (h2 + theta * h3))
                         )
                     save_idx += 1
@@ -817,7 +764,6 @@ def prepare_solve(
     t_span,
     params,
     *,
-    batch_size=None,
     rtol=1e-8,
     atol=1e-10,
     first_step=None,
@@ -829,18 +775,18 @@ def prepare_solve(
     lu_precision: str = "fp32",
     batches_per_block="suggested",
 ):
-    del batch_size
-    y0_arr, times, params_arr, dt0 = _normalize_inputs(
-        y0, t_span, params, first_step, solver_name="Rodas5"
-    )
+    y0_arr, times, params_arr, dt0 = _normalize_inputs(y0, t_span, params, first_step)
     n, n_vars = y0_arr.shape
     n_save = times.shape[0]
     n_params = params_arr.shape[1]
     weights_arr = build_error_weights(error_weights, n, n_vars)
 
-    workspace = get_workspace(_WORKSPACE_CACHE, n, n_vars, n_save, n_params)
-    copy_workspace_inputs(workspace, y0_arr, times, params_arr)
-    workspace.weights_dev.copy_to_device(weights_arr)
+    # Scratch: the state and stage vectors the kernel stages through global
+    # memory (y, u, the right-hand side) plus df/dt.
+    workspace = get_workspace(
+        _WORKSPACE_CACHE, n, n_vars, n_save, n_params, transposed=False, n_work=4
+    )
+    copy_workspace_inputs(workspace, y0_arr, times, params_arr, weights_arr)
 
     kernel, lu_solver = _make_kernel(
         ode_fn,
@@ -852,13 +798,12 @@ def prepare_solve(
         lu_precision,
         batches_per_block,
     )
-    batches_per_block = int(lu_solver.batches_per_block)
-    threads = as_launch_block_dim(lu_solver.block_dim)
+    batches_per_block = lu_solver.batches_per_block
+    threads = lu_solver.block_dim
     blocks = (n + batches_per_block - 1) // batches_per_block
 
-    return PreparedSolve(
+    return PreparedNumbaSolve(
         kernel=kernel,
-        lu_solver=lu_solver,
         workspace=workspace,
         dt0=np.float64(dt0),
         rtol=np.float64(rtol),
@@ -869,38 +814,15 @@ def prepare_solve(
     )
 
 
-def run_prepared(prepared: PreparedSolve, *, return_stats=False, copy_solution=True):
-    workspace = prepared.workspace
-    prepared.kernel[prepared.blocks, prepared.threads](
-        workspace.y0_dev,
-        workspace.times_dev,
-        workspace.params_dev,
-        prepared.dt0,
-        prepared.rtol,
-        prepared.atol,
-        prepared.max_steps,
-        workspace.weights_dev,
-        workspace.hist_dev,
-        workspace.accepted_dev,
-        workspace.rejected_dev,
-        workspace.loop_dev,
-        workspace.work[0],
-        workspace.work[1],
-        workspace.work[2],
-        workspace.dT_dev,
+def run_prepared(
+    prepared: PreparedNumbaSolve, *, return_stats=False, copy_solution=True
+):
+    return run_kernel(
+        prepared,
+        prepared.workspace.work,
+        return_stats=return_stats,
+        copy_solution=copy_solution,
     )
-    cuda.synchronize()
-
-    solution = (
-        workspace.hist_dev.copy_to_host() if copy_solution else workspace.hist_dev
-    )
-    if not return_stats:
-        return solution
-
-    accepted_steps = workspace.accepted_dev.copy_to_host()
-    rejected_steps = workspace.rejected_dev.copy_to_host()
-    loop_steps = workspace.loop_dev.copy_to_host()
-    return solution, numpy_stats(accepted_steps, rejected_steps, loop_steps)
 
 
 @functools.cache
@@ -908,7 +830,6 @@ def _make_jax_launch(
     ode_fn,
     n: int,
     n_vars: int,
-    n_save: int,
     n_params: int,
     pcoeff: float = 0.0,
     icoeff: float = 1.0,
@@ -926,31 +847,10 @@ def _make_jax_launch(
         lu_precision,
         batches_per_block,
     )
-    f64_2d = types.float64[:, ::1]
-    f64_1d = types.float64[::1]
-    i32_1d = types.int32[::1]
-    argtypes = (
-        f64_2d,
-        f64_1d,
-        f64_2d,
-        types.float64,
-        types.float64,
-        types.float64,
-        types.int32,
-        f64_2d,
-        types.float64[:, :, ::1],
-        i32_1d,
-        i32_1d,
-        i32_1d,
-        f64_2d,
-        f64_2d,
-        f64_2d,
-        f64_2d,
-    )
-    batches_per_block = int(lu_solver.batches_per_block)
-    threads = as_launch_block_dim(lu_solver.block_dim)
+    argtypes = SOLVER_ARGTYPES + (SCRATCH_ARGTYPE,) * 4
+    batches_per_block = lu_solver.batches_per_block
     blocks = (n + batches_per_block - 1) // batches_per_block
-    return make_launch(kernel, argtypes, grid=blocks, block=threads)
+    return make_launch(kernel, argtypes, grid=blocks, block=lu_solver.block_dim)
 
 
 def solve(
@@ -959,7 +859,6 @@ def solve(
     t_span,
     params,
     *,
-    batch_size=None,
     rtol=1e-8,
     atol=1e-10,
     first_step=None,
@@ -1003,31 +902,24 @@ def solve(
     shared-memory footprint (bounded by available shared memory).
     """
 
-    def solve_impl(y0_arr, t_span_arr, params_arr):
-        return _solve_impl(
-            ode_fn,
-            y0_arr,
-            t_span_arr,
-            params_arr,
-            batch_size=batch_size,
-            rtol=rtol,
-            atol=atol,
-            first_step=first_step,
-            max_steps=max_steps,
-            return_stats=return_stats,
-            error_weights=error_weights,
-            pcoeff=pcoeff,
-            icoeff=icoeff,
-            dcoeff=dcoeff,
-            lu_precision=lu_precision,
-            batches_per_block=batches_per_block,
-        )
-
-    return make_custom_vmap_solver(
-        solve_impl,
+    solve_impl = functools.partial(
+        _solve_impl,
+        ode_fn,
+        rtol=rtol,
+        atol=atol,
+        first_step=first_step,
+        max_steps=max_steps,
         return_stats=return_stats,
-        stats_postprocess=per_trajectory_stats_postprocess,
-    )(y0, t_span, params)
+        error_weights=error_weights,
+        pcoeff=pcoeff,
+        icoeff=icoeff,
+        dcoeff=dcoeff,
+        lu_precision=lu_precision,
+        batches_per_block=batches_per_block,
+    )
+    return make_custom_vmap_solver(solve_impl, return_stats=return_stats)(
+        y0, t_span, params
+    )
 
 
 def _solve_impl(
@@ -1036,7 +928,6 @@ def _solve_impl(
     t_span,
     params,
     *,
-    batch_size=None,
     rtol=1e-8,
     atol=1e-10,
     first_step=None,
@@ -1049,7 +940,6 @@ def _solve_impl(
     lu_precision: str = "fp32",
     batches_per_block="suggested",
 ):
-    del batch_size
     y0_arr, params_arr, n, n_vars = normalize_y0_params(y0, params)
     times = jnp.asarray(t_span, dtype=jnp.float64)
     n_save = times.shape[0]
@@ -1061,7 +951,6 @@ def _solve_impl(
         ode_fn,
         n,
         n_vars,
-        n_save,
         n_params,
         pcoeff,
         icoeff,
@@ -1069,29 +958,20 @@ def _solve_impl(
         lu_precision,
         batches_per_block,
     )
-    hist_spec = jax.ShapeDtypeStruct((n, n_save, n_vars), jnp.float64)
-    int_spec = jax.ShapeDtypeStruct((n,), jnp.int32)
-    work_spec = jax.ShapeDtypeStruct((n, n_vars), jnp.float64)
-    output_specs = (hist_spec, int_spec, int_spec, int_spec) + (work_spec,) * 4
-    result = ffi_abi_call(
+    # Scratch: y, u, the staged right-hand side, and df/dt.
+    scratch_specs = (jax.ShapeDtypeStruct((n, n_vars), jnp.float64),) * 4
+    hist, accepted, rejected, loop_steps = ensemble_ffi_call(
         launch,
         (y0_arr, times, params_arr, weights_arr),
-        output_specs,
-        input_kinds=(
-            ABI_ARRAY,
-            ABI_ARRAY,
-            ABI_ARRAY,
-            ABI_SCALAR_F64,
-            ABI_SCALAR_F64,
-            ABI_SCALAR_F64,
-            ABI_SCALAR_I32,
-            ABI_ARRAY,
-        ),
-        output_kinds=(ABI_ARRAY,) * len(output_specs),
-        scalar_f64_values=(dt0, rtol, atol),
-        scalar_i32_values=(max_steps,),
+        scratch_specs,
+        n=n,
+        n_vars=n_vars,
+        n_save=n_save,
+        dt0=dt0,
+        rtol=rtol,
+        atol=atol,
+        max_steps=max_steps,
     )
-    hist, accepted, rejected, loop_steps = result[:4]
     if not return_stats:
         return hist
-    return hist, jax_stats(accepted, rejected, loop_steps)
+    return hist, solver_stats(accepted, rejected, loop_steps)

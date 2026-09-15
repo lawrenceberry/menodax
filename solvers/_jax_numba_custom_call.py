@@ -1,8 +1,7 @@
 """JAX custom-call bridge for launching numba-cuda kernels.
 
 The public surface in this module is intentionally small: compile a CUDA
-kernel with raw pointer arguments, register a typed XLA FFI launcher, and call
-it from JAX.  The C++ FFI shim is built lazily into ``/tmp`` so the project can
+kernel, register a typed XLA FFI launcher for it, and call it from JAX.  The C++ FFI shim is built lazily into ``/tmp`` so the project can
 keep using plain ``uv run python`` without a package build step.
 """
 
@@ -18,12 +17,10 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import jax
-import jax.numpy as jnp
 import numpy as np
-from numba_cuda_mlir import types
 
 _CAPSULE_NAME = b"xla._CUSTOM_CALL_TARGET"
-_TARGET_NAME = "modax_numba_cuda_launch"
+_TARGET_NAME = "modax_numba_cuda_abi_launch"
 _CUSTOM_CALL_API_VERSION = 4
 _REGISTERED = False
 _LOADED_LIB: ctypes.CDLL | None = None
@@ -31,7 +28,6 @@ _LOADED_LIB: ctypes.CDLL | None = None
 ABI_ARRAY = 0
 ABI_SCALAR_F64 = 1
 ABI_SCALAR_I32 = 2
-ABI_RAW_PTR = 3
 
 
 @dataclass(frozen=True)
@@ -94,52 +90,6 @@ static CuLaunchKernel LoadCuLaunchKernel() {
   return fn;
 }
 
-static ffi::Error LaunchNumbaCuda(
-    void* stream, int64_t function, int64_t grid_x, int64_t grid_y,
-    int64_t grid_z, int64_t block_x, int64_t block_y, int64_t block_z,
-    int64_t shared_mem, ffi::RemainingArgs args, ffi::RemainingRets rets) {
-  CuLaunchKernel cuLaunchKernel = LoadCuLaunchKernel();
-  if (cuLaunchKernel == nullptr) {
-    return ffi::Error(ffi::ErrorCode::kInternal,
-                      "could not load cuLaunchKernel from libcuda.so.1");
-  }
-
-  std::vector<void*> arg_values;
-  arg_values.reserve(args.size() + rets.size());
-  for (size_t i = 0; i < args.size(); ++i) {
-    auto arg = args.get<ffi::AnyBuffer>(i);
-    if (!arg.has_value()) return arg.error();
-    arg_values.push_back(arg.value().untyped_data());
-  }
-  for (size_t i = 0; i < rets.size(); ++i) {
-    auto ret = rets.get<ffi::AnyBuffer>(i);
-    if (!ret.has_value()) return ret.error();
-    arg_values.push_back(ret.value()->untyped_data());
-  }
-
-  std::vector<void*> params;
-  params.reserve(arg_values.size());
-  for (void*& value : arg_values) {
-    params.push_back(&value);
-  }
-
-  int err = cuLaunchKernel(reinterpret_cast<void*>(function),
-                           static_cast<unsigned int>(grid_x),
-                           static_cast<unsigned int>(grid_y),
-                           static_cast<unsigned int>(grid_z),
-                           static_cast<unsigned int>(block_x),
-                           static_cast<unsigned int>(block_y),
-                           static_cast<unsigned int>(block_z),
-                           static_cast<unsigned int>(shared_mem),
-                           stream, params.data(), nullptr);
-  if (err != 0) {
-    return ffi::Error(ffi::ErrorCode::kInternal,
-                      "cuLaunchKernel failed with CUDA driver error " +
-                          std::to_string(err));
-  }
-  return ffi::Error::Success();
-}
-
 // numba-cuda-mlir lowers an array parameter to an MLIR MemRef descriptor,
 // passed flattened as {allocated, aligned, offset, sizes..., strides...} --
 // 3 + 2*rank kernel parameters.  The offset and strides count ELEMENTS, unlike
@@ -157,7 +107,6 @@ struct KernelArgStorage {
   ArrayArg array;
   double f64 = 0.0;
   int32_t i32 = 0;
-  void* ptr = nullptr;
 };
 
 static void AddArrayParams(ffi::AnyBuffer buf, KernelArgStorage& storage,
@@ -185,18 +134,12 @@ static void AddArrayParams(ffi::AnyBuffer buf, KernelArgStorage& storage,
 static ffi::Error AddBufferParam(ffi::AnyBuffer buf, int64_t kind,
                                  KernelArgStorage& storage,
                                  std::vector<void*>& params) {
-  switch (kind) {
-    case 0:
-      AddArrayParams(buf, storage, params);
-      return ffi::Error::Success();
-    case 3:
-      storage.ptr = buf.untyped_data();
-      params.push_back(&storage.ptr);
-      return ffi::Error::Success();
-    default:
-      return ffi::Error(ffi::ErrorCode::kInvalidArgument,
-                        "unknown Numba CUDA ABI argument kind");
+  if (kind != 0) {
+    return ffi::Error(ffi::ErrorCode::kInvalidArgument,
+                      "unknown Numba CUDA ABI argument kind");
   }
+  AddArrayParams(buf, storage, params);
+  return ffi::Error::Success();
 }
 
 static ffi::Error LaunchNumbaCudaAbi(
@@ -270,21 +213,6 @@ static ffi::Error LaunchNumbaCudaAbi(
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
-    modax_numba_cuda_launch, LaunchNumbaCuda,
-    ffi::Ffi::Bind()
-        .Ctx<ffi::PlatformStream<void*>>()
-        .Attr<int64_t>("function")
-        .Attr<int64_t>("grid_x")
-        .Attr<int64_t>("grid_y")
-        .Attr<int64_t>("grid_z")
-        .Attr<int64_t>("block_x")
-        .Attr<int64_t>("block_y")
-        .Attr<int64_t>("block_z")
-        .Attr<int64_t>("shared_mem")
-        .RemainingArgs()
-        .RemainingRets());
-
-XLA_FFI_DEFINE_HANDLER_SYMBOL(
     modax_numba_cuda_abi_launch, LaunchNumbaCudaAbi,
     ffi::Ffi::Bind()
         .Ctx<ffi::PlatformStream<void*>>()
@@ -342,11 +270,6 @@ def register_target() -> None:
     symbol = getattr(_LOADED_LIB, _TARGET_NAME)
     capsule = _pycapsule_new(ctypes.cast(symbol, ctypes.c_void_p).value)
     jax.ffi.register_ffi_target(_TARGET_NAME, capsule, platform="CUDA", api_version=1)
-    symbol = getattr(_LOADED_LIB, "modax_numba_cuda_abi_launch")
-    capsule = _pycapsule_new(ctypes.cast(symbol, ctypes.c_void_p).value)
-    jax.ffi.register_ffi_target(
-        "modax_numba_cuda_abi_launch", capsule, platform="CUDA", api_version=1
-    )
     _REGISTERED = True
 
 
@@ -356,7 +279,7 @@ def register_target() -> None:
 _LOADED_MODULES: list[Any] = []
 
 
-def compile_raw_pointer_kernel(kernel: Any, argtypes: Sequence[Any]) -> int:
+def compile_kernel(kernel: Any, argtypes: Sequence[Any]) -> int:
     """Compile a ``cuda.jit`` kernel and return its ``CUfunction`` pointer.
 
     numba-cuda-mlir exposes no ``get_cufunc()`` -- its ``MLIRLibrary`` only
@@ -396,40 +319,11 @@ def make_launch(
     shared_mem: int = 0,
 ) -> CudaLaunch:
     return CudaLaunch(
-        function=compile_raw_pointer_kernel(kernel, argtypes),
+        function=compile_kernel(kernel, argtypes),
         grid=_as_3d(grid),
         block=_as_3d(block),
         shared_mem=int(shared_mem),
     )
-
-
-def ffi_call(
-    launch: CudaLaunch,
-    inputs: Sequence[Any],
-    output_specs: Sequence[jax.ShapeDtypeStruct],
-) -> tuple[Any, ...]:
-    """Launch a raw-pointer numba-cuda kernel from JAX and return all outputs."""
-
-    register_target()
-    attrs = {
-        "function": np.int64(launch.function),
-        "grid_x": np.int64(launch.grid[0]),
-        "grid_y": np.int64(launch.grid[1]),
-        "grid_z": np.int64(launch.grid[2]),
-        "block_x": np.int64(launch.block[0]),
-        "block_y": np.int64(launch.block[1]),
-        "block_z": np.int64(launch.block[2]),
-        "shared_mem": np.int64(launch.shared_mem),
-    }
-    result = jax.ffi.ffi_call(
-        _TARGET_NAME,
-        tuple(output_specs),
-        has_side_effect=False,
-        custom_call_api_version=_CUSTOM_CALL_API_VERSION,
-    )(*inputs, **attrs)
-    if not isinstance(result, tuple):
-        return (result,)
-    return result
 
 
 def ffi_abi_call(
@@ -438,11 +332,13 @@ def ffi_abi_call(
     output_specs: Sequence[jax.ShapeDtypeStruct],
     *,
     input_kinds: Sequence[int],
-    output_kinds: Sequence[int],
     scalar_f64_values: Sequence[float] = (),
     scalar_i32_values: Sequence[int] = (),
 ) -> tuple[Any, ...]:
-    """Launch a Numba CUDA kernel using Numba's normal array/scalar ABI."""
+    """Launch a Numba CUDA kernel using Numba's normal array/scalar ABI.
+
+    Outputs are always arrays, so only the input kinds need spelling out.
+    """
 
     register_target()
     attrs = {
@@ -455,13 +351,13 @@ def ffi_abi_call(
         "block_z": np.int64(launch.block[2]),
         "shared_mem": np.int64(launch.shared_mem),
         "arg_kinds": np.asarray(
-            tuple(input_kinds) + tuple(output_kinds), dtype=np.int64
+            tuple(input_kinds) + (ABI_ARRAY,) * len(output_specs), dtype=np.int64
         ),
         "scalar_f64_values": np.asarray(tuple(scalar_f64_values), dtype=np.float64),
         "scalar_i32_values": np.asarray(tuple(scalar_i32_values), dtype=np.int32),
     }
     result = jax.ffi.ffi_call(
-        "modax_numba_cuda_abi_launch",
+        _TARGET_NAME,
         tuple(output_specs),
         has_side_effect=False,
         custom_call_api_version=_CUSTOM_CALL_API_VERSION,
@@ -469,22 +365,3 @@ def ffi_abi_call(
     if not isinstance(result, tuple):
         return (result,)
     return result
-
-
-def ptr(dtype: Any) -> Any:
-    """Return a numba C pointer type for a NumPy/JAX dtype."""
-
-    dtype = np.dtype(dtype)
-    if dtype == np.dtype(np.float64):
-        return types.CPointer(types.float64)
-    if dtype == np.dtype(np.float32):
-        return types.CPointer(types.float32)
-    if dtype == np.dtype(np.int32):
-        return types.CPointer(types.int32)
-    if dtype == np.dtype(np.int64):
-        return types.CPointer(types.int64)
-    raise TypeError(f"unsupported custom-call pointer dtype: {dtype}")
-
-
-def scalar_buffer(value: Any, dtype: Any) -> Any:
-    return jnp.asarray((value,), dtype=dtype)

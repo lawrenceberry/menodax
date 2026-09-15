@@ -6,33 +6,26 @@ import functools
 import gc
 import math
 from dataclasses import dataclass
-from typing import Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-from numba_cuda_mlir import cuda, types
+from numba_cuda_mlir import cuda
 
-from solvers._jax_common import (
-    make_custom_vmap_solver,
-    normalize_y0_params,
-    per_trajectory_stats_postprocess,
-)
-from solvers._jax_numba_custom_call import (
-    ABI_ARRAY,
-    ABI_SCALAR_F64,
-    ABI_SCALAR_I32,
-    ffi_abi_call,
-    make_launch,
-)
+from solvers._jax_common import make_custom_vmap_solver, normalize_y0_params
+from solvers._jax_numba_custom_call import make_launch
 from solvers._numba_common import (
-    NumbaWorkspace,
+    SCRATCH_ARGTYPE,
+    SOLVER_ARGTYPES,
     PreparedNumbaSolve,
     build_error_weights,
+    copy_workspace_inputs,
+    ensemble_ffi_call,
+    get_workspace,
     initial_step,
-    jax_stats,
     make_cuda_transposed_vector_writer,
-    numpy_stats,
+    run_kernel,
+    solver_stats,
 )
 from solvers._numba_common import (
     normalize_inputs as _normalize_inputs,
@@ -111,6 +104,7 @@ _WORKSPACE_CACHE: dict[tuple[int, int, int, int], object] = {}
 _SHARED_BLOCK = 32
 _SHARED_MAX_NVARS = 16
 _SHARED_MAX_ENSEMBLE = 16384
+_GLOBAL_BLOCK = 128
 
 
 def _use_shared_backend(n: int, n_vars: int, backend: str) -> bool:
@@ -143,47 +137,12 @@ def clear_caches() -> None:
     _make_kernel.cache_clear()
     _make_shared_kernel.cache_clear()
     _make_jax_launch.cache_clear()
-    _make_shared_jax_launch.cache_clear()
     gc.collect()
-
-
-@dataclass
-class Workspace(NumbaWorkspace):
-    work: list[Any]
-    weights_dev: Any
 
 
 @dataclass(frozen=True)
 class PreparedSolve(PreparedNumbaSolve):
-    workspace: Workspace
     uses_shared: bool = False
-
-
-def get_workspace(
-    cache: dict, n: int, n_vars: int, n_save: int, n_params: int
-) -> Workspace:
-    key = (n, n_vars, n_save, n_params)
-    workspace = cache.get(key)
-    if workspace is not None:
-        return workspace
-
-    # State and stage vectors are stored transposed (n_vars, n) so that for a
-    # fixed component the trajectory axis is contiguous, giving coalesced warp
-    # accesses independent of n_vars. hist keeps the (n, n_save, n_vars) output
-    # layout (written only at save points).
-    workspace = Workspace(
-        y0_dev=cuda.device_array((n_vars, n), dtype=np.float64),
-        times_dev=cuda.device_array(n_save, dtype=np.float64),
-        params_dev=cuda.device_array((n, n_params), dtype=np.float64),
-        hist_dev=cuda.device_array((n, n_save, n_vars), dtype=np.float64),
-        accepted_dev=cuda.device_array(n, dtype=np.int32),
-        rejected_dev=cuda.device_array(n, dtype=np.int32),
-        loop_dev=cuda.device_array(n, dtype=np.int32),
-        work=[cuda.device_array((n_vars, n), dtype=np.float64) for _ in range(9)],
-        weights_dev=cuda.device_array((n_vars, n), dtype=np.float64),
-    )
-    cache[key] = workspace
-    return workspace
 
 
 @functools.cache
@@ -579,7 +538,6 @@ def prepare_solve(
     t_span,
     params,
     *,
-    batch_size=None,
     rtol=1e-8,
     atol=1e-10,
     first_step=None,
@@ -590,22 +548,24 @@ def prepare_solve(
     dcoeff=0.0,
     backend="auto",
 ):
-    del batch_size
-    y0_arr, times, params_arr, dt0 = _normalize_inputs(
-        y0, t_span, params, first_step, solver_name="Tsit5"
-    )
+    y0_arr, times, params_arr, dt0 = _normalize_inputs(y0, t_span, params, first_step)
     n, n_vars = y0_arr.shape
     n_save = times.shape[0]
     n_params = params_arr.shape[1]
     weights_arr = build_error_weights(error_weights, n, n_vars)
 
-    workspace = get_workspace(_WORKSPACE_CACHE, n, n_vars, n_save, n_params)
+    workspace = get_workspace(
+        _WORKSPACE_CACHE, n, n_vars, n_save, n_params, transposed=True, n_work=9
+    )
     # State/weights live transposed (n_vars, n) on the device; params keep the
     # (n, n_params) row layout consumed by the callback.
-    workspace.y0_dev.copy_to_device(np.ascontiguousarray(y0_arr.T))
-    workspace.times_dev.copy_to_device(times)
-    workspace.params_dev.copy_to_device(params_arr)
-    workspace.weights_dev.copy_to_device(np.ascontiguousarray(weights_arr.T))
+    copy_workspace_inputs(
+        workspace,
+        np.ascontiguousarray(y0_arr.T),
+        times,
+        params_arr,
+        np.ascontiguousarray(weights_arr.T),
+    )
 
     uses_shared = _use_shared_backend(n, n_vars, backend)
     if uses_shared:
@@ -613,7 +573,7 @@ def prepare_solve(
         threads = _SHARED_BLOCK
     else:
         kernel = _make_kernel(ode_fn, n_vars, pcoeff, icoeff, dcoeff)
-        threads = 128
+        threads = _GLOBAL_BLOCK
     blocks = (n + threads - 1) // threads
     return PreparedSolve(
         kernel=kernel,
@@ -629,36 +589,12 @@ def prepare_solve(
 
 
 def run_prepared(prepared: PreparedSolve, *, return_stats=False, copy_solution=True):
-    workspace = prepared.workspace
     # The shared-memory kernel allocates its stage workspace in shared memory and
     # takes no scratch arrays; the global kernel takes the nine work buffers.
-    scratch = () if prepared.uses_shared else tuple(workspace.work)
-    prepared.kernel[prepared.blocks, prepared.threads](
-        workspace.y0_dev,
-        workspace.times_dev,
-        workspace.params_dev,
-        prepared.dt0,
-        prepared.rtol,
-        prepared.atol,
-        prepared.max_steps,
-        workspace.weights_dev,
-        workspace.hist_dev,
-        workspace.accepted_dev,
-        workspace.rejected_dev,
-        workspace.loop_dev,
-        *scratch,
+    scratch = () if prepared.uses_shared else prepared.workspace.work
+    return run_kernel(
+        prepared, scratch, return_stats=return_stats, copy_solution=copy_solution
     )
-    cuda.synchronize()
-
-    solution = (
-        workspace.hist_dev.copy_to_host() if copy_solution else workspace.hist_dev
-    )
-    if not return_stats:
-        return solution
-    accepted_steps = workspace.accepted_dev.copy_to_host()
-    rejected_steps = workspace.rejected_dev.copy_to_host()
-    loop_steps = workspace.loop_dev.copy_to_host()
-    return solution, numpy_stats(accepted_steps, rejected_steps, loop_steps)
 
 
 @functools.cache
@@ -666,66 +602,21 @@ def _make_jax_launch(
     ode_fn,
     n: int,
     n_vars: int,
-    n_save: int,
-    n_params: int,
     pcoeff: float = 0.0,
     icoeff: float = 1.0,
     dcoeff: float = 0.0,
+    uses_shared: bool = False,
 ):
-    kernel = _make_kernel(ode_fn, n_vars, pcoeff, icoeff, dcoeff)
-    f64_2d = types.float64[:, ::1]
-    f64_1d = types.float64[::1]
-    i32_1d = types.int32[::1]
-    argtypes = (
-        f64_2d,
-        f64_1d,
-        f64_2d,
-        types.float64,
-        types.float64,
-        types.float64,
-        types.int32,
-        f64_2d,
-        types.float64[:, :, ::1],
-        i32_1d,
-        i32_1d,
-        i32_1d,
-    ) + (f64_2d,) * 9
-    threads = 128
-    blocks = (n + threads - 1) // threads
-    return make_launch(kernel, argtypes, grid=blocks, block=threads)
-
-
-@functools.cache
-def _make_shared_jax_launch(
-    ode_fn,
-    n: int,
-    n_vars: int,
-    n_save: int,
-    n_params: int,
-    pcoeff: float = 0.0,
-    icoeff: float = 1.0,
-    dcoeff: float = 0.0,
-):
-    kernel = _make_shared_kernel(ode_fn, n_vars, pcoeff, icoeff, dcoeff)
-    f64_2d = types.float64[:, ::1]
-    f64_1d = types.float64[::1]
-    i32_1d = types.int32[::1]
-    # No scratch arrays: the shared kernel keeps its stage workspace on chip.
-    argtypes = (
-        f64_2d,
-        f64_1d,
-        f64_2d,
-        types.float64,
-        types.float64,
-        types.float64,
-        types.int32,
-        f64_2d,
-        types.float64[:, :, ::1],
-        i32_1d,
-        i32_1d,
-        i32_1d,
-    )
-    threads = _SHARED_BLOCK
+    """Compile, load and size the kernel behind one JAX-side ensemble launch."""
+    if uses_shared:
+        # No scratch arrays: the shared kernel keeps its stage workspace on chip.
+        kernel = _make_shared_kernel(ode_fn, n_vars, pcoeff, icoeff, dcoeff)
+        argtypes = SOLVER_ARGTYPES
+        threads = _SHARED_BLOCK
+    else:
+        kernel = _make_kernel(ode_fn, n_vars, pcoeff, icoeff, dcoeff)
+        argtypes = SOLVER_ARGTYPES + (SCRATCH_ARGTYPE,) * 9
+        threads = _GLOBAL_BLOCK
     blocks = (n + threads - 1) // threads
     return make_launch(kernel, argtypes, grid=blocks, block=threads)
 
@@ -736,7 +627,6 @@ def solve(
     t_span,
     params,
     *,
-    batch_size=None,
     rtol=1e-8,
     atol=1e-10,
     first_step=None,
@@ -766,30 +656,23 @@ def solve(
     if ``n_vars`` exceeds the shared-memory capacity).
     """
 
-    def solve_impl(y0_arr, t_span_arr, params_arr):
-        return _solve_impl(
-            ode_fn,
-            y0_arr,
-            t_span_arr,
-            params_arr,
-            batch_size=batch_size,
-            rtol=rtol,
-            atol=atol,
-            first_step=first_step,
-            max_steps=max_steps,
-            return_stats=return_stats,
-            error_weights=error_weights,
-            pcoeff=pcoeff,
-            icoeff=icoeff,
-            dcoeff=dcoeff,
-            backend=backend,
-        )
-
-    return make_custom_vmap_solver(
-        solve_impl,
+    solve_impl = functools.partial(
+        _solve_impl,
+        ode_fn,
+        rtol=rtol,
+        atol=atol,
+        first_step=first_step,
+        max_steps=max_steps,
         return_stats=return_stats,
-        stats_postprocess=per_trajectory_stats_postprocess,
-    )(y0, t_span, params)
+        error_weights=error_weights,
+        pcoeff=pcoeff,
+        icoeff=icoeff,
+        dcoeff=dcoeff,
+        backend=backend,
+    )
+    return make_custom_vmap_solver(solve_impl, return_stats=return_stats)(
+        y0, t_span, params
+    )
 
 
 def _solve_impl(
@@ -798,7 +681,6 @@ def _solve_impl(
     t_span,
     params,
     *,
-    batch_size=None,
     rtol=1e-8,
     atol=1e-10,
     first_step=None,
@@ -810,54 +692,35 @@ def _solve_impl(
     dcoeff=0.0,
     backend="auto",
 ):
-    del batch_size
     y0_arr, params_arr, n, n_vars = normalize_y0_params(y0, params)
     times = jnp.asarray(t_span, dtype=jnp.float64)
     n_save = times.shape[0]
-    n_params = params_arr.shape[1]
     dt0 = initial_step(times, first_step)
     weights_arr = jnp.asarray(build_error_weights(error_weights, n, n_vars))
+
+    uses_shared = _use_shared_backend(n, n_vars, backend)
+    launch = _make_jax_launch(ode_fn, n, n_vars, pcoeff, icoeff, dcoeff, uses_shared)
+    # The shared kernel keeps its stage workspace on chip and so needs no
+    # scratch outputs; the global kernel's nine stage vectors are transposed
+    # like the state.
+    scratch_specs = (
+        () if uses_shared else (jax.ShapeDtypeStruct((n_vars, n), jnp.float64),) * 9
+    )
     # State/stage/weights are transposed (n_vars, n) so the kernel's warp
     # accesses are coalesced; XLA materializes the transpose as a C-contiguous
     # operand. hist keeps the (n, n_save, n_vars) output layout.
-    y0_t = y0_arr.T
-    weights_t = weights_arr.T
-
-    inputs = (y0_t, times, params_arr, weights_t)
-    input_kinds = (
-        ABI_ARRAY,
-        ABI_ARRAY,
-        ABI_ARRAY,
-        ABI_SCALAR_F64,
-        ABI_SCALAR_F64,
-        ABI_SCALAR_F64,
-        ABI_SCALAR_I32,
-        ABI_ARRAY,
-    )
-    hist_spec = jax.ShapeDtypeStruct((n, n_save, n_vars), jnp.float64)
-    int_spec = jax.ShapeDtypeStruct((n,), jnp.int32)
-    if _use_shared_backend(n, n_vars, backend):
-        launch = _make_shared_jax_launch(
-            ode_fn, n, n_vars, n_save, n_params, pcoeff, icoeff, dcoeff
-        )
-        # Shared kernel keeps its stage workspace on chip: no scratch outputs.
-        output_specs = (hist_spec, int_spec, int_spec, int_spec)
-    else:
-        launch = _make_jax_launch(
-            ode_fn, n, n_vars, n_save, n_params, pcoeff, icoeff, dcoeff
-        )
-        work_spec = jax.ShapeDtypeStruct((n_vars, n), jnp.float64)
-        output_specs = (hist_spec, int_spec, int_spec, int_spec) + (work_spec,) * 9
-    result = ffi_abi_call(
+    hist, accepted, rejected, loop_steps = ensemble_ffi_call(
         launch,
-        inputs,
-        output_specs,
-        input_kinds=input_kinds,
-        output_kinds=(ABI_ARRAY,) * len(output_specs),
-        scalar_f64_values=(dt0, rtol, atol),
-        scalar_i32_values=(max_steps,),
+        (y0_arr.T, times, params_arr, weights_arr.T),
+        scratch_specs,
+        n=n,
+        n_vars=n_vars,
+        n_save=n_save,
+        dt0=dt0,
+        rtol=rtol,
+        atol=atol,
+        max_steps=max_steps,
     )
-    hist, accepted, rejected, loop_steps = result[:4]
     if not return_stats:
         return hist
-    return hist, jax_stats(accepted, rejected, loop_steps)
+    return hist, solver_stats(accepted, rejected, loop_steps)

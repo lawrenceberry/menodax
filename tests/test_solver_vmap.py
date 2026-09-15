@@ -152,6 +152,3 @@ def test_solver_vmap_return_stats_shapes():
     assert stats["accepted_steps"].shape == (params.shape[0], 1)
     assert stats["rejected_steps"].shape == (params.shape[0], 1)
     assert stats["loop_steps"].shape == (params.shape[0], 1)
-    assert stats["batch_loop_iterations"].shape == (params.shape[0], 1)
-    assert stats["valid_lanes"].shape == (params.shape[0], 1)
-    assert bool(jnp.all(stats["valid_lanes"] == 1))
