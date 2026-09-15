@@ -21,19 +21,11 @@ def _build_numba_callbacks():
     def decay_device(y, t, p):
         return (-p[0] * y[0],)
 
-    @cuda.jit(device=True)
-    def decay_jac_device(y, t, p):
-        return ((-p[0],),)
-
-    return decay_device, decay_jac_device
+    return decay_device
 
 
 def _plain_numba_decay(y, t, p):
     return (-p[0] * y[0],)
-
-
-def _plain_numba_decay_jac(y, t, p):
-    return ((-p[0],),)
 
 
 def _solver_cases():
@@ -43,10 +35,10 @@ def _solver_cases():
     from solvers.rodas5P import solve as rodas5Pnumba_solve
     from solvers.tsit5 import solve as tsit5numba_solve
 
-    decay, decay_jac = _build_numba_callbacks()
+    decay = _build_numba_callbacks()
     return [
         ("tsit5", tsit5numba_solve, (decay,), {}),
-        ("rodas5P", rodas5Pnumba_solve, (decay, decay_jac), {}),
+        ("rodas5P", rodas5Pnumba_solve, (decay,), {}),
     ]
 
 
@@ -124,7 +116,6 @@ def test_solvers_auto_jit_plain_python_callbacks():
     tsit5_sol = tsit5numba_solve(_plain_numba_decay, y0, t_span, params, **solve_kwargs)
     rodas5P_sol = rodas5Pnumba_solve(
         _plain_numba_decay,
-        _plain_numba_decay_jac,
         y0,
         t_span,
         params,
@@ -138,7 +129,7 @@ def test_solvers_auto_jit_plain_python_callbacks():
 def test_solver_vmap_return_stats_shapes():
     from solvers.rodas5P import solve as rodas5Pnumba_solve
 
-    decay, decay_jac = _build_numba_callbacks()
+    decay = _build_numba_callbacks()
 
     y0 = jnp.array([1.0])
     t_span = jnp.array([0.0, 0.5, 1.0])
@@ -147,7 +138,6 @@ def test_solver_vmap_return_stats_shapes():
     _, stats = jax.vmap(
         lambda p: rodas5Pnumba_solve(
             decay,
-            decay_jac,
             y0,
             t_span,
             p,

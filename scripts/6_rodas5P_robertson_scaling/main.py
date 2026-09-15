@@ -60,7 +60,6 @@ _SCENARIOS = (
 class Case(BenchmarkCase):
     solve_fn: Callable[..., Any] | None = None
     ode_fn: Callable[..., Any] | None = None
-    jac_fn: Callable[..., Any] | None = None
     y0: Any = None
     t_span: Any = None
     kwargs: dict[str, Any] | None = None
@@ -82,7 +81,6 @@ CASES: tuple[Case, ...] = (
         linestyle="--",
         solve_fn=rodas5Pnumba_solve,
         ode_fn=robertson.ode_fn,
-        jac_fn=robertson.jac_fn,
         t_span=_T_SPAN,
         kwargs=_SOLVER_KWARGS,
         lu_precision="fp32",
@@ -94,7 +92,6 @@ CASES: tuple[Case, ...] = (
         marker="X",
         solve_fn=rodas5Pnumba_solve,
         ode_fn=robertson.ode_fn,
-        jac_fn=robertson.jac_fn,
         t_span=_T_SPAN,
         kwargs=_SOLVER_KWARGS,
         lu_precision="fp64",
@@ -161,21 +158,6 @@ def time_case(case: Case, y0, params) -> float:
     assert case.ode_fn is not None
 
     def run():
-        if case.jac_fn is not None:
-            extra = (
-                {"lu_precision": case.lu_precision}
-                if case.lu_precision is not None
-                else {}
-            )
-            return case.solve_fn(
-                case.ode_fn,
-                case.jac_fn,
-                y0=solve_y0,
-                t_span=case.t_span,
-                params=solve_params,
-                **extra,
-                **kwargs,
-            )
         if case.lu_precision is not None:
             return case.solve_fn(
                 case.ode_fn,

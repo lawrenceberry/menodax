@@ -2,16 +2,17 @@
 
 Each example carries two forms of the same equations: a ``jnp`` one traced by
 the Diffrax/scipy reference backends, and a ``math``/tuple one that
-``numba_cuda_mlir`` compiles for the modax kernel solver.  Nothing forces the two to
-agree, and the implicit examples additionally hand-derive an analytic Jacobian
-and time derivative, so these tests pin all of it down:
+``numba_cuda_mlir`` compiles for the modax kernel solver.  Nothing forces the
+two to agree, so these tests pin it down:
 
 * every device callback compiles to PTX -- ``cuda.compile_ptx`` runs the full
   numba typing and lowering pipeline without needing a GPU, so this catches the
   common failures (calling a plain Python helper, returning an array instead of
   a tuple) on any machine;
-* the device RHS matches the ``jnp`` RHS, and the analytic ``jac_fn`` /
-  ``time_jac_fn`` match ``jax.jacobian`` of that same RHS;
+* the device RHS matches the ``jnp`` RHS;
+* for the implicit examples, the Jacobian and time derivative Enzyme takes off
+  the device RHS match ``jax.jacobian`` of the ``jnp`` one.  That needs a GPU,
+  unlike the rest of this module, so those two tests skip without one;
 * the Mukhanov-Sasaki background tables, which numba lowers into CUDA constant
   memory, stay inside the 64 KiB budget.
 """
@@ -38,20 +39,6 @@ _EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 # ``(y_row, t, p_row)`` -- the signature the solvers call these callbacks with.
 _DEVICE_SIG = (types.float64[:], types.float64, types.float64[:])
 
-# A ``jac_fn`` returns a nested tuple, and numba-cuda-mlir cannot lower that
-# across a device-function boundary ("func.return must be a Value").  That is no
-# obstacle in practice because the solver never returns one: it calls the
-# callback through the writer below, which consumes the rows in place.
-# Compiling the writer therefore both exercises the real path and stays within
-# what MLIR supports.
-_MATRIX_WRITER_SIG = (
-    types.float64[:, ::1],
-    types.float64,
-    types.float64[:, ::1],
-    types.float64[:, :, ::1],
-    types.int64,
-)
-
 # CUDA constant memory is 64 KiB per module.
 _CONST_LIMIT_BYTES = 64 * 1024
 
@@ -73,12 +60,9 @@ def _compile_device(fn):
     return ptx, const_bytes
 
 
-def _compile_jacobian(fn, n_vars):
-    """Compile a nested-tuple ``jac_fn`` the way the solver actually uses it."""
-    from solvers._numba_common import make_cuda_matrix_writer
-
-    writer = make_cuda_matrix_writer(fn, n_vars).py_func
-    cuda.compile_ptx(writer, _MATRIX_WRITER_SIG, device=True, cc=(8, 0))
+requires_gpu = pytest.mark.skipif(
+    not cuda.is_available(), reason="Enzyme derivatives are device callables"
+)
 
 
 def _max_rel_error(actual, desired):
@@ -133,9 +117,7 @@ def _bbn_samples(n=120):
 
 
 def test_bbn_device_callbacks_compile(bbn):
-    for fn in (bbn.bbn_ode_device, bbn.bbn_time_jac_device):
-        _compile_device(fn)
-    _compile_jacobian(bbn.bbn_jac_device, 4)
+    _compile_device(bbn.bbn_ode_device)
 
 
 def test_bbn_device_rhs_matches_jnp(bbn):
@@ -144,20 +126,22 @@ def test_bbn_device_rhs_matches_jnp(bbn):
         assert _max_rel_error(bbn.bbn_ode_device(y, x, p), ref) < 1e-12
 
 
-def test_bbn_analytic_jacobian_matches_autodiff(bbn):
-    for y, x, p in _bbn_samples():
-        ref = jax.jacobian(lambda yy, x=x, p=p: bbn.bbn_ode(yy, x, jnp.asarray(p)))(
+@requires_gpu
+def test_bbn_enzyme_derivatives_match_autodiff(bbn):
+    from tests.test_enzyme_jacobian import evaluate_derivatives
+
+    for y, x, p in _bbn_samples(n=12):
+        jacobian, time_jacobian = evaluate_derivatives(
+            bbn.bbn_ode_device, y[None, :], x, p[None, :]
+        )
+        ref_jac = jax.jacobian(lambda yy, x=x, p=p: bbn.bbn_ode(yy, x, jnp.asarray(p)))(
             jnp.asarray(y)
         )
-        assert _max_rel_error(bbn.bbn_jac_device(y, x, p), ref) < 1e-10
-
-
-def test_bbn_analytic_time_derivative_matches_autodiff(bbn):
-    for y, x, p in _bbn_samples():
-        ref = jax.jacobian(
+        ref_dt = jax.jacobian(
             lambda xx, y=y, p=p: bbn.bbn_ode(jnp.asarray(y), xx, jnp.asarray(p))
         )(x)
-        assert _max_rel_error(bbn.bbn_time_jac_device(y, x, p), ref) < 1e-10
+        assert _max_rel_error(jacobian[0], ref_jac) < 1e-10
+        assert _max_rel_error(time_jacobian[0], ref_dt) < 1e-10
 
 
 # ---------------------------------------------------------------------------
@@ -194,9 +178,7 @@ def _igm_samples(igm, n=120):
 
 
 def test_igm_device_callbacks_compile(igm):
-    for fn in (igm.igm_ode_device, igm.igm_time_jac_device):
-        _compile_device(fn)
-    _compile_jacobian(igm.igm_jac_device, 3)
+    _compile_device(igm.igm_ode_device)
 
 
 def test_igm_device_rhs_matches_jnp(igm):
@@ -205,23 +187,25 @@ def test_igm_device_rhs_matches_jnp(igm):
         assert _max_rel_error(igm.igm_ode_device(y, u, p), ref) < 1e-12
 
 
-def test_igm_analytic_jacobian_matches_autodiff(igm):
-    for y, u, p in _igm_samples(igm):
-        ref = jax.jacobian(lambda yy, u=u, p=p: igm.igm_ode(yy, u, jnp.asarray(p)))(
+@requires_gpu
+def test_igm_enzyme_derivatives_match_autodiff(igm):
+    from tests.test_enzyme_jacobian import evaluate_derivatives
+
+    for y, u, p in _igm_samples(igm, n=12):
+        jacobian, time_jacobian = evaluate_derivatives(
+            igm.igm_ode_device, y[None, :], u, p[None, :]
+        )
+        ref_jac = jax.jacobian(lambda yy, u=u, p=p: igm.igm_ode(yy, u, jnp.asarray(p)))(
             jnp.asarray(y)
         )
+        ref_dt = jax.jacobian(
+            lambda uu, y=y, p=p: igm.igm_ode(jnp.asarray(y), uu, jnp.asarray(p))
+        )(u)
         # The dTdt/dT_k entry is a near-exact cancellation of two terms that
         # agree to ~9 digits, so its relative error floor is well above 1e-12
         # while the absolute error stays at the double-precision limit.
-        assert _max_rel_error(igm.igm_jac_device(y, u, p), ref) < 1e-5
-
-
-def test_igm_analytic_time_derivative_matches_autodiff(igm):
-    for y, u, p in _igm_samples(igm):
-        ref = jax.jacobian(
-            lambda uu, y=y, p=p: igm.igm_ode(jnp.asarray(y), uu, jnp.asarray(p))
-        )(u)
-        assert _max_rel_error(igm.igm_time_jac_device(y, u, p), ref) < 1e-6
+        assert _max_rel_error(jacobian[0], ref_jac) < 1e-5
+        assert _max_rel_error(time_jacobian[0], ref_dt) < 1e-6
 
 
 # ---------------------------------------------------------------------------

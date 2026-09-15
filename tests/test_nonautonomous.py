@@ -3,8 +3,9 @@
 For a Rosenbrock-Wanner method to retain its order on a non-autonomous ODE,
 each stage must include the explicit ``dt * d_i * df/dt`` correction in
 addition to evaluating ``f`` at the stage time.  These tests use a linear
-non-autonomous problem with a closed-form solution to verify the numba-cuda-mlir/CUDA
-Rodas5P implementation.
+non-autonomous problem with a closed-form solution to verify the
+numba-cuda-mlir/CUDA Rodas5P implementation, and with it that the ``df/dt``
+Enzyme derives alongside the Jacobian is right.
 
 Reference ODE:  dy/dt = -lambda * y + forcing * t,   y(0) = 0
 Closed form:    y(t) = forcing * (lambda * t - 1 + exp(-lambda t)) / lambda**2
@@ -33,14 +34,6 @@ def ode_fn(y, t, p):
     return (-p[0] * y[0] + p[1] * t,)
 
 
-def jac_fn(y, t, p):
-    return ((-p[0],),)
-
-
-def time_jac_fn(y, t, p):
-    return (p[1],)
-
-
 def _setup():
     y0 = np.zeros((1, 1), dtype=np.float64)
     t_span = np.linspace(0.0, T_FINAL, N_SAVE, dtype=np.float64)
@@ -54,11 +47,9 @@ def test_rodas5P_nonautonomous_matches_analytical():
     y0, t_span, params, exact = _setup()
     sol = rodas5Pnumba_solve(
         ode_fn,
-        jac_fn,
         y0,
         t_span,
         params,
-        time_jac_fn=time_jac_fn,
         rtol=1e-9,
         atol=1e-11,
         first_step=1e-3,
@@ -70,10 +61,9 @@ def test_rodas5P_nonautonomous_matches_analytical():
 
 
 @pytest.mark.skipif(not cuda.is_available(), reason="CUDA required")
-def test_rodas5P_autonomous_default_unchanged():
-    """Passing ``time_jac_fn=None`` (the default) must still solve an
-    autonomous problem correctly: the kernel uses a zero-stub for dT and
-    every ``D_i * dT`` term contributes zero.
+def test_rodas5P_autonomous_unchanged():
+    """An autonomous problem must still solve correctly: Enzyme derives
+    ``df/dt = 0``, so every ``D_i * dT`` term contributes zero.
     """
     # Re-use the same RHS with zero forcing, so f = -lambda*y.
     y0 = np.ones((1, 1), dtype=np.float64)
@@ -83,7 +73,6 @@ def test_rodas5P_autonomous_default_unchanged():
 
     sol = rodas5Pnumba_solve(
         ode_fn,
-        jac_fn,
         y0,
         t_span,
         params,

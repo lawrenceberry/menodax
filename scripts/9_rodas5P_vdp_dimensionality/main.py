@@ -152,7 +152,7 @@ def time_case(case: Case, dim: int, *, divergence: float) -> float:
         )
 
     if case.mode == "custom":
-        ode_fn_nb, _, jac_fn_nb = vdp.make_system(n_osc)
+        ode_fn_nb, _, _ = vdp.make_system(n_osc)
 
         def run_custom():
             extra = (
@@ -162,7 +162,6 @@ def time_case(case: Case, dim: int, *, divergence: float) -> float:
             )
             return case.solve_fn(
                 ode_fn_nb,
-                jac_fn_nb,
                 y0=y0_batch,
                 t_span=case.t_span,
                 params=params,

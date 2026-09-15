@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from numba_cuda_mlir import cuda, types
+from numba_enzyme import jacfwd_column
 from nvmath.device import LUPivotSolver
 
 from solvers._jax_common import (
@@ -36,8 +37,6 @@ from solvers._numba_common import (
     initial_step,
     jax_stats,
     make_cuda_striped_vector_writer,
-    make_cuda_vector_writer,
-    make_cuda_zero_vector_writer,
     numpy_stats,
 )
 from solvers._numba_common import (
@@ -180,9 +179,8 @@ def get_workspace(
 @functools.cache
 def _make_kernel(
     ode_fn,
-    jac_fn,
-    time_jac_fn,
     n_vars: int,
+    n_params: int,
     pcoeff: float = 0.0,
     icoeff: float = 1.0,
     dcoeff: float = 0.0,
@@ -206,31 +204,56 @@ def _make_kernel(
         n_vars, precision=lu_dtype, batches_per_block=batches_per_block
     )
     ode_write = make_cuda_striped_vector_writer(ode_fn, n_vars)
-    jac_device = as_cuda_device(jac_fn)
+
+    # df/dy and df/dt, forward-differentiated out of ode_fn by Enzyme. The
+    # callback is the primal as written: numba-cuda-mlir flattens its tuple
+    # arguments into one scalar parameter per element and lowers its tuple
+    # return to a struct returned by value, which is the flat-scalar shape
+    # Enzyme differentiates. The signature is what says so -- the kernel's own
+    # calls specialise ode_fn for array arguments instead -- and it is required,
+    # since an array cannot say how long the tuple it stands for is. Each sweep
+    # seeds one flattened argument, so the call below reads a column of df/dy
+    # for col < n_vars and df/dt at col == n_vars, where t sits. See
+    # "Derived Jacobians" in CLAUDE.md for why this is forward mode, why it is
+    # one column at a time, and what it costs.
+    jacobian_column = jacfwd_column(
+        as_cuda_device(ode_fn),
+        signature=types.UniTuple(types.float64, n_vars)(
+            types.UniTuple(types.float64, n_vars),
+            types.float64,
+            types.UniTuple(types.float64, n_params),
+        ),
+    )
 
     @cuda.jit(device=True)
-    def assemble_lu(y, t, p, lu_buf, a_off, dtgamma_inv, i, lane, stride):
+    def assemble_lu(y, t, p, lu_buf, a_off, dtgamma_inv, dT, i, lane, stride):
         # Build the Rosenbrock--Wanner iteration matrix M = 1/(h*gamma)*I - J
         # straight into the shared LU buffer. Evaluating the Jacobian and
         # writing M here (rather than staging J through a global array and
         # reading it back) avoids a per-step global-memory round-trip of the
-        # full n_vars*n_vars matrix. Each lane writes a disjoint row-stripe so
-        # the O(n_vars^2) transform/write is shared across the batch's lanes.
-        values = jac_device(y[i], t, p[i])
-        for row in range(lane, n_vars, stride):
-            base = a_off + row * n_vars
-            for col in range(n_vars):
-                v = values[row][col]
-                if row == col:
-                    lu_buf[base + col] = lu_dtype(dtgamma_inv - v)
-                else:
-                    lu_buf[base + col] = lu_dtype(-v)
+        # full n_vars*n_vars matrix. Each lane takes a disjoint column-stripe,
+        # so the O(n_vars^2) work is shared across the batch's lanes rather
+        # than repeated in each of them.
+        #
+        # One forward sweep per column, with the seed chosen at run time.
+        # Column n_vars seeds t instead of a state direction, so df/dt arrives
+        # as a whole vector from one more sweep rather than per row.
+        y_row = y[i]
+        p_row = p[i]
+        column = cuda.local.array(n_vars, types.float64)
+        for col in range(lane, n_vars + 1, stride):
+            jacobian_column(column, y_row, t, p_row, col)
+            if col == n_vars:
+                for row in range(n_vars):
+                    dT[i, row] = column[row]
+            else:
+                for row in range(n_vars):
+                    v = column[row]
+                    if row == col:
+                        lu_buf[a_off + row * n_vars + col] = lu_dtype(dtgamma_inv - v)
+                    else:
+                        lu_buf[a_off + row * n_vars + col] = lu_dtype(-v)
 
-    time_jac_write = (
-        make_cuda_zero_vector_writer(n_vars)
-        if time_jac_fn is None
-        else make_cuda_vector_writer(time_jac_fn, n_vars)
-    )
     batches_per_block = int(lu_solver.batches_per_block)
 
     block_dim = as_launch_block_dim(lu_solver.block_dim)
@@ -367,12 +390,11 @@ def _make_kernel(
                     smem_lu,
                     a_offset,
                     dtgamma_inv,
+                    dT_global,
                     i,
                     lane,
                     batch_lanes,
                 )
-                if lane == 0:
-                    time_jac_write(y_global, smem_t[batch], params, dT_global, i)
             else:
                 for idx_local in range(lane, n_vars * n_vars, batch_lanes):
                     row = idx_local // n_vars
@@ -791,12 +813,10 @@ def _make_kernel(
 
 def prepare_solve(
     ode_fn,
-    jac_fn,
     y0,
     t_span,
     params,
     *,
-    time_jac_fn=None,
     batch_size=None,
     rtol=1e-8,
     atol=1e-10,
@@ -824,9 +844,8 @@ def prepare_solve(
 
     kernel, lu_solver = _make_kernel(
         ode_fn,
-        jac_fn,
-        time_jac_fn,
         n_vars,
+        n_params,
         pcoeff,
         icoeff,
         dcoeff,
@@ -887,8 +906,6 @@ def run_prepared(prepared: PreparedSolve, *, return_stats=False, copy_solution=T
 @functools.cache
 def _make_jax_launch(
     ode_fn,
-    jac_fn,
-    time_jac_fn,
     n: int,
     n_vars: int,
     n_save: int,
@@ -901,9 +918,8 @@ def _make_jax_launch(
 ):
     kernel, lu_solver = _make_kernel(
         ode_fn,
-        jac_fn,
-        time_jac_fn,
         n_vars,
+        n_params,
         pcoeff,
         icoeff,
         dcoeff,
@@ -939,12 +955,10 @@ def _make_jax_launch(
 
 def solve(
     ode_fn,
-    jac_fn,
     y0,
     t_span,
     params,
     *,
-    time_jac_fn=None,
     batch_size=None,
     rtol=1e-8,
     atol=1e-10,
@@ -960,11 +974,10 @@ def solve(
 ):
     """JAX-callable Rodas5 custom-kernel solve.
 
-    ``time_jac_fn`` is the partial time derivative ``df/dt`` of the ODE
-    right-hand side, with pure CUDA-device signature
-    ``(y_row, t, p_row) -> dT_row``. Required for non-autonomous
-    systems to preserve fifth-order accuracy. When ``None``, defaults to a
-    zero stub — correct only for autonomous problems (``df/dt = 0``).
+    Only the right-hand side is supplied. The Jacobian ``df/dy``, and the
+    partial time derivative ``df/dt`` that a non-autonomous system needs to
+    keep fifth-order accuracy, are both differentiated out of ``ode_fn`` with
+    Enzyme, so a non-autonomous problem needs nothing extra from the caller.
 
     ``lu_precision`` (``"fp32"`` or ``"fp64"``) selects the precision of the
     per-step LU factorisation and triangular solves. The state, right-hand
@@ -993,11 +1006,9 @@ def solve(
     def solve_impl(y0_arr, t_span_arr, params_arr):
         return _solve_impl(
             ode_fn,
-            jac_fn,
             y0_arr,
             t_span_arr,
             params_arr,
-            time_jac_fn=time_jac_fn,
             batch_size=batch_size,
             rtol=rtol,
             atol=atol,
@@ -1021,12 +1032,10 @@ def solve(
 
 def _solve_impl(
     ode_fn,
-    jac_fn,
     y0,
     t_span,
     params,
     *,
-    time_jac_fn,
     batch_size=None,
     rtol=1e-8,
     atol=1e-10,
@@ -1050,8 +1059,6 @@ def _solve_impl(
 
     launch = _make_jax_launch(
         ode_fn,
-        jac_fn,
-        time_jac_fn,
         n,
         n_vars,
         n_save,

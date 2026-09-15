@@ -149,13 +149,11 @@ def bbn_ode(y, x, params):
 # CUDA-device callbacks for the modax kernel solver
 # ---------------------------------------------------------------------------
 #
-# ``rodas5P`` compiles its right-hand side, Jacobian and time-derivative
-# with ``numba_cuda_mlir``, so these mirror ``bbn_ode`` above using ``math``
-# scalars
-# and fixed-size tuples instead of ``jnp`` arrays.  ``tests`` in
-# ``tests/test_examples.py`` checks all three against ``bbn_ode`` and its JAX
-# derivatives, so the duplication cannot drift silently.  Device code cannot
-# call a plain Python helper, so the shared term block is repeated inline.
+# ``rodas5P`` compiles its right-hand side with ``numba_cuda_mlir`` and
+# differentiates it with Enzyme for the Jacobian and ``df/dx``, so this mirrors
+# ``bbn_ode`` above using ``math`` scalars and fixed-size tuples instead of
+# ``jnp`` arrays.  ``tests/test_examples.py`` checks it against ``bbn_ode`` so
+# the duplication cannot drift silently.
 
 
 def bbn_ode_device(y, x, p):
@@ -187,107 +185,6 @@ def bbn_ode_device(y, x, p):
     )
 
 
-def bbn_jac_device(y, x, p):
-    """Analytic df/dy for the four-species network, as a 4x4 nested tuple.
-
-    Only ``rate_np`` and ``rate_dd`` carry state dependence; with
-    ``a = n_b*SIGMA_NP``, ``b = n_b*SIGMA_DD`` and ``c = a/K_D``:
-
-        d(rate_np)/dy = ( a*y1,  a*y0, -c, 0 )
-        d(rate_dd)/dy = (    0,     0,  2*b*y2, 0 )
-    """
-    log_eta10 = p[0]
-    N_eff = p[1]
-    eta = 10.0 ** (log_eta10 - 10.0)
-    T = Q / x
-
-    g_sm = 10.75 if T > 0.511 else 3.91
-    g = g_sm + (7.0 / 4.0) * (N_eff - N_EFF_SM)
-    H = math.sqrt(4.0 * math.pi**3 * g / 45.0) * T * T / M_PL
-
-    n_b = eta * (2.0 * ZETA3 / math.pi**2) * T**3
-
-    Gamma_np = (255.0 / TAU_N_MEV) * (12.0 + 6.0 * x + x * x) / x**5 + 1.0 / TAU_N_MEV
-    Gamma_pn = Gamma_np * math.exp(-x)
-
-    K_D = n_b * (3.0 / 4.0) * (4.0 * math.pi / (M_N * T)) ** 1.5 * math.exp(B_D / T)
-
-    denom = H * x
-    a = n_b * SIGMA_NP
-    b = n_b * SIGMA_DD
-    c = a / K_D
-    return (
-        ((-Gamma_np - a * y[1]) / denom, (Gamma_pn - a * y[0]) / denom, c / denom, 0.0),
-        ((Gamma_np - a * y[1]) / denom, (-Gamma_pn - a * y[0]) / denom, c / denom, 0.0),
-        (
-            a * y[1] / denom,
-            a * y[0] / denom,
-            (-c - 4.0 * b * y[2]) / denom,
-            0.0,
-        ),
-        (0.0, 0.0, 2.0 * b * y[2] / denom, 0.0),
-    )
-
-
-def bbn_time_jac_device(y, x, p):
-    """Analytic df/dx, needed for Rodas5P to hold fifth order here.
-
-    Every coefficient (H, n_b, the weak rates and K_D) depends on x, so the
-    network is strongly non-autonomous.  With ``T = Q/x`` and g locally
-    constant (it steps only at ``T = m_e``), ``dT/dx = -T/x`` gives
-
-        dH/dx = -2H/x,   d(n_b)/dx = -3 n_b/x,   d(H*x)/dx = -H,
-        d(K_D)/dx = K_D * (B_D/T - 1.5) / x.
-    """
-    log_eta10 = p[0]
-    N_eff = p[1]
-    eta = 10.0 ** (log_eta10 - 10.0)
-    T = Q / x
-
-    g_sm = 10.75 if T > 0.511 else 3.91
-    g = g_sm + (7.0 / 4.0) * (N_eff - N_EFF_SM)
-    H = math.sqrt(4.0 * math.pi**3 * g / 45.0) * T * T / M_PL
-
-    n_b = eta * (2.0 * ZETA3 / math.pi**2) * T**3
-
-    Gamma_np = (255.0 / TAU_N_MEV) * (12.0 + 6.0 * x + x * x) / x**5 + 1.0 / TAU_N_MEV
-    Gamma_pn = Gamma_np * math.exp(-x)
-
-    K_D = n_b * (3.0 / 4.0) * (4.0 * math.pi / (M_N * T)) ** 1.5 * math.exp(B_D / T)
-
-    rate_np = n_b * SIGMA_NP * (y[0] * y[1] - y[2] / K_D)
-    rate_dd = n_b * SIGMA_DD * y[2] * y[2]
-    denom = H * x
-
-    # d(Gamma_np)/dx from the Bernstein polynomial; the constant decay term drops.
-    A = 255.0 / TAU_N_MEV
-    dGamma_np = A * ((6.0 + 2.0 * x) / x**5 - 5.0 * (12.0 + 6.0 * x + x * x) / x**6)
-    dGamma_pn = math.exp(-x) * (dGamma_np - Gamma_np)
-
-    d_rate_np = SIGMA_NP * (
-        -3.0 * n_b / x * (y[0] * y[1] - y[2] / K_D)
-        + n_b * y[2] * (B_D / T - 1.5) / (x * K_D)
-    )
-    d_rate_dd = -3.0 * rate_dd / x
-
-    dN0 = dGamma_pn * y[1] - dGamma_np * y[0] - d_rate_np
-    dN1 = dGamma_np * y[0] - dGamma_pn * y[1] - d_rate_np
-    dN2 = d_rate_np - 2.0 * d_rate_dd
-    dN3 = d_rate_dd
-
-    # f_i = N_i / (H*x) and d(H*x)/dx = -H, so df_i/dx = dN_i/(H*x) + f_i/x.
-    f0 = (Gamma_pn * y[1] - Gamma_np * y[0] - rate_np) / denom
-    f1 = (Gamma_np * y[0] - Gamma_pn * y[1] - rate_np) / denom
-    f2 = (rate_np - 2.0 * rate_dd) / denom
-    f3 = rate_dd / denom
-    return (
-        dN0 / denom + f0 / x,
-        dN1 / denom + f1 / x,
-        dN2 / denom + f2 / x,
-        dN3 / denom + f3 / x,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Forward model
 # ---------------------------------------------------------------------------
@@ -313,11 +210,9 @@ def predict_abundances(params):
     """Integrate BBN network and return [Y_P, D/H] for given params."""
     sol = rodas5P_solve(
         bbn_ode_device,
-        bbn_jac_device,
         initial_conditions(),
         X_SAVE,
         params,
-        time_jac_fn=bbn_time_jac_device,
         lu_precision="fp32",
         rtol=SOLVER_RTOL,
         atol=SOLVER_ATOL,
@@ -352,11 +247,9 @@ def make_solver(backend):
         # ``solve(f, y0, ts, p)`` signature.
         return lambda f, y0, ts, p: rodas5P_solve(
             bbn_ode_device,
-            bbn_jac_device,
             y0,
             ts,
             p,
-            time_jac_fn=bbn_time_jac_device,
             lu_precision="fp32",
             rtol=SOLVER_RTOL,
             atol=SOLVER_ATOL,
