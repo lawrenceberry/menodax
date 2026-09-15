@@ -66,10 +66,11 @@ uv sync --extra cuda13
 ```
 
 The build leaves `src/numba_enzyme/_vendor/` behind in the fork, 237 MB that
-numba-enzyme's `.gitignore` deliberately un-ignores so that sdist-based
-frontends cannot silently drop the Enzyme plugin. It therefore shows up as
-untracked in `git status` — leave it to make the next build instant, but never
-`git add -A` there.
+its `.gitignore` covers, so `git status` stays clean. Leave it: the next build
+reuses it instead of re-downloading. Ignoring it is safe because
+`hatch_build.py` force-includes each file, which bypasses VCS ignore rules,
+and restages the toolchain whenever the directory is absent — a wheel built
+from an sdist that excludes `_vendor/` still comes out complete.
 
 ## Local changes to numba-enzyme
 
@@ -139,4 +140,5 @@ The fork carries changes that are not upstream:
 - **self-contained git installs** — `hatch_build.py` stages the LLVM/Enzyme
   binaries from the released PyPI wheel when `_vendor/` is absent, and tags the
   wheel `py3-none-linux_x86_64`. See "Installing from the branch instead"
-  above.
+  above. `_vendor/` is gitignored again now that the hook, rather than the
+  un-ignore, is what keeps the plugin in the wheel.
