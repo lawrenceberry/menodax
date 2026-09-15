@@ -15,9 +15,9 @@ dependencies = [
     "numba-cuda>=0.10",
     "numba-cuda-mlir[cu13]>=0.5.1",
     # Supplies the Enzyme-derived Jacobians used by the implicit solvers. The
-    # CUDA backend is not on PyPI yet, so this resolves to the self-contained
-    # wheel in wheels/ (see README) which vendors the LLVM 15 + Enzyme
-    # toolchain the derivative pipeline shells out to.
+    # CUDA backend is not on PyPI, so this resolves to a self-contained wheel
+    # released from the fork below, which vendors the LLVM 15 + Enzyme
+    # toolchain the derivative pipeline shells out to (see wheels/README.md).
     "numba-enzyme[cuda]>=0.1.3",
     "numpy>=2.4.3",
     # 1.0.0 is the first release whose device APIs support numba-cuda-mlir
@@ -27,7 +27,14 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-numba-enzyme = { path = "wheels/numba_enzyme-0.1.3-cp313-cp313-linux_x86_64.whl" }
+# A release asset rather than the `cuda` branch itself: the wheel is prebuilt
+# and hash-pinned in uv.lock, so `uv add modax` downloads ~73 MB and is done,
+# with no build step and no LLVM in the way. Installing from the branch
+# (`{ git = "https://github.com/lawrenceberry/numba-enzyme", branch = "cuda" }`)
+# is equally self-contained -- its build hook stages the same binaries out of
+# the released PyPI wheel -- but pays that build on every resolve. Bump this
+# URL when the fork gains a new release.
+numba-enzyme = { url = "https://github.com/lawrenceberry/numba-enzyme/releases/download/v0.1.3-cuda.1/numba_enzyme-0.1.3-py3-none-linux_x86_64.whl" }
 
 [project.optional-dependencies]
 cuda12 = [

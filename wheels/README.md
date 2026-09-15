@@ -1,54 +1,79 @@
-# Local numba-enzyme wheel
+# The numba-enzyme wheel
 
 `rodas5P` derives its Jacobian with [numba-enzyme][ne]. The release on PyPI has
-no CUDA backend, so `pyproject.toml` points `[tool.uv.sources]` at a wheel built
-from a local checkout instead. The wheel is ~73 MB and is not committed
-(`wheels/` is in `.gitignore`), so a fresh clone has to rebuild it before
-`uv sync` will succeed.
+no CUDA backend, so `pyproject.toml` resolves the dependency to a wheel built
+from the [`cuda` branch of a fork][fork] and published as a GitHub release
+asset:
+
+```toml
+[tool.uv.sources]
+numba-enzyme = { url = "https://github.com/lawrenceberry/numba-enzyme/releases/download/v0.1.3-cuda.1/numba_enzyme-0.1.3-py3-none-linux_x86_64.whl" }
+```
+
+Nothing has to be built or staged by hand: `uv sync` downloads that wheel and
+`uv.lock` pins its sha256. The `wheels/` directory now holds only this file.
+
+The wheel is self-contained. The derivative pipeline shells out to `clang`,
+`llvm-link` and `opt` from LLVM 15 and loads the standalone Enzyme plugin, none
+of which are in numba-enzyme's source tree, so all of them ship inside the
+wheel under `numba_enzyme/_vendor/` — 237 MB installed, 73 MB compressed. No
+system LLVM is involved, and `toolchain.py` resolves `_vendor/` ahead of
+`PATH`. It is tagged `py3-none-linux_x86_64` rather than a CPython tag: the
+package has no extension modules, so it installs on any Python ≥ 3.11.
 
 [ne]: https://github.com/Qruise-ai/numba-enzyme
+[fork]: https://github.com/lawrenceberry/numba-enzyme/tree/cuda
 
-## Rebuilding
+## Installing from the branch instead
 
-The wheel must be self-contained: the derivative pipeline shells out to
-`clang`, `llvm-link` and `opt` from LLVM 15 plus the standalone Enzyme plugin,
-none of which are in the source tree. numba-enzyme's own build populates
-`src/numba_enzyme/_vendor/` from a staging directory under cibuildwheel; the
-released PyPI wheel already carries those binaries, and
-`packaging/bootstrap_dev_toolchain.py` downloads them.
+```toml
+numba-enzyme = { git = "https://github.com/lawrenceberry/numba-enzyme", branch = "cuda" }
+```
 
-From a checkout of numba-enzyme at `../numba-enzyme`:
+This is equally self-contained. When `src/numba_enzyme/_vendor/` is absent —
+which it is for any build that is not a cibuildwheel run — the fork's
+`hatch_build.py` downloads the released PyPI wheel and restages the LLVM and
+Enzyme binaries it already carries, so the branch builds into the same wheel
+the release asset holds. Before that hook existed, a git install produced a
+196 KB package that imported cleanly and then failed at the first
+differentiation.
+
+The release asset is the default only because it skips that build: a git
+source re-downloads and re-stages ~73 MB on every fresh resolve. Prefer the
+branch when tracking fork changes matters more than resolve time, and set
+`NUMBA_ENZYME_VENDOR_FROM_PYPI=0` to suppress the staging deliberately.
+
+## Cutting a new release
+
+After pushing a change to the fork's `cuda` branch:
 
 ```bash
 cd ../numba-enzyme
-uv run python packaging/bootstrap_dev_toolchain.py   # once; fills .dev-toolchain/
+uv build --wheel          # hatch_build.py stages _vendor/ from PyPI if absent
 
-# Stage the binaries where the wheel build looks for them. The shared libraries
-# go under _vendor/lib because that is the first entry in the binaries' RPATH
-# ($ORIGIN/../lib); the released wheel instead resolves them through the second
-# entry, a top-level numba_enzyme.libs/ that hatchling would not include.
-mkdir -p src/numba_enzyme/_vendor
-cp -r .dev-toolchain/wheel/numba_enzyme/_vendor/. src/numba_enzyme/_vendor/
-mkdir -p src/numba_enzyme/_vendor/lib
-cp -r .dev-toolchain/wheel/numba_enzyme.libs/. src/numba_enzyme/_vendor/lib/
-
-uv build --wheel
-cp dist/numba_enzyme-*-linux_x86_64.whl ../modax/wheels/
+gh release create v0.1.3-cuda.2 \
+    dist/numba_enzyme-0.1.3-py3-none-linux_x86_64.whl \
+    --repo lawrenceberry/numba-enzyme --target cuda \
+    --title "v0.1.3-cuda.2"
 ```
 
-Then, in this repository:
+Then point this repository at the new asset:
 
 ```bash
+# edit the URL in pyproject.toml's [tool.uv.sources]
 uv lock --upgrade-package numba-enzyme   # the lock pins the wheel's sha256
 uv sync --extra cuda13
 ```
 
-`_vendor/` is 237 MB and is un-ignored in numba-enzyme's `.gitignore`, so delete
-it afterwards if you do not want it in `git status` there.
+The build leaves `src/numba_enzyme/_vendor/` behind in the fork, 237 MB that
+numba-enzyme's `.gitignore` deliberately un-ignores so that sdist-based
+frontends cannot silently drop the Enzyme plugin. It therefore shows up as
+untracked in `git status` — leave it to make the next build instant, but never
+`git add -A` there.
 
 ## Local changes to numba-enzyme
 
-The checkout this wheel is built from carries changes that are not upstream:
+The fork carries changes that are not upstream:
 
 - **tuple-returning primals** — a CUDA primal with several outputs returns a
   homogeneous tuple. numba-cuda-mlir lowers that to an LLVM struct returned by
@@ -73,14 +98,13 @@ The checkout this wheel is built from carries changes that are not upstream:
   `jacfwd` fills the whole matrix, one sweep per column; `jacfwd_column` fills
   a single column chosen by a run-time index. The solver uses the latter: the
   whole matrix would have to live in per-thread local memory. See
-  `solvers/_enzyme_jacobian.py`.
+  `_make_kernel` in `solvers/rodas5P.py`.
 - **reverse-mode multi-output APIs** — `vjp`, `jacrev` and `jacrev_row`, the
   reverse counterparts of `jvp`/`jacfwd`/`jacfwd_column`. modax does not use
-  them; see `solvers/_enzyme_jacobian.py` for why the solver is forward-mode.
+  them; see "Derived Jacobians" in `CLAUDE.md` for why the solver is
+  forward-mode.
 - **`CUDADifferentiable.externals`** — the `cuda.declare_device` handle behind
-  each tuple implementation, reached through `differentiate_cuda`. The solver
-  calls it rather than the lazy `jacfwd_column` placeholder; see
-  `solvers/_enzyme_jacobian.py` for why.
+  each tuple implementation, reached through `differentiate_cuda`.
 - **optional `signature`** — CUDA derivatives now specialise lazily at each
   call site; passing `signature` only constrains that. A call of more than 30
   positional arguments, which CPython compiles as a star call that numba's
@@ -112,3 +136,7 @@ The checkout this wheel is built from carries changes that are not upstream:
 - **relaxed `llvmlite`/`numba` pins**, and a guard around the removed
   `llvmlite.binding.initialize()`. Upstream pins `llvmlite==0.44.0` and
   `numba==0.61.2` for its CPU driver; that would force numpy below 2.3 here.
+- **self-contained git installs** — `hatch_build.py` stages the LLVM/Enzyme
+  binaries from the released PyPI wheel when `_vendor/` is absent, and tags the
+  wheel `py3-none-linux_x86_64`. See "Installing from the branch instead"
+  above.
