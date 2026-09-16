@@ -1108,7 +1108,11 @@ def solve(
     factorisation that exploits that layout -- see :func:`check_linear_solver`.
     It owns neither the buffer nor the Jacobian, so it is two device functions,
     and it may declare ``ipiv_size`` if it pivots something smaller than the
-    whole state. Forward sensitivities are not available with one.
+    whole state. Forward sensitivities work with one: the joint iteration
+    matrix is block lower triangular with the same ``M0`` on every diagonal
+    block, so the solver only ever factorises the ``n_vars`` block it was
+    written for and the coupling between blocks is a forward substitution the
+    kernel does itself.
 
     ``tf_index`` names a column of ``params`` holding each trajectory's own end
     time, for ensembles whose members finish at different times; save times
@@ -1159,13 +1163,6 @@ def solve(
         tf_index=-1 if tf_index is None else int(tf_index),
         max_registers=max_registers,
     )
-    if linear_solver is not None:
-        # No sensitivity path yet: the joint system's iteration matrix is block
-        # lower triangular in blocks this solver has never been shown.
-        return make_custom_vmap_solver(
-            functools.partial(_solve_impl, ode_fn, **settings),
-            return_stats=return_stats,
-        )(y0, t_span, params)
     # The JVP rule wraps the vmap-aware solvers rather than the other way
     # round: custom_vmap's own JVP path instantiates symbolic zeros, which is
     # what tells the rule which sensitivity blocks it has to integrate.

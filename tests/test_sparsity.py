@@ -1,6 +1,7 @@
 """Colour-compressed Jacobians: the colouring, and what the kernel does with it."""
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from numba_cuda_mlir import cuda
@@ -162,3 +163,21 @@ def test_compressed_layout_needs_a_solver_that_reads_it():
     p = np.tile(np.array([0.7, 0.4, 0.2]), (64, 1))
     with pytest.raises(ValueError, match="dense_lu_solver cannot factorise"):
         solve(chain_ode, y0, np.array([0.0, 1.0]), p, sparsity=CHAIN)
+
+
+@requires_cuda
+def test_gradients_survive_compression_and_a_custom_solver():
+    """The joint system only ever asks the solver for the n_vars block."""
+    compressed = colour_sparsity(normalize_sparsity(CHAIN, N))
+    y0 = jnp.asarray([[1.0, 0.0, 0.0, 0.0]])
+    t = jnp.asarray([0.0, 2.0])
+    kw = dict(rtol=1e-11, atol=1e-13, first_step=1e-4, lu_precision="fp64")
+
+    def loss(p, **extra):
+        out = solve(chain_ode, y0, t, jnp.asarray([p]), **kw, **extra)
+        return jnp.sum(out[0, -1] ** 2)
+
+    p0 = jnp.asarray([0.7, 0.4, 0.2])
+    dense = jax.grad(loss)(p0)
+    sparse = jax.grad(loss)(p0, sparsity=CHAIN, linear_solver=_chain_solver(compressed))
+    np.testing.assert_allclose(np.asarray(sparse), np.asarray(dense), rtol=1e-9)
