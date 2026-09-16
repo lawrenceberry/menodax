@@ -199,12 +199,25 @@ Details:
 
 The joint system is `n_vars * (1 + n_sens)` wide, where `n_sens` is the number
 of directions actually differentiated — `n_params`, plus `n_vars` more if you
-differentiate `y0` as well. That width, not the arithmetic, is what sets the
-price: Rodas5P keeps ten stage vectors of the joint state in shared memory, so
-the batch per block shrinks as it grows. The `O(n_vars^3)` LU does *not* grow —
-one factorisation of `M0` serves the state and every sensitivity column — so
-what each extra column adds is an `O(n_vars^2)` triangular solve, two Enzyme
-sweeps per stage, and its share of the occupancy.
+differentiate `y0` as well.
+
+**Cost is linear in `n_sens`, because the sensitivities are never factorised.**
+This is the whole point of the block-triangular structure. The joint iteration
+matrix has the same `M0 = I/(h*gamma) - J_y` on every diagonal block, so a step
+factorises `M0` exactly **once**, at `O(n_vars^3)`, and every sensitivity column
+then reuses that factorisation. What an extra column adds is a forward and back
+substitution against factors that already exist — `O(n_vars^2)` — plus two
+Enzyme sweeps per stage and its share of the occupancy. Per step:
+
+```
+cost  ~  O(n_vars^3)              one LU, however many columns
+       + (1 + n_sens) * O(n_vars^2)   one substitution per column per stage
+       + (1 + n_sens) * O(n_vars)     right-hand sides and Enzyme sweeps
+```
+
+There is no second cubic term anywhere in that. Nothing about differentiating
+costs another factorisation, which is exactly why the measured overhead below
+tracks `1 + n_sens` and not something steeper.
 
 **Against parameter count**, at `n_vars = 8`, 1000 trajectories, fp32:
 
@@ -216,9 +229,11 @@ sweeps per stage, and its share of the occupancy.
 | 8 | 72 | 6.98 ms | 48.52 ms | **6.95×** |
 
 So cost is roughly **linear in `1 + n_params`**, with a coefficient a little
-under one — about `0.7 * (1 + n_params)` here — because the shared factorisation
-is amortised over all the columns. Budget accordingly: ten parameters is an
-order of magnitude, not a rounding error.
+under one — about `0.7 * (1 + n_params)` here — the discount being the
+factorisation that all the columns share. Budget accordingly: ten parameters is
+an order of magnitude, not a rounding error, but it is an order of magnitude and
+not the `n_params`-fold repetition of the cubic that differentiating the
+factorisation itself would cost.
 
 **Against state dimension**, one parameter, on the VdP lattice at 1000
 trajectories, fp32:
