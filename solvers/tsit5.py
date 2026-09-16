@@ -668,6 +668,7 @@ def solve(
     dcoeff=0.0,
     backend="auto",
     sens_error_control=True,
+    sens_param_columns=None,
 ):
     """JAX-callable Tsit5 custom-kernel solve.
 
@@ -726,6 +727,9 @@ def solve(
         jnp.shape(params)[-1],
         return_stats,
         sens_error_control,
+        None
+        if sens_param_columns is None
+        else tuple(int(c) for c in sens_param_columns),
     )(y0, t_span, params)
 
 

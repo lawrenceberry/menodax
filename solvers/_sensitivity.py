@@ -79,12 +79,22 @@ class SensitivitySpec:
     wrt_y0: bool
     wrt_params: bool
     error_control: bool = True
+    param_columns: tuple[int, ...] | None = None
 
     def __post_init__(self):
         if not (self.wrt_y0 or self.wrt_params):
             raise ValueError(
                 "a sensitivity spec must carry at least one direction block"
             )
+        if self.param_columns is not None:
+            if len(set(self.param_columns)) != len(self.param_columns):
+                raise ValueError("param_columns must not repeat a column")
+            bad = [c for c in self.param_columns if not 0 <= c < self.n_params]
+            if bad:
+                raise ValueError(
+                    f"param_columns {bad} lie outside the {self.n_params} "
+                    "parameter columns"
+                )
 
     @property
     def n_y0_dirs(self) -> int:
@@ -92,7 +102,16 @@ class SensitivitySpec:
 
     @property
     def n_param_dirs(self) -> int:
-        return self.n_params if self.wrt_params else 0
+        if not self.wrt_params:
+            return 0
+        return self.n_params if self.param_columns is None else len(self.param_columns)
+
+    @property
+    def param_seed_columns(self) -> tuple[int, ...]:
+        """Which parameter each direction seeds, in direction order."""
+        if self.param_columns is None:
+            return tuple(range(self.n_params))
+        return self.param_columns
 
     @property
     def n_sens(self) -> int:
@@ -208,6 +227,7 @@ def make_augmented_transposed_writer(ode_fn, spec: SensitivitySpec):
     n_sens = spec.n_sens
     n_y0_dirs = spec.n_y0_dirs
     n_params = spec.n_params
+    param_cols = spec.param_seed_columns
     length = max(n_vars, n_params)
     fn_device = as_cuda_device(ode_fn)
     tangent_of = make_tangent(ode_fn, n_vars, n_params)
@@ -230,8 +250,9 @@ def make_augmented_transposed_writer(ode_fn, spec: SensitivitySpec):
         for k in range(n_sens):
             base = n_vars + k * n_vars
             # An initial-state direction has no parameter component; a
-            # parameter direction seeds the unit vector e_(k - n_y0_dirs).
-            start = 0 if k < n_y0_dirs else length - (k - n_y0_dirs)
+            # parameter direction k seeds the unit vector for the parameter
+            # it was asked for, which need not be the k-th.
+            start = 0 if k < n_y0_dirs else length - param_cols[k - n_y0_dirs]
             tangent_of(
                 tangent,
                 zs,
@@ -263,6 +284,7 @@ def make_augmented_local_writer(ode_fn, spec: SensitivitySpec):
     n_sens = spec.n_sens
     n_y0_dirs = spec.n_y0_dirs
     n_params = spec.n_params
+    param_cols = spec.param_seed_columns
     length = max(n_vars, n_params)
     fn_device = as_cuda_device(ode_fn)
     tangent_of = make_tangent(ode_fn, n_vars, n_params)
@@ -278,7 +300,7 @@ def make_augmented_local_writer(ode_fn, spec: SensitivitySpec):
         tangent = cuda.local.array(n_vars, types.float64)
         for k in range(n_sens):
             base = n_vars + k * n_vars
-            start = 0 if k < n_y0_dirs else length - (k - n_y0_dirs)
+            start = 0 if k < n_y0_dirs else length - param_cols[k - n_y0_dirs]
             tangent_of(
                 tangent,
                 z_row,
@@ -320,7 +342,7 @@ def augmented_y0(y0_arr, spec: SensitivitySpec):
         eye = jnp.eye(spec.n_vars, dtype=y0_arr.dtype).reshape(1, -1)
         blocks.append(jnp.broadcast_to(eye, (n, spec.n_vars * spec.n_vars)))
     if spec.wrt_params:
-        blocks.append(jnp.zeros((n, spec.n_vars * spec.n_params), y0_arr.dtype))
+        blocks.append(jnp.zeros((n, spec.n_vars * spec.n_param_dirs), y0_arr.dtype))
     return jnp.concatenate(blocks, axis=1)
 
 
@@ -388,6 +410,7 @@ def make_sensitivity_solver(
     n_params: int,
     return_stats: bool,
     sens_error_control: bool,
+    param_columns: tuple[int, ...] | None = None,
 ):
     """Attach a forward-sensitivity JVP rule to one solver implementation.
 
@@ -430,7 +453,9 @@ def make_sensitivity_solver(
             out = primal_solver(y0, t_span, params)
             return out, jax.tree_util.tree_map(_zero_tangent, out)
 
-        spec = SensitivitySpec(n_vars, n_params, wrt_y0, wrt_params, sens_error_control)
+        spec = SensitivitySpec(
+            n_vars, n_params, wrt_y0, wrt_params, sens_error_control, param_columns
+        )
         out = joint_solver_for(spec)(y0, t_span, params)
         hist, stats = out if return_stats else (out, None)
         state, sens = split_augmented(hist, spec)
@@ -446,11 +471,14 @@ def make_sensitivity_solver(
             )
             offset = spec.n_y0_dirs
         if wrt_params:
-            tangent += jnp.einsum(
-                "nsik,nk->nsi",
-                sens[..., offset:],
-                _match_shape(dparams, axis_size, "params"),
-            )
+            dp = _match_shape(dparams, axis_size, "params")
+            if spec.param_columns is not None:
+                # Only the chosen columns were integrated, so contract against
+                # just those. The transpose of this gather is a scatter, which
+                # is what makes jax.grad return a cotangent of the full width
+                # with zeros where no sensitivity was carried.
+                dp = dp[:, jnp.asarray(spec.param_columns)]
+            tangent += jnp.einsum("nsik,nk->nsi", sens[..., offset:], dp)
         if stats is None:
             return state, tangent
         # Step counters are integers and carry no derivative, but JAX still

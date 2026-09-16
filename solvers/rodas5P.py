@@ -323,6 +323,7 @@ def _make_kernel(
 
     if spec is not None:
         n_y0_dirs = spec.n_y0_dirs
+        param_cols = spec.param_seed_columns
         seeds = seed_table(spec)
         length = max(n_vars, n_params)
         second_tangent = make_second_tangent(ode_fn, n_vars, n_params)
@@ -342,7 +343,7 @@ def _make_kernel(
             column = cuda.local.array(n_vars, types.float64)
             for k in range(n_sens):
                 base = n_vars + k * n_vars
-                start = 0 if k < n_y0_dirs else length - (k - n_y0_dirs)
+                start = 0 if k < n_y0_dirs else length - param_cols[k - n_y0_dirs]
                 second_tangent(
                     column,
                     y_local,
@@ -452,7 +453,7 @@ def _make_kernel(
                 k_stages[s, j] = np.float64(rhs[j])
             for k in range(n_sens):
                 base = n_vars + k * n_vars
-                start = 0 if k < n_y0_dirs else length - (k - n_y0_dirs)
+                start = 0 if k < n_y0_dirs else length - param_cols[k - n_y0_dirs]
                 second_tangent(
                     coupling,
                     y,
@@ -1019,6 +1020,7 @@ def solve(
     lu_precision: str = "fp32",
     trajectories_per_block=None,
     sens_error_control=True,
+    sens_param_columns=None,
     linear_solver=None,
     sparsity=None,
     tf_index=None,
@@ -1069,6 +1071,15 @@ def solve(
     rather than the block's shared budget, which carries only the ``n_vars``
     matrix. This is still a solver for problems with few parameters relative to
     the state dimension.
+
+    ``sens_param_columns`` restricts the parameter sensitivities to the columns
+    named, rather than carrying one block per parameter. The joint system is
+    ``n_vars * (1 + n_sens)`` components and each direction costs a
+    second-order Enzyme sweep per stage, so this is the difference between
+    paying for the parameters you want and paying for the whole ``params`` row
+    -- which matters most when that row also carries things that are not
+    parameters at all, such as integration bounds or an integer selecting a
+    table. The default ``None`` carries every column, as before.
 
     ``sens_error_control`` decides whether the sensitivity components take part
     in the step-size error norm. The default ``True`` controls them to the same
@@ -1184,6 +1195,9 @@ def solve(
         jnp.shape(params)[-1],
         return_stats,
         sens_error_control,
+        None
+        if sens_param_columns is None
+        else tuple(int(c) for c in sens_param_columns),
     )(y0, t_span, params)
 
 
