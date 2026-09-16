@@ -448,9 +448,15 @@ def _make_kernel(
             """
             seed = cuda.const.array_like(seeds)
             coupling = cuda.local.array(n_vars, types.float64)
+            # The stage vectors carry lu_precision, but Enzyme's endpoint is
+            # built for float64 directions, so the state increment is widened
+            # here rather than the stages being stored wider throughout.
+            k_state = cuda.local.array(n_vars, types.float64)
             solve_local(lu, ipiv, rhs)
             for j in range(n_vars):
                 k_stages[s, j] = np.float64(rhs[j])
+            for j in range(n_vars):
+                k_state[j] = np.float64(k_stages[s, j])
             for k in range(n_sens):
                 base = n_vars + k * n_vars
                 start = 0 if k < n_y0_dirs else length - param_cols[k - n_y0_dirs]
@@ -462,7 +468,7 @@ def _make_kernel(
                     y[base : base + n_vars],
                     0.0,
                     seed[start : start + n_params],
-                    k_stages[s],
+                    k_state,
                     0.0,
                     seed[0:n_params],
                     # The inner direction does not vary: zero here leaves
