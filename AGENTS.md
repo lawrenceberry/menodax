@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to coding agents working in this repository.
 
 ## Project Overview
 
@@ -159,6 +159,72 @@ every local change made to numba-enzyme.
 solvers. The `"fp32"` default does not lower the method's order — the
 Rosenbrock order conditions hold under an approximate Jacobian — while
 halving the LU shared-memory footprint.
+
+### Forward sensitivities
+
+Both solvers carry a `jax.custom_jvp` rule (`solvers/_sensitivity.py`), so
+`jax.jvp`, `jax.jacfwd`, `jax.grad`, `jax.jacrev` and `jax.value_and_grad` work
+with respect to `y0` and `params`. Asking for a derivative integrates the
+continuous forward-sensitivity system jointly with the state,
+
+```
+d/dt [y, S] = [f(t, y, p), J_y S + J_p]
+```
+
+as one system of `n_aug = n_vars * (1 + n_sens)` components, so `value_and_grad`
+is one solve rather than two. `t_span` is not differentiable and raises. The
+README's "Gradients" section carries the design argument and the proof that a
+stiff ODE has an equally stiff sensitivity system; this is what to know before
+touching the code.
+
+- **The rule sits outside `custom_vmap`, not inside.** `custom_vmap`'s own JVP
+  path traces to a jaxpr, which instantiates every symbolic zero; the rule uses
+  `symbolic_zeros=True` to see *which* arguments are being differentiated and
+  integrate only those blocks. Nest it the other way and every solve carries
+  the `n_vars` initial-state columns whether or not anyone wants them.
+- **`jax.grad` needs no adjoint.** The rule materialises `S` and contracts it
+  with the input tangents; that contraction is linear in the tangents, so JAX
+  transposes it and reverse mode falls out of the same rule.
+- **Everything is a directional derivative, never a Jacobian.** `J_y S_k + J_p_k`
+  is `jvp` of `ode_fn` seeded with `(S_k, 0, e_k)` — one sweep per column at any
+  `n_vars`, where unit columns would cost `n_vars + 1`. The joint Jacobian's
+  coupling block applied to a vector, and the sensitivity rows' `dF/dt`, are
+  `jvp(jvp(ode_fn))` (forward over forward) with the second direction set to the
+  state increment or to the time direction. Composing makes the derivative of
+  the whole tangent map, so the call carries a fourth direction for the inner
+  one's own variation; the solver passes zero for it, which leaves the plain
+  bilinear form. Both the tuple-shaped `jvp` and its composability are
+  modax-driven additions to the numba-enzyme fork, where every endpoint now
+  composes over a `jvp`; see `wheels/README.md`.
+- **The unit and zero directions are windows into one constant-memory table**,
+  `seed_table`: `2L` zeros with a single `1.0` at `L`, so the window starting at
+  `L - k` has its `1.0` at `k`, and any window inside `[0, L)` is all zeros. A
+  per-thread one-hot buffer instead could not promote to registers, because its
+  store index is dynamic.
+- **Rodas5P factorises the state block only.** The joint iteration matrix is
+  block lower triangular with the same `M0 = I/(h*gamma) - J_y` on every
+  diagonal block, so `block_solve` is a forward substitution against one
+  factorisation: state row first, then each sensitivity row with its right-hand
+  side corrected by `L_k k_y`. The LU is `n_vars`-sized, not `n_aug`-sized.
+  Do not be tempted back to the block-diagonal approximation: it is legitimate
+  under the W property and order 5 survives, but the error constant does not —
+  201x the steps on a bilinear right-hand side, measured, and
+  `test_joint_solve_costs_about_what_the_plain_solve_costs` is the guard.
+- **`_fit_lu_solver` re-sizes the batch.** nvmath picks `batches_per_block` from
+  the LU, which is `n_vars`-sized, while the ten stage vectors hold the
+  augmented state; without the re-fit a joint solve overflows shared memory.
+- **Step control includes the sensitivities by default.** `sens_error_control`
+  flips it. With it off, the sensitivity components get zero error weight and
+  `n_error` keeps the norm dividing by `n_vars`, so the joint solve takes the
+  plain solve's steps and returns its value — Tsit5 bit for bit, Rodas5P to
+  round-off (nvmath sizes the LU block differently for the larger system, which
+  reorders the cross-lane error reduction).
+- **The writers are where the augmentation lives**, not a generated augmented
+  callback: the kernels are parameterised on a `SensitivitySpec` and otherwise
+  integrate the larger system unchanged. Tsit5's writer owns a whole trajectory
+  per thread; Rodas5P's stripes the lanes over sensitivity *directions*, which
+  are independent, so every lane writes a disjoint block with no barrier inside
+  a device function its callers invoke under a divergent `if active`.
 
 ### Kernel design
 

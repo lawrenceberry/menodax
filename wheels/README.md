@@ -21,6 +21,12 @@ system LLVM is involved, and `toolchain.py` resolves `_vendor/` ahead of
 `PATH`. It is tagged `py3-none-linux_x86_64` rather than a CPython tag: the
 package has no extension modules, so it installs on any Python ≥ 3.11.
 
+> **The pinned release predates the `jvp` additions below.** The
+> forward-sensitivity support in `solvers/_sensitivity.py` needs them, so until
+> a new asset is cut (see "Cutting a new release") the fork has to be resolved
+> from a working tree — either point `[tool.uv.sources]` at a local path or
+> install it over the wheel.
+
 [ne]: https://github.com/Qruise-ai/numba-enzyme
 [fork]: https://github.com/lawrenceberry/numba-enzyme/tree/cuda
 
@@ -97,12 +103,36 @@ The fork carries changes that are not upstream:
   primal. `jvp` differentiates a scalar-output primal, so a sweep yields a
   single Jacobian entry; a sweep of a multi-output one yields a whole column.
   `jacfwd` fills the whole matrix, one sweep per column; `jacfwd_column` fills
-  a single column chosen by a run-time index. The solver uses the latter: the
-  whole matrix would have to live in per-thread local memory. See
-  `_make_kernel` in `solvers/rodas5P.py`.
+  a single column chosen by a run-time index. The solver uses the latter for
+  the iteration matrix: the whole matrix would have to live in per-thread local
+  memory. See `_make_kernel` in `solvers/rodas5P.py`.
+- **`jvp` for tuple-returning primals** — `jvp` used to be scalar-output only,
+  so a directional derivative of a vector field had to be assembled from
+  `n_vars + 1` unit columns. It now also takes the array call shape,
+  `(tangent, *args, *directions)`, with each direction mirroring the primal's
+  own argument list: an array where the primal takes a tuple, a scalar where it
+  takes a scalar. One sweep returns the whole `J @ d`, which is what makes the
+  forward-sensitivity right-hand side cost one sweep per column at any
+  `n_vars`. See "Forward sensitivities" in `AGENTS.md`.
+- **`jvp` and `vjp` take several directions at once** — a tuple-returning
+  primal's `jvp` accepts one mirrored direction set per sweep and writes a
+  matrix when there is more than one; `vjp` takes a matrix of cotangents and
+  loops over its rows. `jacfwd` and `jacrev` are then those same loops with the
+  identity supplied internally rather than read from the caller, which is what
+  removed their bespoke index arithmetic.
+- **every endpoint composes** — a CUDA derivative is a valid primal, so
+  `jvp(jvp(f))`, `jacrev(jvp(f))`, `vjp(jvp(f))` and the rest all work. It
+  cannot work by re-differentiating the result of the first call: that is a
+  `cuda.declare_device` handle to a separately compiled LTO IR blob, and Enzyme
+  differentiates definitions, not declarations. So the chain is *recorded* --
+  `_differentiate` walks back to the base primal and raises the depth -- and
+  every level is emitted as a definition. Forward markers nest happily in one
+  Enzyme pass; a *reverse* endpoint over a forward level does not, because
+  Enzyme preprocesses a callee before resolving a marker inside it, so those
+  builds run Enzyme once per stage, feeding each output into the next link.
 - **reverse-mode multi-output APIs** — `vjp`, `jacrev` and `jacrev_row`, the
   reverse counterparts of `jvp`/`jacfwd`/`jacfwd_column`. modax does not use
-  them; see "Derived Jacobians" in `CLAUDE.md` for why the solver is
+  them; see "Derived Jacobians" in `AGENTS.md` for why the solver is
   forward-mode.
 - **`CUDADifferentiable.externals`** — the `cuda.declare_device` handle behind
   each tuple implementation, reached through `differentiate_cuda`.

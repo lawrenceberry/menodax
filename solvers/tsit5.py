@@ -30,6 +30,16 @@ from solvers._numba_common import (
 from solvers._numba_common import (
     normalize_inputs as _normalize_inputs,
 )
+from solvers._sensitivity import (
+    SensitivitySpec,
+    augmented_error_weights,
+    augmented_y0,
+    make_augmented_transposed_writer,
+    make_sensitivity_solver,
+)
+from solvers._sensitivity import (
+    clear_caches as clear_sensitivity_caches,
+)
 
 # fmt: off
 C2 = 161.0 / 1000.0
@@ -113,8 +123,10 @@ def _use_shared_backend(n: int, n_vars: int, backend: str) -> bool:
     if backend == "shared":
         if n_vars > _SHARED_MAX_NVARS:
             raise ValueError(
-                "shared backend requires n_vars <= "
-                f"{_SHARED_MAX_NVARS}; got n_vars={n_vars}"
+                "shared backend requires a system size <= "
+                f"{_SHARED_MAX_NVARS}; got {n_vars}. A solve carrying forward "
+                "sensitivities integrates n_vars * (1 + n_sens) components, so "
+                "it may need backend='global' where the plain solve does not"
             )
         return True
     if backend != "auto":
@@ -137,6 +149,7 @@ def clear_caches() -> None:
     _make_kernel.cache_clear()
     _make_shared_kernel.cache_clear()
     _make_jax_launch.cache_clear()
+    clear_sensitivity_caches()
     gc.collect()
 
 
@@ -152,6 +165,7 @@ def _make_body(
     pcoeff: float = 0.0,
     icoeff: float = 1.0,
     dcoeff: float = 0.0,
+    spec: SensitivitySpec | None = None,
 ):
     """Build the per-trajectory Tsit5 integration loop as a CUDA device fn.
 
@@ -167,7 +181,18 @@ def _make_body(
     e1 = EXPONENT * (icoeff + pcoeff + dcoeff)
     e2 = -EXPONENT * (pcoeff + 2.0 * dcoeff)
     e3 = EXPONENT * dcoeff
-    ode_write = make_cuda_transposed_vector_writer(ode_fn, n_vars)
+    # With a sensitivity spec the loop integrates the joint [y, S] system: the
+    # writer emits [f, J_y S + J_p] and every stage vector, the error norm and
+    # the dense-output write run over n_aug components instead of n_vars. The
+    # integrator itself is unchanged -- forward sensitivities are just a larger
+    # ODE, which is what makes them cheap to bolt onto an existing kernel.
+    if spec is None:
+        ode_write = make_cuda_transposed_vector_writer(ode_fn, n_vars)
+        n_system = n_vars
+    else:
+        ode_write = make_augmented_transposed_writer(ode_fn, spec)
+        n_system = spec.n_aug
+    n_error = n_vars if spec is None else spec.n_error
 
     @cuda.jit(device=True)
     def body(
@@ -196,7 +221,7 @@ def _make_body(
         s,
     ):
         prow = params[i]
-        for j in range(n_vars):
+        for j in range(n_system):
             y[j, s] = y0[j, i]
             hist[i, 0, j] = y0[j, i]
             k7[j, s] = 0.0
@@ -223,32 +248,32 @@ def _make_body(
                 dt_use = 1e-30
 
             if has_fsal:
-                for j in range(n_vars):
+                for j in range(n_system):
                     k1[j, s] = k7[j, s]
             else:
                 ode_write(y, t, prow, k1, s)
 
-            for j in range(n_vars):
+            for j in range(n_system):
                 u[j, s] = y[j, s] + dt_use * (A21 * k1[j, s])
             ode_write(u, t + C2 * dt_use, prow, k2, s)
 
-            for j in range(n_vars):
+            for j in range(n_system):
                 u[j, s] = y[j, s] + dt_use * (A31 * k1[j, s] + A32 * k2[j, s])
             ode_write(u, t + C3 * dt_use, prow, k3, s)
 
-            for j in range(n_vars):
+            for j in range(n_system):
                 u[j, s] = y[j, s] + dt_use * (
                     A41 * k1[j, s] + A42 * k2[j, s] + A43 * k3[j, s]
                 )
             ode_write(u, t + C4 * dt_use, prow, k4, s)
 
-            for j in range(n_vars):
+            for j in range(n_system):
                 u[j, s] = y[j, s] + dt_use * (
                     A51 * k1[j, s] + A52 * k2[j, s] + A53 * k3[j, s] + A54 * k4[j, s]
                 )
             ode_write(u, t + C5 * dt_use, prow, k5, s)
 
-            for j in range(n_vars):
+            for j in range(n_system):
                 u[j, s] = y[j, s] + dt_use * (
                     A61 * k1[j, s]
                     + A62 * k2[j, s]
@@ -258,7 +283,7 @@ def _make_body(
                 )
             ode_write(u, t + C6 * dt_use, prow, k6, s)
 
-            for j in range(n_vars):
+            for j in range(n_system):
                 u[j, s] = y[j, s] + dt_use * (
                     B1 * k1[j, s]
                     + B2 * k2[j, s]
@@ -270,7 +295,7 @@ def _make_body(
             ode_write(u, t + C7 * dt_use, prow, k7, s)
 
             err_sum = 0.0
-            for j in range(n_vars):
+            for j in range(n_system):
                 err_est = dt_use * (
                     E1 * k1[j, s]
                     + E2 * k2[j, s]
@@ -283,7 +308,7 @@ def _make_body(
                 scale = atol + rtol * max(abs(y[j, s]), abs(u[j, s]))
                 r = weights[j, i] * err_est / scale
                 err_sum += r * r
-            err_norm = math.sqrt(err_sum / n_vars)
+            err_norm = math.sqrt(err_sum / n_error)
             accept = err_norm <= 1.0 and not math.isnan(err_norm)
 
             t_new = t
@@ -345,7 +370,7 @@ def _make_body(
                         * theta
                     )
                     b7 = 2.5 * (theta - 1.0) * (theta - 0.6) * theta * theta
-                    for j in range(n_vars):
+                    for j in range(n_system):
                         hist[i, save_idx, j] = y[j, s] + dt_use * (
                             b1 * k1[j, s]
                             + b2 * k2[j, s]
@@ -356,13 +381,13 @@ def _make_body(
                             + b7 * k7[j, s]
                         )
                     save_idx += 1
-                for j in range(n_vars):
+                for j in range(n_system):
                     y[j, s] = u[j, s]
                 accepted_steps += 1
                 has_fsal = True
             else:
                 rejected_steps += 1
-                for j in range(n_vars):
+                for j in range(n_system):
                     k7[j, s] = 0.0
                 has_fsal = False
 
@@ -399,9 +424,10 @@ def _make_kernel(
     pcoeff: float = 0.0,
     icoeff: float = 1.0,
     dcoeff: float = 0.0,
+    spec: SensitivitySpec | None = None,
 ):
     """Transposed-global kernel: stage vectors are global ``(n_vars, n)`` arrays."""
-    body = _make_body(ode_fn, n_vars, pcoeff, icoeff, dcoeff)
+    body = _make_body(ode_fn, n_vars, pcoeff, icoeff, dcoeff, spec)
 
     @cuda.jit
     def kernel(
@@ -466,6 +492,7 @@ def _make_shared_kernel(
     pcoeff: float = 0.0,
     icoeff: float = 1.0,
     dcoeff: float = 0.0,
+    spec: SensitivitySpec | None = None,
 ):
     """Shared-memory kernel: stage vectors live in per-block shared memory.
 
@@ -474,8 +501,8 @@ def _make_shared_kernel(
     consecutive lanes are contiguous -> bank-conflict-free), indexed by
     ``threadIdx.x``. No scratch is passed in or written out.
     """
-    body = _make_body(ode_fn, n_vars, pcoeff, icoeff, dcoeff)
-    shape = (n_vars, _SHARED_BLOCK)
+    body = _make_body(ode_fn, n_vars, pcoeff, icoeff, dcoeff, spec)
+    shape = (n_vars if spec is None else spec.n_aug, _SHARED_BLOCK)
 
     @cuda.jit
     def kernel(
@@ -608,15 +635,16 @@ def _make_jax_launch(
     icoeff: float = 1.0,
     dcoeff: float = 0.0,
     uses_shared: bool = False,
+    spec: SensitivitySpec | None = None,
 ):
     """Compile, load and size the kernel behind one JAX-side ensemble launch."""
     if uses_shared:
         # No scratch arrays: the shared kernel keeps its stage workspace on chip.
-        kernel = _make_shared_kernel(ode_fn, n_vars, pcoeff, icoeff, dcoeff)
+        kernel = _make_shared_kernel(ode_fn, n_vars, pcoeff, icoeff, dcoeff, spec)
         argtypes = SOLVER_ARGTYPES
         threads = _SHARED_BLOCK
     else:
-        kernel = _make_kernel(ode_fn, n_vars, pcoeff, icoeff, dcoeff)
+        kernel = _make_kernel(ode_fn, n_vars, pcoeff, icoeff, dcoeff, spec)
         argtypes = SOLVER_ARGTYPES + (SCRATCH_ARGTYPE,) * 9
         threads = _GLOBAL_BLOCK
     blocks = (n + threads - 1) // threads
@@ -639,32 +667,28 @@ def solve(
     icoeff=1.0,
     dcoeff=0.0,
     backend="auto",
+    sens_error_control=True,
 ):
     """JAX-callable Tsit5 custom-kernel solve.
 
-    The solve is an XLA custom call into the numba-cuda kernel and is opaque to
-    autodiff.
+    The solve is an XLA custom call into the numba-cuda kernel, so it carries a
+    ``jax.custom_jvp`` rule rather than being differentiated by XLA: asking for
+    a derivative integrates the continuous forward-sensitivity system alongside
+    the state (see ``solvers/_sensitivity.py``). ``jax.jvp``, ``jax.jacfwd``,
+    ``jax.grad``, ``jax.jacrev`` and ``jax.value_and_grad`` all work with
+    respect to ``y0`` and ``params``; ``t_span`` is not differentiable. An
+    undifferentiated call runs the plain kernel and pays nothing.
 
-    ``first_step`` pins the initial step size; the default ``None`` (like any
-    non-positive value) lets the kernel start from 1e-6 of the integration
-    window.
-
-    ``error_weights`` is an optional per-component weight array, shape
-    ``(n_vars,)`` or ``(N, n_vars)``, applied in the weighted RMS step-size
-    error norm; a weight of 0 excludes that component from step-size control.
-
-    ``pcoeff``/``icoeff``/``dcoeff`` are the PID step-controller gains; the
-    default ``(0, 1, 0)`` is the classic I-controller.
-
-    ``backend`` selects the kernel: ``"auto"`` (default) uses the shared-memory
-    kernel for small ensembles at low dimension and the transposed-global kernel
-    otherwise; ``"shared"`` and ``"global"`` force a backend (``"shared"`` errors
-    if ``n_vars`` exceeds the shared-memory capacity).
+    ``sens_error_control`` decides whether the sensitivity components take part
+    in the step-size error norm. The default ``True`` controls them to the same
+    ``rtol``/``atol`` as the state, so the gradient is as accurate as the value.
+    ``False`` drops them from the norm, which makes the joint solve take exactly
+    the step sequence the plain solve takes -- the value then matches a plain
+    call bit for bit -- at the cost of nothing tying the sensitivities' accuracy
+    to ``rtol``.
     """
 
-    solve_impl = functools.partial(
-        _solve_impl,
-        ode_fn,
+    settings = dict(
         rtol=rtol,
         atol=atol,
         first_step=first_step,
@@ -676,9 +700,33 @@ def solve(
         dcoeff=dcoeff,
         backend=backend,
     )
-    return make_custom_vmap_solver(solve_impl, return_stats=return_stats)(
-        y0, t_span, params
+    # The JVP rule wraps the vmap-aware solvers rather than the other way
+    # round: custom_vmap's own JVP path instantiates symbolic zeros, which is
+    # what tells the rule which sensitivity blocks it has to integrate.
+    primal_solver = make_custom_vmap_solver(
+        functools.partial(_solve_impl, ode_fn, **settings),
+        return_stats=return_stats,
     )
+
+    def joint_solver_for(spec):
+        return make_custom_vmap_solver(
+            functools.partial(
+                _solve_impl,
+                ode_fn,
+                spec=spec,
+                **settings,
+            ),
+            return_stats=return_stats,
+        )
+
+    return make_sensitivity_solver(
+        primal_solver,
+        joint_solver_for,
+        jnp.shape(y0)[-1],
+        jnp.shape(params)[-1],
+        return_stats,
+        sens_error_control,
+    )(y0, t_span, params)
 
 
 def _solve_impl(
@@ -697,30 +745,41 @@ def _solve_impl(
     icoeff=1.0,
     dcoeff=0.0,
     backend="auto",
+    spec=None,
 ):
     y0_arr, params_arr, n, n_vars = normalize_y0_params(y0, params)
     times = jnp.asarray(t_span, dtype=jnp.float64)
     n_save = times.shape[0]
     dt0 = initial_step(first_step)
-    weights_arr = jnp.asarray(build_error_weights(error_weights, n, n_vars))
+    weights_host = build_error_weights(error_weights, n, n_vars)
 
-    uses_shared = _use_shared_backend(n, n_vars, backend)
-    launch = _make_jax_launch(ode_fn, n, n_vars, pcoeff, icoeff, dcoeff, uses_shared)
+    # With a spec the kernel integrates the joint [y, S] system, so every
+    # per-component extent below is the augmented one.
+    n_system = n_vars if spec is None else spec.n_aug
+    if spec is not None:
+        y0_arr = augmented_y0(y0_arr, spec)
+        weights_host = augmented_error_weights(weights_host, spec)
+    weights_arr = jnp.asarray(weights_host)
+
+    uses_shared = _use_shared_backend(n, n_system, backend)
+    launch = _make_jax_launch(
+        ode_fn, n, n_vars, pcoeff, icoeff, dcoeff, uses_shared, spec
+    )
     # The shared kernel keeps its stage workspace on chip and so needs no
     # scratch outputs; the global kernel's nine stage vectors are transposed
     # like the state.
     scratch_specs = (
-        () if uses_shared else (jax.ShapeDtypeStruct((n_vars, n), jnp.float64),) * 9
+        () if uses_shared else (jax.ShapeDtypeStruct((n_system, n), jnp.float64),) * 9
     )
-    # State/stage/weights are transposed (n_vars, n) so the kernel's warp
+    # State/stage/weights are transposed (n_system, n) so the kernel's warp
     # accesses are coalesced; XLA materializes the transpose as a C-contiguous
-    # operand. hist keeps the (n, n_save, n_vars) output layout.
+    # operand. hist keeps the (n, n_save, n_system) output layout.
     hist, accepted, rejected, loop_steps = ensemble_ffi_call(
         launch,
         (y0_arr.T, times, params_arr, weights_arr.T),
         scratch_specs,
         n=n,
-        n_vars=n_vars,
+        n_vars=n_system,
         n_save=n_save,
         dt0=dt0,
         rtol=rtol,
