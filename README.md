@@ -270,23 +270,52 @@ scales further in `n_sens` — at the usual cost of needing a non-stiff problem.
 ### Why continuous forward sensitivities
 
 modax is built for **massive ensembles of low-dimensional systems with few
-parameters** — the regime where forward sensitivity analysis is the cheap
-option. Its cost scales with the number of directions differentiated, so it wins
-whenever there are fewer parameters than state dimensions, which is the case
-modax targets (the BBN example fits 2 parameters to a 4-species network). An
-adjoint method, whose cost is instead independent of the parameter count, would
-only start to pay off well outside that regime — and would need either a
-backwards solve, which is unstable for the stiff, dissipative systems Rodas5P
-exists to handle, or a checkpointed reverse pass whose gradients are no longer
-consistent with the discrete solve the forward pass actually performed.
+parameters**, and that regime picks the method. The three candidates scale
+differently in the state dimension `n_vars` and the parameter count
+`n_params`:
+
+| approach | work per step | extra memory | grows with |
+|---|---|---|---|
+| **Continuous forward sensitivity** (modax) | $O(n_\text{vars}^3 + n_\text{params}\,n_\text{vars}^2)$ | $O(n_\text{vars}\,(1 + n_\text{params}))$ | `n_params` |
+| **Continuous adjoint** (backward) | $O(n_\text{vars}^3)$ backward, plus the forward solve and its checkpoint re-solves | $O(n_\text{vars} + n_\text{params})$ plus checkpoints | number of output cotangents — *not* `n_params` |
+| **Direct auto-diff through the solver** | $O(n_\text{params}\,n_\text{vars}^3)$ | $O(n_\text{vars}\,(1 + n_\text{params}))$ forward; a full tape in reverse | `n_params`, **on the cubic term** |
+
+The decisive row is the last one. A step's cost is dominated by factorising the
+iteration matrix, $O(n_\text{vars}^3)$. Forward sensitivity pays that **once**
+and each parameter column then costs a substitution against factors that already
+exist, so the cubic term never multiplies:
+
+$$O(n_\text{vars}^3 + n_\text{params}\,n_\text{vars}^2) \quad\text{against}\quad O(n_\text{params}\,n_\text{vars}^3)$$
+
+Direct auto-diff has no way to know that. Handed the kernel's hand-written LU as
+ordinary scalar code, Enzyme differentiates the factorisation *itself* —
+propagating a tangent through every one of its $O(n_\text{vars}^3)$ operations,
+once per direction. That is a factor of `n_params` on the dominant term, and it
+is structure no differentiator can recover on its own: what modax does by hand
+is apply the differentiation rule for a linear solve, `M dk = dr - dM k`, which
+reuses `M`'s factors. An auto-diff system that treats the solve as a primitive
+*with* that rule attached would recover the same scaling; one differentiating
+the scalar code beneath it would not.
+
+Against the adjoint, the trade is the usual one: its cost is independent of
+`n_params` and instead proportional to the number of outputs differentiated, so
+it wins once parameters outnumber state dimensions. modax targets the opposite
+corner — the BBN example fits 2 parameters to a 4-species network — and the
+adjoint would additionally need either a backwards solve, which is unstable for
+the stiff, dissipative systems Rodas5P exists to handle, or a checkpointed
+reverse pass whose gradients are no longer consistent with the discrete solve
+the forward pass actually performed.
+
+Differentiating `y0` as well adds `n_vars` columns rather than one, so it enters
+the table wherever `n_params` appears, and is only practical at low dimension.
 
 Forward sensitivities also fit the execution model. The variational equation is
 per-trajectory and couples nothing across the ensemble, so the joint system is
 still one CUDA thread per trajectory with no cross-trajectory communication.
 
-The alternative — differentiating the solver kernel itself with Enzyme, the way
-`ode_fn` is differentiated — is not practical here. The kernels are not ordinary
-functions: they are hand-written CUDA with per-trajectory adaptive stepping,
+The asymptotics are not the only obstacle to differentiating the solver kernel
+itself with Enzyme, the way `ode_fn` is differentiated; it is impractical here
+for mechanical reasons too. The kernels are not ordinary functions: they are hand-written CUDA with per-trajectory adaptive stepping,
 cooperative lane-striped work, `syncthreads` barriers and shared-memory
 workspaces, and Rodas5P calls into nvmath's `LUPivotSolver`, a closed device
 template. Reverse mode through cross-thread communication and opaque CUDA library
