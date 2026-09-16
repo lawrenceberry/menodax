@@ -80,6 +80,80 @@ derived on the host from `t_span` — that argument is traced. Omitting it (or
 passing a non-positive value) hands the kernel a sentinel, and it starts from
 1e-6 of its own integration window.
 
+`trajectories_per_block` is one thread's worth of work each, defaulting to a
+warp. Nothing on chip bounds it, since every per-trajectory buffer is
+thread-local; `trajectories_per_block_or_default` is where that decision is
+made.
+
+`sparsity` takes an `(n_vars, n_vars)` mask, a scipy sparse matrix, or an
+`(nnz, 2)` index array, and compresses the Jacobian by colouring — see below.
+
+### Sparsity, colouring, and custom linear solvers
+
+One kernel, one trajectory per CUDA thread: the state, the ten stage vectors,
+`df/dt`, the step controller and the iteration matrix are all that thread's own
+local memory. Nothing is shared and nothing synchronises inside a step.
+
+**The Jacobian costs one sweep per colour, not one per column.** Forward-mode AD
+returns `J v`, never `J`, so a column at a time costs `n_vars + 1` sweeps. But
+two columns sharing no row are *structurally orthogonal* — their contributions
+to `J v` cannot collide — so seeding both at once returns both intact. Colouring
+the column intersection graph (`solvers/_sparsity.py`, NetworkX greedy, best of
+five strategies) finds the fewest such groups. DISCO-EB's 50-variable
+Einstein-Boltzmann system takes **12 colours**: 13 sweeps where a column at a
+time takes 51.
+
+`CompressedJacobian` is the result and the layout: entry `(r, c)` lives at
+`r * n_colours + colour[c]`, rows dense and columns compressed. With no pattern
+every column gets its own colour, `n_colours == n_vars`, and this *is* the dense
+row-major matrix — so the dense path is not a special case, just the
+uninformative end of the same mechanism.
+
+**The pattern must be a superset of the true nonzeros.** Colouring a superset
+only costs sweeps; colouring a subset silently corrupts the entries where two
+columns of a group do overlap after all. `_check_orthogonal` rejects a colouring
+that violates this, because it is the one way the scheme can be quietly wrong.
+For a structured solver the pattern to give is everything its factorisation
+reads *or writes*, fill-in included — a superset by construction, and it leaves
+the factors room in the same buffer. Colouring DISCO-EB's *true* pattern gives
+11 colours but lets two core columns share one, which collides once the core LU
+fills in; colouring the factorisation pattern gives 12 and zero collisions.
+
+**The linear solver is a parameter, not a branch.** `check_linear_solver`
+documents the protocol — `factorize_local(lu, ipiv)` and
+`solve_local(lu, ipiv, rhs)`, plus an optional `ipiv_size` when it pivots
+something smaller than the state — and the default `dense_lu_solver` satisfies
+it like any caller's would. A solver owns neither the buffer nor the Jacobian;
+it is told nothing about the step size and allocates nothing. It does need to
+read the layout it was given, which is why a compressed layout with the default
+solver is an error rather than garbage.
+
+Forward sensitivities work with a custom solver: the joint iteration matrix is
+block lower triangular with the same `M0` on every diagonal block, so the solver
+only ever factorises the `n_vars` block it was written for, and the coupling
+between blocks is a forward substitution the kernel does itself.
+
+Things to know when touching this:
+
+- **`ode_fn` is always the tuple form.** There is no `jac_fn` any more; the
+  Jacobian and `df/dt` both come from Enzyme, and the tuple form is what Enzyme
+  reads.
+- **A runtime index into the tuple is fatal.** numba emits a bounds-check
+  `cmpxchg` for it and Enzyme refuses the atomic ("cannot handle unknown
+  instruction"). Wrapping the loops around a thread-local array instead gets
+  past typing but yields IR NVVM will not verify. Callbacks must therefore index
+  only with constants — which is why the reference systems are AST-generated,
+  and why DISCO-EB generates its unrolled right-hand side from the looped one.
+- **The seed table's zero row doubles as the null parameter direction**, so it
+  is widened to `max(n_vars, n_params)`. It was `n_vars` once, and every `df/dt`
+  silently read past the row whenever there were more parameters than states.
+- **The sensitivity rows have their own `df/dt`**
+  (`write_sensitivity_time_derivative`). Dropping it does not merely lose order:
+  those rows of `dT` are thread-local and hold whatever was there before, so
+  every step is rejected and the solve silently returns its initial state.
+- `tf_index` names a `params` column holding each trajectory's own end time;
+  `max_registers` caps the per-thread register count.
+
 ### Writing ODE callbacks
 
 Callbacks are compiled with `numba_cuda_mlir`, which constrains them:
@@ -100,13 +174,23 @@ with [numba-enzyme][ne], as it stands and with no adapter around it: a
 callback of the documented shape already reaches Enzyme as a function of flat
 scalars returning a struct, because numba-cuda-mlir flattens a tuple argument
 into one scalar parameter per element and lowers a tuple return to a struct
-returned by value. Seeding a unit vector gives a whole Jacobian column per
-sweep; seeding the time argument gives the whole `df/dt`, so `n_vars + 1`
-sweeps supply both matrices the kernel needs.
-numba-enzyme also exposes `jacfwd`, which fills the whole matrix; the kernel
-uses `jacfwd_column` because that matrix would put `n_vars ** 2` doubles in
-per-thread local memory, where one column at a time keeps the working set at
-`O(n_vars)` and lets each column fold straight into the shared LU buffer.
+returned by value. The kernel uses `jvp` — a directional derivative — rather
+than `jacfwd_column`, because a seed need not be a unit vector: a whole colour
+group goes in at once and the sparsity pattern says which output component
+belongs to which column (see "Sparsity, colouring, and custom linear solvers").
+Seeding the time argument instead of the state gives the whole `df/dt`, so
+`n_colours + 1` sweeps supply both matrices the kernel needs — `n_vars + 1` when
+there is no pattern to exploit. numba-enzyme also exposes `jacfwd`, which fills
+the whole matrix; that would put `n_vars ** 2` doubles in per-thread local
+memory, where one group at a time keeps the working set at `O(n_vars)` and folds
+straight into the LU buffer.
+
+Enzyme's `opt` pipeline is `-passes=enzyme,adce,globaldce,instnamer`.
+`instcombine` used to sit in it and had to come out: on a large kernel it
+canonicalises a clamp into `llvm.smax.i64`, and the vendored LLVM's NVPTX path
+emits a `.smax` token ptxas rejects. The input IR is clean; the intrinsic is
+introduced by the pass. Small systems never hit it, so this only showed up at
+DISCO-EB's 50 variables.
 
 Forward mode is what makes a sweep worth a whole column: a sweep of a
 scalar-output primal yields one Jacobian *entry*. Reverse mode reaches a whole
@@ -141,7 +225,7 @@ Things to know when touching this:
 - An explicit signature is **required**, and not only because an array cannot
   say how long the tuple it stands for is. The callbacks are duck-typed on
   indexing, so the kernel's own calls specialise `ode_fn` for array arguments
-  (see `make_cuda_striped_vector_writer`); only the signature says the
+  (see `make_cuda_local_vector_writer`); only the signature says the
   derivative wants the tuple form.
 - The five-argument call inlines, so the kernel's PTX is byte-identical across
   processes and the CUDA JIT cache hits. Spelling the state out as one scalar
@@ -158,7 +242,7 @@ every local change made to numba-enzyme.
 `lu_precision` (`"fp32"`/`"fp64"`) selects the LU precision for implicit
 solvers. The `"fp32"` default does not lower the method's order — the
 Rosenbrock order conditions hold under an approximate Jacobian — while
-halving the LU shared-memory footprint.
+halving the LU buffer's footprint.
 
 ### Forward sensitivities
 
@@ -210,27 +294,26 @@ touching the code.
   under the W property and order 5 survives, but the error constant does not —
   201x the steps on a bilinear right-hand side, measured, and
   `test_joint_solve_costs_about_what_the_plain_solve_costs` is the guard.
-- **`_fit_lu_solver` re-sizes the batch.** nvmath picks `batches_per_block` from
-  the LU, which is `n_vars`-sized, while the ten stage vectors hold the
-  augmented state; without the re-fit a joint solve overflows shared memory.
+- **The batch no longer has to be re-sized for a joint solve.** The stage
+  vectors that hold the augmented state are thread-local, so only the
+  `n_sens` costs local memory rather than the block's trajectory count.
 - **Step control includes the sensitivities by default.** `sens_error_control`
   flips it. With it off, the sensitivity components get zero error weight and
   `n_error` keeps the norm dividing by `n_vars`, so the joint solve takes the
   plain solve's steps and returns its value — Tsit5 bit for bit, Rodas5P to
-  round-off (nvmath sizes the LU block differently for the larger system, which
-  reorders the cross-lane error reduction).
+  round-off.
 - **The writers are where the augmentation lives**, not a generated augmented
   callback: the kernels are parameterised on a `SensitivitySpec` and otherwise
-  integrate the larger system unchanged. Tsit5's writer owns a whole trajectory
-  per thread; Rodas5P's stripes the lanes over sensitivity *directions*, which
-  are independent, so every lane writes a disjoint block with no barrier inside
-  a device function its callers invoke under a divergent `if active`.
+  integrate the larger system unchanged. Both writers now own a whole trajectory
+  per thread, so each writes its own local arrays with no barrier inside a
+  device function its callers invoke under a divergent `if running`.
 
 ### Kernel design
 
 - One CUDA thread per trajectory; per-trajectory adaptive stepping, so lanes in
   a warp diverge and the block runs until its slowest trajectory finishes.
-- In-kernel LU factorisation with shared-memory workspaces.
+  Rodas5P needs no barrier at all: a finished thread simply returns.
+- In-kernel LU factorisation, entirely in thread-local memory.
 - `tsit5` has `backend="shared"` and `backend="global"` paths, selected by
   whether the state fits in shared memory; the two are bit-identical.
 

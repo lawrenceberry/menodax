@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import functools
 import math
-from dataclasses import dataclass
 
 import jax.numpy as jnp
 import numpy as np
@@ -15,14 +14,12 @@ from solvers._jax_numba_custom_call import make_launch
 from solvers._numba_common import (
     SOLVER_ARGTYPES,
     PreparedNumbaSolve,
-    as_cuda_device,
     build_error_weights,
     copy_workspace_inputs,
     ensemble_ffi_call,
     get_workspace,
     initial_step,
     make_cuda_local_vector_writer,
-    make_cuda_out_vector_writer,
     run_kernel,
     solver_stats,
 )
@@ -34,10 +31,16 @@ from solvers._sensitivity import (
     augmented_error_weights,
     augmented_y0,
     make_augmented_local_writer,
-    make_jacobian_column,
     make_second_tangent,
     make_sensitivity_solver,
+    make_tangent,
     seed_table,
+)
+from solvers._sparsity import (
+    CompressedJacobian,
+    colour_sparsity,
+    dense_jacobian,
+    normalize_sparsity,
 )
 
 # fmt: off
@@ -121,51 +124,6 @@ _WORKSPACE_CACHE: dict[tuple[int, int, int, int], object] = {}
 # One warp per block: the trajectories in a block step adaptively and so diverge,
 # and a warp is the granularity at which that divergence is free.
 _DEFAULT_TRAJECTORIES_PER_BLOCK = 32
-
-
-@dataclass(frozen=True)
-class LUStructure:
-    """How one trajectory's iteration matrix sits in its buffer.
-
-    ``size`` is the element count and ``diagonal[i]`` the slot holding the
-    ``(i, i)`` entry. Those two facts are all the kernel needs to turn a
-    Jacobian into ``M = I/(h*gamma) - J``: it negates what the Jacobian callback
-    wrote and adds ``1/(h*gamma)`` on the diagonal, without knowing where
-    anything else lives. Everything further about the layout is shared between
-    the Jacobian callback that fills the buffer and the linear solver that
-    factorises it; neither has to be told by this class.
-
-    A dense structure stores the whole ``n_vars**2`` matrix. A compressed one
-    stores only the entries a structured solver actually reads, which is what
-    keeps a thread's working set small at large ``n_vars``.
-    """
-
-    size: int
-    diagonal: tuple[int, ...]
-    ipiv_size: int
-
-    @property
-    def n_vars(self) -> int:
-        return len(self.diagonal)
-
-    def __post_init__(self):
-        if len(set(self.diagonal)) != len(self.diagonal):
-            raise ValueError("LUStructure.diagonal must not repeat a slot")
-        if self.diagonal and max(self.diagonal) >= self.size:
-            raise ValueError(
-                f"LUStructure.diagonal slot {max(self.diagonal)} lies outside a "
-                f"buffer of {self.size} elements"
-            )
-
-
-@functools.cache
-def dense_lu_structure(n_vars: int) -> LUStructure:
-    """Row-major ``n_vars x n_vars``, the layout :func:`dense_lu_solver` wants."""
-    return LUStructure(
-        size=n_vars * n_vars,
-        diagonal=tuple(i * n_vars + i for i in range(n_vars)),
-        ipiv_size=n_vars,
-    )
 
 
 def trajectories_per_block_or_default(requested=None) -> int:
@@ -270,14 +228,17 @@ def check_linear_solver(linear_solver):
 
     A solver owns neither the buffer it works on nor the Jacobian that fills
     it: the kernel allocates one trajectory's matrix in that thread's own
-    memory from an :class:`LUStructure`, and a ``jac_fn`` writes into it. What
-    is left is two device functions, each called by the single thread that owns
-    the trajectory, so neither may synchronise:
+    memory from a :class:`CompressedJacobian` layout, and Enzyme's colour sweeps
+    fill it. What is left is two device functions, each called by the single
+    thread that owns the trajectory, so neither may synchronise:
 
     ``factorize_local(lu, ipiv)``
         factorise ``lu`` in place, recording pivots in ``ipiv``.
     ``solve_local(lu, ipiv, rhs)``
         solve ``M x = rhs`` in place.
+
+    A solver may also declare ``ipiv_size`` when it pivots something smaller
+    than the whole state; the default is ``n_vars``.
 
     :func:`dense_lu_solver` is the default and satisfies this like any other.
     """
@@ -302,9 +263,7 @@ def _make_kernel(
     trajectories_per_block: int = _DEFAULT_TRAJECTORIES_PER_BLOCK,
     spec: SensitivitySpec | None = None,
     linear_solver=None,
-    jac_fn=None,
-    time_derivative_fn=None,
-    lu_structure: LUStructure | None = None,
+    compressed: CompressedJacobian | None = None,
     tf_index: int = -1,
     max_registers: int | None = None,
 ):
@@ -320,8 +279,8 @@ def _make_kernel(
 
     The linear solver is a parameter, not a branch: the default
     :func:`dense_lu_solver` satisfies the same protocol a caller's own does, so
-    there is one code path either way, over a buffer laid out by
-    ``lu_structure``.
+    there is one code path either way, over a buffer laid out by ``compressed``
+    -- which for an uninformative sparsity pattern *is* the dense matrix.
     """
     e1 = EXPONENT * (icoeff + pcoeff + dcoeff)
     e2 = -EXPONENT * (pcoeff + 2.0 * dcoeff)
@@ -333,7 +292,7 @@ def _make_kernel(
     lu_dtype = np.float32 if lu_precision == "fp32" else np.float64
     # cuda.local.array wants the numba type rather than the numpy dtype.
     lu_local_dtype = types.float32 if lu_precision == "fp32" else types.float64
-    structure = dense_lu_structure(n_vars) if lu_structure is None else lu_structure
+    structure = dense_jacobian(n_vars) if compressed is None else compressed
     # With a spec the kernel integrates the joint [y, S] system, so the state,
     # stage and error extents become the augmented ones. The matrix does not:
     # the joint iteration matrix is block lower triangular with the same
@@ -345,7 +304,7 @@ def _make_kernel(
 
     tpb = int(trajectories_per_block)
     lu_size = structure.size
-    ipiv_per = structure.ipiv_size
+    n_colours = structure.n_colours
     diag_table = np.asarray(structure.diagonal, dtype=np.int32)
 
     if linear_solver is None:
@@ -353,13 +312,12 @@ def _make_kernel(
     check_linear_solver(linear_solver)
     factorize_local = linear_solver.factorize_local
     solve_local = linear_solver.solve_local
+    # How many pivots the factorisation records is the solver's business, not
+    # the layout's: a bordered-block solver pivots only its dense core.
+    ipiv_per = int(getattr(linear_solver, "ipiv_size", n_vars))
 
-    # The tuple form exists to feed Enzyme, so a caller supplying its own
-    # jac_fn is free of it and writes the right-hand side into an out-array.
     if spec is not None:
         ode_write = make_augmented_local_writer(ode_fn, spec)
-    elif jac_fn is not None:
-        ode_write = make_cuda_out_vector_writer(ode_fn)
     else:
         ode_write = make_cuda_local_vector_writer(ode_fn, n_vars)
 
@@ -411,56 +369,53 @@ def _make_kernel(
         def write_sensitivity_time_derivative(y_local, t, p_row, dT):
             pass
 
-    # --- the negated Jacobian, straight into the shared buffer ---------------
-    # Both variants leave -J in the buffer and df/dt in dT; the kernel then adds
-    # 1/(h*gamma) on the structure's diagonal slots to finish M. Writing here,
+    # --- the negated Jacobian, straight into the thread's own buffer ---------
+    # ``df/dy`` and ``df/dt`` are forward-differentiated out of ode_fn by
+    # Enzyme. Each sweep is seeded with a whole colour group rather than one
+    # unit vector: the columns in a group share no row, so their contributions
+    # to ``J v`` never collide and one sweep yields the lot. That is
+    # ``n_colours + 1`` sweeps where a column at a time costs ``n_vars + 1``,
+    # and for a banded or bordered system the difference is an order of
+    # magnitude. See "Derived Jacobians" in AGENTS.md.
+    #
+    # This leaves -J in the buffer and df/dt in dT; the kernel then adds
+    # 1/(h*gamma) on the diagonal slots to finish M. Writing straight here,
     # rather than staging J through global memory and reading it back, avoids a
     # per-step round-trip of the whole matrix.
-    if jac_fn is None:
-        # df/dy and df/dt forward-differentiated out of ode_fn by Enzyme. One
-        # sweep per column, the seed chosen at run time; column n_vars seeds t
-        # instead of a state direction, so df/dt arrives as a whole vector from
-        # one more sweep rather than per row. See "Derived Jacobians" in
-        # AGENTS.md for why this is forward mode and what it costs.
-        jacobian_column = make_jacobian_column(ode_fn, n_vars, n_params)
+    tangent_of = make_tangent(ode_fn, n_vars, n_params)
+    colour_seeds = structure.seed_table(n_params)
+    zero_row = n_colours  # the seed table's trailing all-zero row
 
-        @cuda.jit(device=True)
-        def write_negated_jacobian(y_local, t, p_row, lu, dT):
-            column = cuda.local.array(n_vars, types.float64)
-            for col in range(n_vars + 1):
-                jacobian_column(column, y_local, t, p_row, col)
-                if col == n_vars:
-                    for row in range(n_vars):
-                        dT[row] = column[row]
-                else:
-                    for row in range(n_vars):
-                        lu[row * n_vars + col] = lu_dtype(-column[row])
-
-    else:
-        jac_device = as_cuda_device(jac_fn)
-        if time_derivative_fn is None:
-
-            @cuda.jit(device=True)
-            def write_time_derivative(y_local, t, p_row, dT):
-                for j in range(n_vars):
-                    dT[j] = 0.0
-
-        else:
-            time_derivative_device = as_cuda_device(time_derivative_fn)
-
-            @cuda.jit(device=True)
-            def write_time_derivative(y_local, t, p_row, dT):
-                time_derivative_device(y_local, t, p_row, dT)
-
-        @cuda.jit(device=True)
-        def write_negated_jacobian(y_local, t, p_row, lu, dT):
-            jac_device(y_local, t, p_row, lu)
-            # The callback writes J in the structure's own layout; negating it
-            # in place costs one pass over a buffer whose whole point is to be
-            # small, and keeps the callback free of the step size.
-            for s in range(lu_size):
-                lu[s] = -lu[s]
-            write_time_derivative(y_local, t, p_row, dT)
+    @cuda.jit(device=True)
+    def write_negated_jacobian(y_local, t, p_row, lu, dT):
+        seed = cuda.const.array_like(colour_seeds)
+        column = cuda.local.array(n_vars, types.float64)
+        for g in range(n_colours):
+            # J . v_g, with v_g the indicator of colour group g.
+            tangent_of(
+                column,
+                y_local,
+                t,
+                p_row,
+                seed[g, 0:n_vars],
+                0.0,
+                seed[zero_row, 0:n_params],
+            )
+            for row in range(n_vars):
+                lu[row * n_colours + g] = lu_dtype(-column[row])
+        # Seeding time rather than the state gives df/dt whole, from one more
+        # sweep rather than one per row.
+        tangent_of(
+            column,
+            y_local,
+            t,
+            p_row,
+            seed[zero_row, 0:n_vars],
+            1.0,
+            seed[zero_row, 0:n_params],
+        )
+        for row in range(n_vars):
+            dT[row] = column[row]
 
     # --- one Rosenbrock stage, state row plus any sensitivity rows -----------
     if spec is None:
@@ -1018,9 +973,7 @@ def _make_jax_launch(
     trajectories_per_block: int = _DEFAULT_TRAJECTORIES_PER_BLOCK,
     spec: SensitivitySpec | None = None,
     linear_solver=None,
-    jac_fn=None,
-    time_derivative_fn=None,
-    lu_structure: LUStructure | None = None,
+    compressed: CompressedJacobian | None = None,
     tf_index: int = -1,
     max_registers: int | None = None,
 ):
@@ -1035,9 +988,7 @@ def _make_jax_launch(
         trajectories_per_block,
         spec,
         linear_solver,
-        jac_fn,
-        time_derivative_fn,
-        lu_structure,
+        compressed,
         tf_index,
         max_registers,
     )
@@ -1069,9 +1020,7 @@ def solve(
     trajectories_per_block=None,
     sens_error_control=True,
     linear_solver=None,
-    jac_fn=None,
-    time_derivative_fn=None,
-    lu_structure=None,
+    sparsity=None,
     tf_index=None,
     max_registers=None,
 ):
@@ -1137,28 +1086,29 @@ def solve(
     error constant it costs was measured at 200x the steps on a right-hand side
     bilinear in state and parameters, which is most reaction networks.
 
-    ``lu_structure`` says how one trajectory's iteration matrix is laid out in
-    the shared buffer (see :class:`LUStructure`). The default is dense
-    ``n_vars x n_vars``, which is what :func:`dense_lu_solver` and Enzyme's
-    derived Jacobian both expect. A compressed structure stores only the entries
-    a structured solver reads, which at large ``n_vars`` is the difference
-    between a thread holding thousands of elements and a few hundred; it needs a
-    ``jac_fn`` written against that layout, and a ``linear_solver`` that
-    factorises it.
+    ``sparsity`` is where a structured problem pays off. Forward-mode AD
+    returns ``J v``, not ``J``, so the Jacobian costs one sweep per column
+    unless columns can be seeded together -- and columns sharing no row can be,
+    since their contributions never collide. Colouring the column intersection
+    graph (:mod:`solvers._sparsity`) finds the fewest such groups; the Jacobian
+    then costs ``n_colours + 1`` sweeps and is stored column-compressed,
+    ``n_vars x n_colours``. Pass an ``(n_vars, n_vars)`` mask, a scipy sparse
+    matrix, or an ``(nnz, 2)`` array of indices. The default -- no pattern --
+    colours every column apart, which is the dense matrix at the dense cost, so
+    this is one mechanism rather than two paths.
 
-    ``jac_fn(y_row, t, p_row, lu)`` writes ``J`` into the buffer in the
-    structure's layout; the kernel negates it and adds ``1/(h*gamma)`` on the
-    structure's diagonal slots to finish ``M``. ``time_derivative_fn`` supplies
-    ``df/dt`` the same way (omit it for an autonomous system). Without a
-    ``jac_fn`` both come from ``ode_fn`` by Enzyme, and ``ode_fn`` is the tuple
-    form; with one, ``ode_fn`` may use whichever form its callbacks share.
+    The pattern must be a **superset** of the true nonzeros. Colouring a
+    superset only costs sweeps; colouring a subset silently corrupts the entries
+    where two columns of a group do overlap after all. For a structured
+    ``linear_solver`` the pattern to give is everything its factorisation reads
+    or writes, fill-in included: a superset by construction, and it leaves the
+    factors room in the same buffer.
 
     ``linear_solver`` replaces the default :func:`dense_lu_solver` with a
     factorisation that exploits that layout -- see :func:`check_linear_solver`.
-    It owns neither the buffer nor the Jacobian, so it is just the two device
-    functions. Forward sensitivities are not available with one, since the joint
-    system's iteration matrix is block lower triangular in blocks such a solver
-    has never been shown.
+    It owns neither the buffer nor the Jacobian, so it is two device functions,
+    and it may declare ``ipiv_size`` if it pivots something smaller than the
+    whole state. Forward sensitivities are not available with one.
 
     ``tf_index`` names a column of ``params`` holding each trajectory's own end
     time, for ensembles whose members finish at different times; save times
@@ -1173,30 +1123,23 @@ def solve(
     n_vars = jnp.shape(y0)[-1]
     if linear_solver is not None:
         check_linear_solver(linear_solver)
-    if lu_structure is None:
-        lu_structure = dense_lu_structure(n_vars)
-        if jac_fn is not None:
-            raise ValueError(
-                "a jac_fn writes into the LU buffer, so it needs the lu_structure "
-                "describing that buffer; pass one, or drop jac_fn and let Enzyme "
-                "fill the dense structure"
-            )
+    if linear_solver is not None:
+        check_linear_solver(linear_solver)
+    if sparsity is None:
+        compressed = dense_jacobian(n_vars)
     else:
-        if lu_structure.n_vars != n_vars:
+        compressed = colour_sparsity(normalize_sparsity(sparsity, n_vars))
+        if linear_solver is None and not compressed.is_dense:
+            # The default solver reads lu[i * n_vars + j]; a compressed buffer
+            # is n_vars x n_colours and means nothing to it. Compressing the
+            # Jacobian and factorising it are one decision, not two.
             raise ValueError(
-                f"lu_structure describes {lu_structure.n_vars} variables but y0 has "
-                f"{n_vars}"
+                f"sparsity compressed the Jacobian to {compressed.n_colours} "
+                f"columns, which dense_lu_solver cannot factorise: pass a "
+                "linear_solver written against that layout (its slot for entry "
+                "(r, c) is r * n_colours + colour[c]), or drop sparsity to keep "
+                "the dense matrix"
             )
-        if jac_fn is None:
-            raise ValueError(
-                "a compressed lu_structure needs a jac_fn written against it; "
-                "Enzyme's derived Jacobian only fills the dense structure"
-            )
-    if jac_fn is None and time_derivative_fn is not None:
-        raise ValueError(
-            "time_derivative_fn goes with jac_fn; without one, df/dt comes from "
-            "ode_fn by the same Enzyme sweep as the Jacobian"
-        )
     trajectories_per_block = trajectories_per_block_or_default(trajectories_per_block)
 
     settings = dict(
@@ -1212,14 +1155,12 @@ def solve(
         lu_precision=lu_precision,
         trajectories_per_block=trajectories_per_block,
         linear_solver=linear_solver,
-        jac_fn=jac_fn,
-        time_derivative_fn=time_derivative_fn,
-        lu_structure=lu_structure,
+        compressed=compressed,
         tf_index=-1 if tf_index is None else int(tf_index),
         max_registers=max_registers,
     )
     if linear_solver is not None:
-        # No sensitivity path: the joint system's iteration matrix is block
+        # No sensitivity path yet: the joint system's iteration matrix is block
         # lower triangular in blocks this solver has never been shown.
         return make_custom_vmap_solver(
             functools.partial(_solve_impl, ode_fn, **settings),
@@ -1268,9 +1209,7 @@ def _solve_impl(
     trajectories_per_block: int = _DEFAULT_TRAJECTORIES_PER_BLOCK,
     spec=None,
     linear_solver=None,
-    jac_fn=None,
-    time_derivative_fn=None,
-    lu_structure: LUStructure | None = None,
+    compressed: CompressedJacobian | None = None,
     tf_index: int = -1,
     max_registers: int | None = None,
 ):
@@ -1301,9 +1240,7 @@ def _solve_impl(
         trajectories_per_block,
         spec,
         linear_solver,
-        jac_fn,
-        time_derivative_fn,
-        lu_structure,
+        compressed,
         tf_index,
         max_registers,
     )

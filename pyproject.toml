@@ -19,6 +19,9 @@ dependencies = [
     # released from the fork below, which vendors the LLVM 15 + Enzyme
     # toolchain the derivative pipeline shells out to (see wheels/README.md).
     "numba-enzyme[cuda]>=0.1.3",
+    # Colours the Jacobian's column-intersection graph, so a sparsity pattern
+    # turns into the few compressed Enzyme sweeps that recover it.
+    "networkx>=3.4",
     "numpy>=2.4.3",
     "scipy>=1.17.1",
 ]
