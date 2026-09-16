@@ -4,25 +4,25 @@ from __future__ import annotations
 
 import functools
 import math
+from dataclasses import dataclass
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 from numba_cuda_mlir import cuda, types
-from nvmath.device import LUPivotSolver
 
 from solvers._jax_common import make_custom_vmap_solver, normalize_y0_params
 from solvers._jax_numba_custom_call import make_launch
 from solvers._numba_common import (
-    SCRATCH_ARGTYPE,
     SOLVER_ARGTYPES,
     PreparedNumbaSolve,
+    as_cuda_device,
     build_error_weights,
     copy_workspace_inputs,
     ensemble_ffi_call,
     get_workspace,
     initial_step,
-    make_cuda_striped_vector_writer,
+    make_cuda_local_vector_writer,
+    make_cuda_out_vector_writer,
     run_kernel,
     solver_stats,
 )
@@ -33,7 +33,7 @@ from solvers._sensitivity import (
     SensitivitySpec,
     augmented_error_weights,
     augmented_y0,
-    make_augmented_striped_writer,
+    make_augmented_local_writer,
     make_jacobian_column,
     make_second_tangent,
     make_sensitivity_solver,
@@ -118,80 +118,176 @@ EXPONENT = -1.0 / 6.0
 _WORKSPACE_CACHE: dict[tuple[int, int, int, int], object] = {}
 
 
-# Static shared memory a CUDA block may claim without opting in to the dynamic
-# extension. The kernel's footprint is dominated by the ten stage vectors, which
-# hold the *augmented* state, while nvmath sizes its batch from the LU, which
-# holds only the state block -- so a joint solve has to re-fit the batch.
-_SHARED_BUDGET = 48 * 1024
+# One warp per block: the trajectories in a block step adaptively and so diverge,
+# and a warp is the granularity at which that divergence is free.
+_DEFAULT_TRAJECTORIES_PER_BLOCK = 32
 
 
-def _shared_bytes(lu_solver, size: int, itemsize: int) -> int:
-    """Static shared memory the kernel declares for one block."""
-    batches = lu_solver.batches_per_block
-    threads = lu_solver.block_dim[0]
-    return (
-        int(lu_solver.a_size()) * itemsize  # smem_lu
-        + int(lu_solver.b_size()) * itemsize  # smem_rhs
-        + int(lu_solver.ipiv_size) * 4
-        + batches * 4  # smem_info
-        + 10 * batches * size * 8  # y, u, k1..k8
-        + threads * 8  # smem_err
-        + 7 * batches * 8  # t, dt, dt_use, inv_dt, t_end, err_prev, err_prev2
-        + 5 * batches * 4  # save_idx, n_steps, accepted, rejected, accept
-        + 4  # smem_continue
-    )
+@dataclass(frozen=True)
+class LUStructure:
+    """How one trajectory's iteration matrix sits in its buffer.
 
+    ``size`` is the element count and ``diagonal[i]`` the slot holding the
+    ``(i, i)`` entry. Those two facts are all the kernel needs to turn a
+    Jacobian into ``M = I/(h*gamma) - J``: it negates what the Jacobian callback
+    wrote and adds ``1/(h*gamma)`` on the diagonal, without knowing where
+    anything else lives. Everything further about the layout is shared between
+    the Jacobian callback that fills the buffer and the linear solver that
+    factorises it; neither has to be told by this class.
 
-def _fit_lu_solver(n_vars: int, size: int, precision, batches_per_block):
-    """Size the LU batch so the *augmented* stage vectors still fit on chip.
-
-    nvmath picks a batch count tuned for LU throughput at ``n_vars``, which is
-    the right question for a plain solve and the wrong one for a joint solve:
-    the stage vectors are ``size`` long, not ``n_vars``, so a batch that fits
-    comfortably without sensitivities can overflow shared memory with them.
+    A dense structure stores the whole ``n_vars**2`` matrix. A compressed one
+    stores only the entries a structured solver actually reads, which is what
+    keeps a thread's working set small at large ``n_vars``.
     """
-    solver = make_lu_solver(
-        n_vars, precision=precision, batches_per_block=batches_per_block
+
+    size: int
+    diagonal: tuple[int, ...]
+    ipiv_size: int
+
+    @property
+    def n_vars(self) -> int:
+        return len(self.diagonal)
+
+    def __post_init__(self):
+        if len(set(self.diagonal)) != len(self.diagonal):
+            raise ValueError("LUStructure.diagonal must not repeat a slot")
+        if self.diagonal and max(self.diagonal) >= self.size:
+            raise ValueError(
+                f"LUStructure.diagonal slot {max(self.diagonal)} lies outside a "
+                f"buffer of {self.size} elements"
+            )
+
+
+@functools.cache
+def dense_lu_structure(n_vars: int) -> LUStructure:
+    """Row-major ``n_vars x n_vars``, the layout :func:`dense_lu_solver` wants."""
+    return LUStructure(
+        size=n_vars * n_vars,
+        diagonal=tuple(i * n_vars + i for i in range(n_vars)),
+        ipiv_size=n_vars,
     )
-    itemsize = np.dtype(precision).itemsize
-    if size == n_vars or _shared_bytes(solver, size, itemsize) <= _SHARED_BUDGET:
-        return solver
-    # Everything but smem_err and smem_continue scales with the batch count.
-    per_batch = (
-        n_vars * n_vars * itemsize
-        + n_vars * itemsize
-        + n_vars * 4
-        + 4
-        + 10 * size * 8
-        + 7 * 8
-        + 5 * 4
-    )
-    fitted = (_SHARED_BUDGET - solver.block_dim[0] * 8 - 4) // per_batch
-    if fitted < 1:
-        raise ValueError(
-            f"a Rodas5P solve carrying {size // n_vars - 1} sensitivity columns at "
-            f"n_vars={n_vars} needs more shared memory than a CUDA block has; "
-            "differentiate with respect to fewer inputs, or use Tsit5 if the "
-            "system is not stiff"
+
+
+def trajectories_per_block_or_default(requested=None) -> int:
+    """How many trajectories a block carries, one per thread.
+
+    Nothing on chip bounds this any more: every per-trajectory buffer, the
+    iteration matrix included, is thread-local, so the choice is purely how wide
+    a block should be. A warp is the default because the trajectories in a block
+    step adaptively and diverge, and a warp is the granularity at which that
+    divergence costs nothing.
+    """
+    if requested is None:
+        return _DEFAULT_TRAJECTORIES_PER_BLOCK
+    requested = int(requested)
+    if requested < 1:
+        raise ValueError(f"trajectories_per_block must be positive, got {requested}")
+    return requested
+
+
+class _DenseLUSolver:
+    """The default solver, in the same shape a caller's own would take."""
+
+    def __init__(self, factorize_local, solve_local):
+        self.factorize_local = factorize_local
+        self.solve_local = solve_local
+
+
+@functools.cache
+def dense_lu_solver(n_vars: int):
+    """Dense LU with partial pivoting, one system per thread.
+
+    This is the default linear solver, and it is an ordinary instance of the
+    protocol :func:`check_linear_solver` documents rather than a privileged
+    path: right-looking LU over the thread's own row-major buffer, then the two
+    triangular solves in place.
+
+    It replaced nvmath's ``LUPivotSolver``, whose block-collective API was the
+    only reason the kernel ever put a matrix in shared memory. That cost a
+    barrier around every factorisation and every stage solve, and shared memory
+    that an ensemble's occupancy could not spare. A thread owning its whole
+    trajectory needs neither, and these matrices -- tens of variables, not
+    thousands -- are far too small for cooperation to pay for itself.
+    """
+    n = n_vars
+
+    @cuda.jit(device=True)
+    def factorize_local(lu, ipiv):
+        for i in range(n):
+            # Partial pivoting: the largest remaining entry in this column.
+            max_val = abs(lu[i * n + i])
+            pivot = i
+            for k in range(i + 1, n):
+                val = abs(lu[k * n + i])
+                if val > max_val:
+                    max_val = val
+                    pivot = k
+            ipiv[i] = pivot
+
+            if pivot != i:
+                for j in range(n):
+                    tmp = lu[i * n + j]
+                    lu[i * n + j] = lu[pivot * n + j]
+                    lu[pivot * n + j] = tmp
+
+            # A singular column is left alone rather than guarded against: the
+            # Rosenbrock-W property tolerates an approximate factorisation, and
+            # the step controller rejects whatever comes out of one that is not.
+            piv = lu[i * n + i]
+            if piv != 0.0:
+                inv_piv = 1.0 / piv
+                for k in range(i + 1, n):
+                    factor = lu[k * n + i] * inv_piv
+                    lu[k * n + i] = factor
+                    for j in range(i + 1, n):
+                        lu[k * n + j] -= factor * lu[i * n + j]
+
+    @cuda.jit(device=True)
+    def solve_local(lu, ipiv, rhs):
+        # Forward substitution through L, applying the pivots as they come.
+        for i in range(n):
+            pivot = ipiv[i]
+            if pivot != i:
+                tmp = rhs[i]
+                rhs[i] = rhs[pivot]
+                rhs[pivot] = tmp
+            acc = rhs[i]
+            for j in range(i):
+                acc -= lu[i * n + j] * rhs[j]
+            rhs[i] = acc
+        # Back substitution through U.
+        for i in range(n - 1, -1, -1):
+            acc = rhs[i]
+            for j in range(i + 1, n):
+                acc -= lu[i * n + j] * rhs[j]
+            rhs[i] = acc / lu[i * n + i]
+
+    return _DenseLUSolver(factorize_local, solve_local)
+
+
+def check_linear_solver(linear_solver):
+    """Validate a linear solver against the documented protocol.
+
+    A solver owns neither the buffer it works on nor the Jacobian that fills
+    it: the kernel allocates one trajectory's matrix in that thread's own
+    memory from an :class:`LUStructure`, and a ``jac_fn`` writes into it. What
+    is left is two device functions, each called by the single thread that owns
+    the trajectory, so neither may synchronise:
+
+    ``factorize_local(lu, ipiv)``
+        factorise ``lu`` in place, recording pivots in ``ipiv``.
+    ``solve_local(lu, ipiv, rhs)``
+        solve ``M x = rhs`` in place.
+
+    :func:`dense_lu_solver` is the default and satisfies this like any other.
+    """
+    required = ("factorize_local", "solve_local")
+    missing = [name for name in required if not hasattr(linear_solver, name)]
+    if missing:
+        raise TypeError(
+            f"{type(linear_solver).__name__} is not a Rodas5P linear solver: it is "
+            f"missing {', '.join(missing)}. See check_linear_solver for the protocol."
         )
-    return make_lu_solver(n_vars, precision=precision, batches_per_block=int(fitted))
-
-
-def make_lu_solver(
-    n_vars: int,
-    *,
-    precision=np.float32,
-    batches_per_block="suggested",
-    block_dim="suggested",
-):
-    return LUPivotSolver(
-        size=(n_vars, n_vars, 1),
-        precision=precision,
-        execution="Block",
-        arrangement=("row_major", "row_major"),
-        batches_per_block=batches_per_block,
-        block_dim=block_dim,
-    )
 
 
 @functools.cache
@@ -203,125 +299,98 @@ def _make_kernel(
     icoeff: float = 1.0,
     dcoeff: float = 0.0,
     lu_precision: str = "fp32",
-    batches_per_block="suggested",
+    trajectories_per_block: int = _DEFAULT_TRAJECTORIES_PER_BLOCK,
     spec: SensitivitySpec | None = None,
+    linear_solver=None,
+    jac_fn=None,
+    time_derivative_fn=None,
+    lu_structure: LUStructure | None = None,
+    tf_index: int = -1,
+    max_registers: int | None = None,
 ):
-    # PID step-control exponents (Soderlind). Defaults (0, 1, 0) give E1=EXPONENT
-    # and E2=E3=0, recovering the elementary I-controller exactly.
+    """Rodas5P, one trajectory per CUDA thread.
+
+    A thread owns its trajectory outright: the state, the ten stage vectors,
+    ``df/dt``, the step controller *and* the iteration matrix are all its own
+    local arrays and scalars. Nothing is shared and nothing synchronises inside
+    a step, so neither the state dimension nor the matrix bounds the block's
+    trajectory count, and each thread writes its own Jacobian straight into its
+    own matrix -- the ``O(n_vars**2)`` assembly is parallel across trajectories
+    rather than across lanes of one.
+
+    The linear solver is a parameter, not a branch: the default
+    :func:`dense_lu_solver` satisfies the same protocol a caller's own does, so
+    there is one code path either way, over a buffer laid out by
+    ``lu_structure``.
+    """
     e1 = EXPONENT * (icoeff + pcoeff + dcoeff)
     e2 = -EXPONENT * (pcoeff + 2.0 * dcoeff)
     e3 = EXPONENT * dcoeff
-    # Precision of the LU factorisation and triangular solves. The state, ODE
-    # right-hand side, Jacobian and error estimate are always float64; lu_dtype
-    # governs only the shared LU matrix and RHS. The Rosenbrock--Wanner (W)
-    # order conditions retain full order under an approximate Jacobian, so an
-    # FP32 factorisation does not reduce the method's order. Defaults to fp32,
-    # the historical kernel behaviour; fp64 is available for ill-conditioned
-    # systems where the FP32 factorisation degrades the step-size control.
+    # The state, right-hand side, Jacobian and error estimate are always
+    # float64; lu_dtype governs only the iteration matrix and its solves. The
+    # Rosenbrock--Wanner order conditions hold under an approximate Jacobian, so
+    # an FP32 factorisation does not reduce the method's order.
     lu_dtype = np.float32 if lu_precision == "fp32" else np.float64
-    # With a sensitivity spec the kernel integrates the joint [y, S] system, so
-    # the state, stage and error extents become the augmented ones. The LU does
-    # not: the joint iteration matrix is block lower triangular with the *same*
+    # cuda.local.array wants the numba type rather than the numpy dtype.
+    lu_local_dtype = types.float32 if lu_precision == "fp32" else types.float64
+    structure = dense_lu_structure(n_vars) if lu_structure is None else lu_structure
+    # With a spec the kernel integrates the joint [y, S] system, so the state,
+    # stage and error extents become the augmented ones. The matrix does not:
+    # the joint iteration matrix is block lower triangular with the same
     # M0 = I/(h*gamma) - J on every diagonal block, so one factorisation of the
-    # n_vars block serves the state and every sensitivity column and the
-    # coupling is a forward substitution. Factorising the whole n_aug matrix
-    # would cost (1 + n_sens)**3 times the arithmetic and (1 + n_sens)**2 times
-    # the shared memory to represent mostly structural zeros.
+    # n_vars block serves the state and every sensitivity column.
     size = n_vars if spec is None else spec.n_aug
     n_error = n_vars if spec is None else spec.n_error
     n_sens = 0 if spec is None else spec.n_sens
-    lu_solver = _fit_lu_solver(n_vars, size, lu_dtype, batches_per_block)
-    ode_write = (
-        make_cuda_striped_vector_writer(ode_fn, n_vars)
-        if spec is None
-        else make_augmented_striped_writer(ode_fn, spec)
-    )
 
-    # df/dy and df/dt, forward-differentiated out of ode_fn by Enzyme. The
-    # callback is the primal as written: numba-cuda-mlir flattens its tuple
-    # arguments into one scalar parameter per element and lowers its tuple
-    # return to a struct returned by value, which is the flat-scalar shape
-    # Enzyme differentiates. Each sweep seeds one flattened argument, so the
-    # call below reads a column of df/dy for col < n_vars and df/dt at
-    # col == n_vars, where t sits. See "Derived Jacobians" in AGENTS.md for why
-    # this is forward mode, why it is one column at a time, and what it costs.
-    jacobian_column = make_jacobian_column(ode_fn, n_vars, n_params)
+    tpb = int(trajectories_per_block)
+    lu_size = structure.size
+    ipiv_per = structure.ipiv_size
+    diag_table = np.asarray(structure.diagonal, dtype=np.int32)
 
-    if spec is None:
+    if linear_solver is None:
+        linear_solver = dense_lu_solver(n_vars)
+    check_linear_solver(linear_solver)
+    factorize_local = linear_solver.factorize_local
+    solve_local = linear_solver.solve_local
 
-        @cuda.jit(device=True)
-        def assemble_lu(y, t, p, lu_buf, a_off, dtgamma_inv, dT, i, lane, stride):
-            # Build the Rosenbrock--Wanner iteration matrix M = 1/(h*gamma)*I - J
-            # straight into the shared LU buffer. Evaluating the Jacobian and
-            # writing M here (rather than staging J through a global array and
-            # reading it back) avoids a per-step global-memory round-trip of the
-            # full n_vars*n_vars matrix. Each lane takes a disjoint column-stripe,
-            # so the O(n_vars^2) work is shared across the batch's lanes rather
-            # than repeated in each of them.
-            #
-            # One forward sweep per column, with the seed chosen at run time.
-            # Column n_vars seeds t instead of a state direction, so df/dt arrives
-            # as a whole vector from one more sweep rather than per row.
-            y_row = y[i]
-            p_row = p[i]
-            column = cuda.local.array(n_vars, types.float64)
-            for col in range(lane, n_vars + 1, stride):
-                jacobian_column(column, y_row, t, p_row, col)
-                if col == n_vars:
-                    for row in range(n_vars):
-                        dT[i, row] = column[row]
-                else:
-                    for row in range(n_vars):
-                        v = column[row]
-                        if row == col:
-                            lu_buf[a_off + row * n_vars + col] = lu_dtype(
-                                dtgamma_inv - v
-                            )
-                        else:
-                            lu_buf[a_off + row * n_vars + col] = lu_dtype(-v)
-
+    # The tuple form exists to feed Enzyme, so a caller supplying its own
+    # jac_fn is free of it and writes the right-hand side into an out-array.
+    if spec is not None:
+        ode_write = make_augmented_local_writer(ode_fn, spec)
+    elif jac_fn is not None:
+        ode_write = make_cuda_out_vector_writer(ode_fn)
     else:
+        ode_write = make_cuda_local_vector_writer(ode_fn, n_vars)
+
+    if spec is not None:
         n_y0_dirs = spec.n_y0_dirs
         seeds = seed_table(spec)
         length = max(n_vars, n_params)
         second_tangent = make_second_tangent(ode_fn, n_vars, n_params)
 
         @cuda.jit(device=True)
-        def assemble_lu(y, t, p, lu_buf, a_off, dtgamma_inv, dT, i, lane, stride):
-            # The LU block is the state block, exactly as above: every diagonal
-            # block of the joint matrix is this same M0.
+        def write_sensitivity_time_derivative(y_local, t, p_row, dT):
+            """``dF/dt`` for the sensitivity rows of the joint system.
+
+            It is ``d/dt (J_y S_k + J_p_k)`` at fixed state -- a second
+            derivative of ode_fn, which the second-order directional sweep
+            returns by seeding the time direction on the outside. Without it the
+            method loses order on a non-autonomous problem whose parameter
+            dependence is itself time-dependent, and leaves these rows of ``dT``
+            holding whatever was last in that local memory.
+            """
             seed = cuda.const.array_like(seeds)
-            y_row = y[i]
-            p_row = p[i]
             column = cuda.local.array(n_vars, types.float64)
-            for col in range(lane, n_vars + 1, stride):
-                jacobian_column(column, y_row, t, p_row, col)
-                if col == n_vars:
-                    for row in range(n_vars):
-                        dT[i, row] = column[row]
-                else:
-                    for row in range(n_vars):
-                        v = column[row]
-                        if row == col:
-                            lu_buf[a_off + row * n_vars + col] = lu_dtype(
-                                dtgamma_inv - v
-                            )
-                        else:
-                            lu_buf[a_off + row * n_vars + col] = lu_dtype(-v)
-            # The sensitivity rows' dF/dt is d/dt (J_y S_k + J_p_k) at fixed
-            # state: a second derivative of ode_fn, which the second-order
-            # directional sweep returns by seeding the time direction on the
-            # outside. Without it the method loses order on a non-autonomous
-            # problem whose parameter dependence is itself time-dependent.
-            for k in range(lane, n_sens, stride):
+            for k in range(n_sens):
                 base = n_vars + k * n_vars
                 start = 0 if k < n_y0_dirs else length - (k - n_y0_dirs)
                 second_tangent(
                     column,
-                    y_row,
+                    y_local,
                     t,
                     p_row,
-                    y_row[base : base + n_vars],
+                    y_local[base : base + n_vars],
                     0.0,
                     seed[start : start + n_params],
                     seed[0:n_vars],
@@ -334,57 +403,79 @@ def _make_kernel(
                     seed[0:n_params],
                 )
                 for row in range(n_vars):
-                    dT[i, base + row] = column[row]
-
-    if spec is None:
-
-        @cuda.jit(device=True)
-        def block_solve(
-            lu_buf,
-            ipiv,
-            rhs,
-            staged,
-            kout,
-            y,
-            p,
-            t,
-            i,
-            lane,
-            stride,
-            active,
-            stored,
-            v_off,
-            b_off,
-        ):
-            """Solve one Rosenbrock stage; with no sensitivities, one solve."""
-            cuda.syncthreads()
-            lu_solver.solve(lu_buf, ipiv, rhs)
-            cuda.syncthreads()
-            if stored:
-                for j in range(lane, n_vars, stride):
-                    kout[v_off + j] = np.float64(rhs[b_off + j])
+                    dT[base + row] = column[row]
 
     else:
 
         @cuda.jit(device=True)
-        def block_solve(
-            lu_buf,
-            ipiv,
-            rhs,
-            staged,
-            kout,
-            y,
-            p,
-            t,
-            i,
-            lane,
-            stride,
-            active,
-            stored,
-            v_off,
-            b_off,
-        ):
-            """Solve one Rosenbrock stage of the joint system by substitution.
+        def write_sensitivity_time_derivative(y_local, t, p_row, dT):
+            pass
+
+    # --- the negated Jacobian, straight into the shared buffer ---------------
+    # Both variants leave -J in the buffer and df/dt in dT; the kernel then adds
+    # 1/(h*gamma) on the structure's diagonal slots to finish M. Writing here,
+    # rather than staging J through global memory and reading it back, avoids a
+    # per-step round-trip of the whole matrix.
+    if jac_fn is None:
+        # df/dy and df/dt forward-differentiated out of ode_fn by Enzyme. One
+        # sweep per column, the seed chosen at run time; column n_vars seeds t
+        # instead of a state direction, so df/dt arrives as a whole vector from
+        # one more sweep rather than per row. See "Derived Jacobians" in
+        # AGENTS.md for why this is forward mode and what it costs.
+        jacobian_column = make_jacobian_column(ode_fn, n_vars, n_params)
+
+        @cuda.jit(device=True)
+        def write_negated_jacobian(y_local, t, p_row, lu, dT):
+            column = cuda.local.array(n_vars, types.float64)
+            for col in range(n_vars + 1):
+                jacobian_column(column, y_local, t, p_row, col)
+                if col == n_vars:
+                    for row in range(n_vars):
+                        dT[row] = column[row]
+                else:
+                    for row in range(n_vars):
+                        lu[row * n_vars + col] = lu_dtype(-column[row])
+
+    else:
+        jac_device = as_cuda_device(jac_fn)
+        if time_derivative_fn is None:
+
+            @cuda.jit(device=True)
+            def write_time_derivative(y_local, t, p_row, dT):
+                for j in range(n_vars):
+                    dT[j] = 0.0
+
+        else:
+            time_derivative_device = as_cuda_device(time_derivative_fn)
+
+            @cuda.jit(device=True)
+            def write_time_derivative(y_local, t, p_row, dT):
+                time_derivative_device(y_local, t, p_row, dT)
+
+        @cuda.jit(device=True)
+        def write_negated_jacobian(y_local, t, p_row, lu, dT):
+            jac_device(y_local, t, p_row, lu)
+            # The callback writes J in the structure's own layout; negating it
+            # in place costs one pass over a buffer whose whole point is to be
+            # small, and keeps the callback free of the step size.
+            for s in range(lu_size):
+                lu[s] = -lu[s]
+            write_time_derivative(y_local, t, p_row, dT)
+
+    # --- one Rosenbrock stage, state row plus any sensitivity rows -----------
+    if spec is None:
+
+        @cuda.jit(device=True)
+        def stage_solve(lu, ipiv, rhs, k_stages, s, work, y, p_row, t):
+            solve_local(lu, ipiv, rhs)
+            for j in range(n_vars):
+                k_stages[s, j] = np.float64(rhs[j])
+
+    else:
+
+        @cuda.jit(device=True)
+        def stage_solve(lu, ipiv, rhs, k_stages, s, work, y, p_row, t):
+            """Solve one stage of the joint system by forward substitution.
 
             The joint iteration matrix is block lower triangular
 
@@ -396,56 +487,61 @@ def _make_kernel(
             ``L_k k_y``. ``L_k`` is never formed: the correction is one
             second-order directional sweep of ode_fn, seeded with the
             sensitivity column on the inside and the state increment on the
-            outside. Like the Jacobian it belongs to, ``L_k`` is frozen at the
-            step's base point; only the outer direction changes per stage.
+            outside. Like the Jacobian it belongs to, it is frozen at the step's
+            base point; only the outer direction changes per stage.
             """
             seed = cuda.const.array_like(seeds)
             coupling = cuda.local.array(n_vars, types.float64)
-            cuda.syncthreads()
-            lu_solver.solve(lu_buf, ipiv, rhs)
-            cuda.syncthreads()
-            if stored:
-                for j in range(lane, n_vars, stride):
-                    kout[v_off + j] = np.float64(rhs[b_off + j])
-            cuda.syncthreads()
+            solve_local(lu, ipiv, rhs)
+            for j in range(n_vars):
+                k_stages[s, j] = np.float64(rhs[j])
             for k in range(n_sens):
                 base = n_vars + k * n_vars
-                if active:
-                    y_row = y[i]
-                    start = 0 if k < n_y0_dirs else length - (k - n_y0_dirs)
-                    second_tangent(
-                        coupling,
-                        y_row,
-                        t,
-                        p[i],
-                        y_row[base : base + n_vars],
-                        0.0,
-                        seed[start : start + n_params],
-                        kout[v_off : v_off + n_vars],
-                        0.0,
-                        seed[0:n_params],
-                        seed[0:n_vars],
-                        0.0,
-                        seed[0:n_params],
-                    )
-                    for j in range(lane, n_vars, stride):
-                        rhs[b_off + j] = lu_dtype(staged[i, base + j] + coupling[j])
-                cuda.syncthreads()
-                lu_solver.solve(lu_buf, ipiv, rhs)
-                cuda.syncthreads()
-                if stored:
-                    for j in range(lane, n_vars, stride):
-                        kout[v_off + base + j] = np.float64(rhs[b_off + j])
-                cuda.syncthreads()
+                start = 0 if k < n_y0_dirs else length - (k - n_y0_dirs)
+                second_tangent(
+                    coupling,
+                    y,
+                    t,
+                    p_row,
+                    y[base : base + n_vars],
+                    0.0,
+                    seed[start : start + n_params],
+                    k_stages[s],
+                    0.0,
+                    seed[0:n_params],
+                    # The inner direction does not vary: zero here leaves
+                    # the plain bilinear form.
+                    seed[0:n_vars],
+                    0.0,
+                    seed[0:n_params],
+                )
+                for j in range(n_vars):
+                    rhs[j] = lu_dtype(work[base + j] + coupling[j])
+                solve_local(lu, ipiv, rhs)
+                for j in range(n_vars):
+                    k_stages[s, base + j] = np.float64(rhs[j])
 
-    batches_per_block = lu_solver.batches_per_block
-    block_threads = lu_solver.block_dim[0]
-    vec_size = batches_per_block * size
-    a_size = int(lu_solver.a_size())
-    b_size = int(lu_solver.b_size())
-    ipiv_size = int(lu_solver.ipiv_size)
+    if spec is None:
 
-    @cuda.jit
+        @cuda.jit(device=True)
+        def put_stage_rhs(rhs_buf, work, j, value):
+            rhs_buf[j] = lu_dtype(value)
+
+    else:
+
+        @cuda.jit(device=True)
+        def put_stage_rhs(rhs_buf, work, j, value):
+            # State rows go straight to the solver's buffer, which holds one
+            # n_vars block per trajectory; sensitivity rows are staged until
+            # their own solve, once the coupling term is known.
+            if j < n_vars:
+                rhs_buf[j] = lu_dtype(value)
+            else:
+                work[j] = value
+
+    jit_options = {} if max_registers is None else {"max_registers": max_registers}
+
+    @cuda.jit(**jit_options)
     def kernel(
         y0,
         times,
@@ -459,695 +555,388 @@ def _make_kernel(
         accepted_out,
         rejected_out,
         loop_out,
-        y_global,
-        u_global,
-        work_global,
-        dT_global,
     ):
-        tx = cuda.threadIdx.x
-        batch = tx % batches_per_block
-        lane = tx // batches_per_block
-        batch_lanes = (
-            block_threads + batches_per_block - 1 - batch
-        ) // batches_per_block
-        block_start = cuda.blockIdx.x * batches_per_block
-        i = block_start + batch
+        i = cuda.blockIdx.x * tpb + cuda.threadIdx.x
+        # Nothing in a step is collective any more, so a thread past the end of
+        # the ensemble simply leaves rather than shadowing a trajectory through
+        # barriers it would otherwise have to reach.
+        if i >= y0.shape[0]:
+            return
+        diag = cuda.const.array_like(diag_table)
 
         n_save = times.shape[0]
         tf = times[n_save - 1]
         # A non-positive dt0 is the "no first step given" sentinel: start from
         # 1e-6 of the integration window.
         dt_init = dt0 if dt0 > 0.0 else (tf - times[0]) * 1e-6
-        v_offset = batch * size
-        a_offset = batch * n_vars * n_vars
-        b_offset = batch * n_vars
 
-        smem_lu = cuda.shared.array(shape=a_size, dtype=lu_dtype)
-        smem_rhs = cuda.shared.array(shape=b_size, dtype=lu_dtype)
-        smem_ipiv = cuda.shared.array(shape=ipiv_size, dtype=np.int32)
-        smem_info = cuda.shared.array(shape=batches_per_block, dtype=np.int32)
+        lu_buf = cuda.local.array(lu_size, lu_local_dtype)
+        rhs_buf = cuda.local.array(n_vars, lu_local_dtype)
+        ipiv_buf = cuda.local.array(ipiv_per, np.int32)
 
-        smem_y = cuda.shared.array(shape=vec_size, dtype=np.float64)
-        smem_u = cuda.shared.array(shape=vec_size, dtype=np.float64)
-        smem_k1 = cuda.shared.array(shape=vec_size, dtype=np.float64)
-        smem_k2 = cuda.shared.array(shape=vec_size, dtype=np.float64)
-        smem_k3 = cuda.shared.array(shape=vec_size, dtype=np.float64)
-        smem_k4 = cuda.shared.array(shape=vec_size, dtype=np.float64)
-        smem_k5 = cuda.shared.array(shape=vec_size, dtype=np.float64)
-        smem_k6 = cuda.shared.array(shape=vec_size, dtype=np.float64)
-        smem_k7 = cuda.shared.array(shape=vec_size, dtype=np.float64)
-        smem_k8 = cuda.shared.array(shape=vec_size, dtype=np.float64)
+        y = cuda.local.array(size, np.float64)
+        u = cuda.local.array(size, np.float64)
+        work = cuda.local.array(size, np.float64)
+        dT = cuda.local.array(size, np.float64)
+        # The stage increments are what came out of the linear solve, so they
+        # already carry only lu_precision; storing them wider keeps rounding
+        # that is not there and doubles the thread's local-memory footprint,
+        # which is what bounds occupancy once the matrix is off the shared path.
+        k_stages = cuda.local.array((8, size), lu_local_dtype)
 
-        smem_err = cuda.shared.array(shape=block_threads, dtype=np.float64)
-        smem_err_prev = cuda.shared.array(shape=batches_per_block, dtype=np.float64)
-        smem_err_prev2 = cuda.shared.array(shape=batches_per_block, dtype=np.float64)
-        smem_t = cuda.shared.array(shape=batches_per_block, dtype=np.float64)
-        smem_dt = cuda.shared.array(shape=batches_per_block, dtype=np.float64)
-        smem_dt_use = cuda.shared.array(shape=batches_per_block, dtype=np.float64)
-        smem_inv_dt = cuda.shared.array(shape=batches_per_block, dtype=np.float64)
-        smem_t_end = cuda.shared.array(shape=batches_per_block, dtype=np.float64)
-        smem_save_idx = cuda.shared.array(shape=batches_per_block, dtype=np.int32)
-        smem_n_steps = cuda.shared.array(shape=batches_per_block, dtype=np.int32)
-        smem_accepted = cuda.shared.array(shape=batches_per_block, dtype=np.int32)
-        smem_rejected = cuda.shared.array(shape=batches_per_block, dtype=np.int32)
-        smem_accept = cuda.shared.array(shape=batches_per_block, dtype=np.int32)
-        smem_continue = cuda.shared.array(shape=1, dtype=np.int32)
+        for j in range(size):
+            val = y0[i, j]
+            y[j] = val
+            hist[i, 0, j] = val
 
-        if i < y0.shape[0]:
-            for j in range(lane, size, batch_lanes):
-                val = y0[i, j]
-                smem_y[v_offset + j] = val
-                y_global[i, j] = val
-                hist[i, 0, j] = val
-        if tx < batches_per_block:
-            if i < y0.shape[0]:
-                smem_t[batch] = times[0]
-                smem_save_idx[batch] = 1
-            else:
-                smem_t[batch] = tf
-                smem_save_idx[batch] = n_save
-            smem_dt[batch] = dt_init
-            smem_n_steps[batch] = 0
-            smem_accepted[batch] = 0
-            smem_rejected[batch] = 0
-            smem_accept[batch] = 0
-            smem_err_prev[batch] = 1.0
-            smem_err_prev2[batch] = 1.0
-        if tx == 0:
-            smem_continue[0] = 1
-        cuda.syncthreads()
+        t = times[0]
+        save_idx = 1
+        dt = dt_init
+        n_steps = 0
+        accepted = 0
+        rejected = 0
+        err_prev = 1.0
+        err_prev2 = 1.0
 
-        while smem_continue[0] != 0:
-            active = (
-                i < y0.shape[0]
-                and smem_save_idx[batch] < n_save
-                and smem_t[batch] < tf
-                and smem_n_steps[batch] < max_steps
+        # Each trajectory may finish at its own end time, read from a parameter
+        # column; the save times it never reaches hold its final state.
+        tf_local = tf
+        if tf_index >= 0:
+            tf_local = params[i, tf_index]
+
+        p_row = params[i]
+
+        # Purely this thread's loop: it steps until its own trajectory is done
+        # and then falls out, with no reference to what the rest of the block is
+        # doing.
+        while save_idx < n_save and t < tf_local and n_steps < max_steps:
+            dt_use = dt
+            if dt_use > tf_local - t:
+                dt_use = tf_local - t
+            if dt_use < 1e-30:
+                dt_use = 1e-30
+            inv_dt = 1.0 / dt_use
+            t_end = t + dt_use
+
+            dtgamma_inv = 1.0 / (dt_use * GAMMA)
+            write_negated_jacobian(y, t, p_row, lu_buf, dT)
+            write_sensitivity_time_derivative(y, t, p_row, dT)
+            for d in range(n_vars):
+                lu_buf[diag[d]] += lu_dtype(dtgamma_inv)
+            factorize_local(lu_buf, ipiv_buf)
+
+            # Stage 1
+            ode_write(y, t, p_row, work)
+            for j in range(size):
+                put_stage_rhs(rhs_buf, work, j, work[j] + dt_use * D1 * dT[j])
+            stage_solve(
+                lu_buf,
+                ipiv_buf,
+                rhs_buf,
+                k_stages,
+                0,
+                work,
+                y,
+                p_row,
+                t,
+            )
+            for j in range(size):
+                u[j] = y[j] + A21 * k_stages[0, j]
+
+            # Stage 2
+            ode_write(u, t + C2 * dt_use, p_row, work)
+            for j in range(size):
+                stage_rhs = (
+                    work[j] + dt_use * D2 * dT[j] + C21 * k_stages[0, j] * inv_dt
+                )
+                put_stage_rhs(rhs_buf, work, j, stage_rhs)
+            stage_solve(
+                lu_buf,
+                ipiv_buf,
+                rhs_buf,
+                k_stages,
+                1,
+                work,
+                y,
+                p_row,
+                t,
+            )
+            for j in range(size):
+                u[j] = y[j] + (A31 * k_stages[0, j] + A32 * k_stages[1, j])
+
+            # Stage 3
+            ode_write(u, t + C3 * dt_use, p_row, work)
+            for j in range(size):
+                stage_rhs = (
+                    work[j]
+                    + dt_use * D3 * dT[j]
+                    + (C31 * k_stages[0, j] + C32 * k_stages[1, j]) * inv_dt
+                )
+                put_stage_rhs(rhs_buf, work, j, stage_rhs)
+            stage_solve(
+                lu_buf,
+                ipiv_buf,
+                rhs_buf,
+                k_stages,
+                2,
+                work,
+                y,
+                p_row,
+                t,
+            )
+            for j in range(size):
+                u[j] = y[j] + (
+                    A41 * k_stages[0, j] + A42 * k_stages[1, j] + A43 * k_stages[2, j]
+                )
+
+            # Stage 4
+            ode_write(u, t + C4 * dt_use, p_row, work)
+            for j in range(size):
+                stage_rhs = (
+                    work[j]
+                    + dt_use * D4 * dT[j]
+                    + (
+                        C41 * k_stages[0, j]
+                        + C42 * k_stages[1, j]
+                        + C43 * k_stages[2, j]
+                    )
+                    * inv_dt
+                )
+                put_stage_rhs(rhs_buf, work, j, stage_rhs)
+            stage_solve(
+                lu_buf,
+                ipiv_buf,
+                rhs_buf,
+                k_stages,
+                3,
+                work,
+                y,
+                p_row,
+                t,
+            )
+            for j in range(size):
+                u[j] = y[j] + (
+                    A51 * k_stages[0, j]
+                    + A52 * k_stages[1, j]
+                    + A53 * k_stages[2, j]
+                    + A54 * k_stages[3, j]
+                )
+
+            # Stage 5
+            ode_write(u, t + C5 * dt_use, p_row, work)
+            for j in range(size):
+                stage_rhs = (
+                    work[j]
+                    + dt_use * D5 * dT[j]
+                    + (
+                        C51 * k_stages[0, j]
+                        + C52 * k_stages[1, j]
+                        + C53 * k_stages[2, j]
+                        + C54 * k_stages[3, j]
+                    )
+                    * inv_dt
+                )
+                put_stage_rhs(rhs_buf, work, j, stage_rhs)
+            stage_solve(
+                lu_buf,
+                ipiv_buf,
+                rhs_buf,
+                k_stages,
+                4,
+                work,
+                y,
+                p_row,
+                t,
+            )
+            for j in range(size):
+                u[j] = y[j] + (
+                    A61 * k_stages[0, j]
+                    + A62 * k_stages[1, j]
+                    + A63 * k_stages[2, j]
+                    + A64 * k_stages[3, j]
+                    + A65 * k_stages[4, j]
+                )
+
+            # Stage 6
+            ode_write(u, t_end, p_row, work)
+            for j in range(size):
+                stage_rhs = (
+                    work[j]
+                    + (
+                        C61 * k_stages[0, j]
+                        + C62 * k_stages[1, j]
+                        + C63 * k_stages[2, j]
+                        + C64 * k_stages[3, j]
+                        + C65 * k_stages[4, j]
+                    )
+                    * inv_dt
+                )
+                put_stage_rhs(rhs_buf, work, j, stage_rhs)
+            stage_solve(
+                lu_buf,
+                ipiv_buf,
+                rhs_buf,
+                k_stages,
+                5,
+                work,
+                y,
+                p_row,
+                t,
+            )
+            for j in range(size):
+                u[j] += k_stages[5, j]
+
+            # Stage 7
+            ode_write(u, t_end, p_row, work)
+            for j in range(size):
+                stage_rhs = (
+                    work[j]
+                    + (
+                        C71 * k_stages[0, j]
+                        + C72 * k_stages[1, j]
+                        + C73 * k_stages[2, j]
+                        + C74 * k_stages[3, j]
+                        + C75 * k_stages[4, j]
+                        + C76 * k_stages[5, j]
+                    )
+                    * inv_dt
+                )
+                put_stage_rhs(rhs_buf, work, j, stage_rhs)
+            stage_solve(
+                lu_buf,
+                ipiv_buf,
+                rhs_buf,
+                k_stages,
+                6,
+                work,
+                y,
+                p_row,
+                t,
+            )
+            for j in range(size):
+                u[j] += k_stages[6, j]
+
+            # Stage 8
+            ode_write(u, t_end, p_row, work)
+            for j in range(size):
+                stage_rhs = (
+                    work[j]
+                    + (
+                        C81 * k_stages[0, j]
+                        + C82 * k_stages[1, j]
+                        + C83 * k_stages[2, j]
+                        + C84 * k_stages[3, j]
+                        + C85 * k_stages[4, j]
+                        + C86 * k_stages[5, j]
+                        + C87 * k_stages[6, j]
+                    )
+                    * inv_dt
+                )
+                put_stage_rhs(rhs_buf, work, j, stage_rhs)
+            stage_solve(
+                lu_buf,
+                ipiv_buf,
+                rhs_buf,
+                k_stages,
+                7,
+                work,
+                y,
+                p_row,
+                t,
             )
 
-            if lane == 0:
-                if active:
-                    dt_use = smem_dt[batch]
-                    if dt_use > tf - smem_t[batch]:
-                        dt_use = tf - smem_t[batch]
-                    if dt_use < 1e-30:
-                        dt_use = 1e-30
-                    smem_dt_use[batch] = dt_use
-                    smem_inv_dt[batch] = 1.0 / dt_use
-                    smem_t_end[batch] = smem_t[batch] + dt_use
-                else:
-                    smem_dt_use[batch] = dt_init
-                    smem_inv_dt[batch] = 1.0 / dt_init
-                    smem_t_end[batch] = smem_t[batch]
-            cuda.syncthreads()
-
-            if active:
-                for j in range(lane, size, batch_lanes):
-                    y_global[i, j] = smem_y[v_offset + j]
-            cuda.syncthreads()
-
-            dtgamma_inv = 1.0 / (smem_dt_use[batch] * GAMMA)
-            if active:
-                assemble_lu(
-                    y_global,
-                    smem_t[batch],
-                    params,
-                    smem_lu,
-                    a_offset,
-                    dtgamma_inv,
-                    dT_global,
-                    i,
-                    lane,
-                    batch_lanes,
-                )
-            else:
-                for idx_local in range(lane, n_vars * n_vars, batch_lanes):
-                    row = idx_local // n_vars
-                    col = idx_local - row * n_vars
-                    smem_lu[a_offset + idx_local] = 1.0 if row == col else 0.0
-                for j in range(lane, n_vars, batch_lanes):
-                    smem_rhs[b_offset + j] = 0.0
-            cuda.syncthreads()
-            lu_solver.factorize(smem_lu, smem_ipiv, smem_info)
-            cuda.syncthreads()
-
-            if active:
-                ode_write(
-                    y_global, smem_t[batch], params, work_global, i, lane, batch_lanes
-                )
-            cuda.syncthreads()
-            if active:
-                for j in range(lane, size, batch_lanes):
-                    stage_rhs = (
-                        work_global[i, j] + smem_dt_use[batch] * D1 * dT_global[i, j]
-                    )
-                    # The state rows go straight to the shared solver
-                    # buffer, which holds one n_vars block per batch;
-                    # the sensitivity rows are staged until their own
-                    # solve, after the coupling term is known.
-                    if j < n_vars:
-                        smem_rhs[b_offset + j] = lu_dtype(stage_rhs)
-                    else:
-                        work_global[i, j] = stage_rhs
-            block_solve(
-                smem_lu,
-                smem_ipiv,
-                smem_rhs,
-                work_global,
-                smem_k1,
-                y_global,
-                params,
-                smem_t[batch],
-                i,
-                lane,
-                batch_lanes,
-                active,
-                i < y0.shape[0],
-                v_offset,
-                b_offset,
-            )
-
-            if active:
-                for j in range(lane, size, batch_lanes):
-                    smem_u[v_offset + j] = (
-                        smem_y[v_offset + j] + A21 * smem_k1[v_offset + j]
-                    )
-                    u_global[i, j] = smem_u[v_offset + j]
-            cuda.syncthreads()
-            if active:
-                ode_write(
-                    u_global,
-                    smem_t[batch] + C2 * smem_dt_use[batch],
-                    params,
-                    work_global,
-                    i,
-                    lane,
-                    batch_lanes,
-                )
-            cuda.syncthreads()
-            if active:
-                for j in range(lane, size, batch_lanes):
-                    stage_rhs = (
-                        work_global[i, j]
-                        + smem_dt_use[batch] * D2 * dT_global[i, j]
-                        + C21 * smem_k1[v_offset + j] * smem_inv_dt[batch]
-                    )
-                    # The state rows go straight to the shared solver
-                    # buffer, which holds one n_vars block per batch;
-                    # the sensitivity rows are staged until their own
-                    # solve, after the coupling term is known.
-                    if j < n_vars:
-                        smem_rhs[b_offset + j] = lu_dtype(stage_rhs)
-                    else:
-                        work_global[i, j] = stage_rhs
-            block_solve(
-                smem_lu,
-                smem_ipiv,
-                smem_rhs,
-                work_global,
-                smem_k2,
-                y_global,
-                params,
-                smem_t[batch],
-                i,
-                lane,
-                batch_lanes,
-                active,
-                i < y0.shape[0],
-                v_offset,
-                b_offset,
-            )
-
-            if active:
-                for j in range(lane, size, batch_lanes):
-                    smem_u[v_offset + j] = smem_y[v_offset + j] + (
-                        A31 * smem_k1[v_offset + j] + A32 * smem_k2[v_offset + j]
-                    )
-                    u_global[i, j] = smem_u[v_offset + j]
-            cuda.syncthreads()
-            if active:
-                ode_write(
-                    u_global,
-                    smem_t[batch] + C3 * smem_dt_use[batch],
-                    params,
-                    work_global,
-                    i,
-                    lane,
-                    batch_lanes,
-                )
-            cuda.syncthreads()
-            if active:
-                for j in range(lane, size, batch_lanes):
-                    stage_rhs = (
-                        work_global[i, j]
-                        + smem_dt_use[batch] * D3 * dT_global[i, j]
-                        + (C31 * smem_k1[v_offset + j] + C32 * smem_k2[v_offset + j])
-                        * smem_inv_dt[batch]
-                    )
-                    # The state rows go straight to the shared solver
-                    # buffer, which holds one n_vars block per batch;
-                    # the sensitivity rows are staged until their own
-                    # solve, after the coupling term is known.
-                    if j < n_vars:
-                        smem_rhs[b_offset + j] = lu_dtype(stage_rhs)
-                    else:
-                        work_global[i, j] = stage_rhs
-            block_solve(
-                smem_lu,
-                smem_ipiv,
-                smem_rhs,
-                work_global,
-                smem_k3,
-                y_global,
-                params,
-                smem_t[batch],
-                i,
-                lane,
-                batch_lanes,
-                active,
-                i < y0.shape[0],
-                v_offset,
-                b_offset,
-            )
-
-            if active:
-                for j in range(lane, size, batch_lanes):
-                    smem_u[v_offset + j] = smem_y[v_offset + j] + (
-                        A41 * smem_k1[v_offset + j]
-                        + A42 * smem_k2[v_offset + j]
-                        + A43 * smem_k3[v_offset + j]
-                    )
-                    u_global[i, j] = smem_u[v_offset + j]
-            cuda.syncthreads()
-            if active:
-                ode_write(
-                    u_global,
-                    smem_t[batch] + C4 * smem_dt_use[batch],
-                    params,
-                    work_global,
-                    i,
-                    lane,
-                    batch_lanes,
-                )
-            cuda.syncthreads()
-            if active:
-                for j in range(lane, size, batch_lanes):
-                    stage_rhs = (
-                        work_global[i, j]
-                        + smem_dt_use[batch] * D4 * dT_global[i, j]
-                        + (
-                            C41 * smem_k1[v_offset + j]
-                            + C42 * smem_k2[v_offset + j]
-                            + C43 * smem_k3[v_offset + j]
-                        )
-                        * smem_inv_dt[batch]
-                    )
-                    # The state rows go straight to the shared solver
-                    # buffer, which holds one n_vars block per batch;
-                    # the sensitivity rows are staged until their own
-                    # solve, after the coupling term is known.
-                    if j < n_vars:
-                        smem_rhs[b_offset + j] = lu_dtype(stage_rhs)
-                    else:
-                        work_global[i, j] = stage_rhs
-            block_solve(
-                smem_lu,
-                smem_ipiv,
-                smem_rhs,
-                work_global,
-                smem_k4,
-                y_global,
-                params,
-                smem_t[batch],
-                i,
-                lane,
-                batch_lanes,
-                active,
-                i < y0.shape[0],
-                v_offset,
-                b_offset,
-            )
-
-            if active:
-                for j in range(lane, size, batch_lanes):
-                    smem_u[v_offset + j] = smem_y[v_offset + j] + (
-                        A51 * smem_k1[v_offset + j]
-                        + A52 * smem_k2[v_offset + j]
-                        + A53 * smem_k3[v_offset + j]
-                        + A54 * smem_k4[v_offset + j]
-                    )
-                    u_global[i, j] = smem_u[v_offset + j]
-            cuda.syncthreads()
-            if active:
-                ode_write(
-                    u_global,
-                    smem_t[batch] + C5 * smem_dt_use[batch],
-                    params,
-                    work_global,
-                    i,
-                    lane,
-                    batch_lanes,
-                )
-            cuda.syncthreads()
-            if active:
-                for j in range(lane, size, batch_lanes):
-                    stage_rhs = (
-                        work_global[i, j]
-                        + smem_dt_use[batch] * D5 * dT_global[i, j]
-                        + (
-                            C51 * smem_k1[v_offset + j]
-                            + C52 * smem_k2[v_offset + j]
-                            + C53 * smem_k3[v_offset + j]
-                            + C54 * smem_k4[v_offset + j]
-                        )
-                        * smem_inv_dt[batch]
-                    )
-                    # The state rows go straight to the shared solver
-                    # buffer, which holds one n_vars block per batch;
-                    # the sensitivity rows are staged until their own
-                    # solve, after the coupling term is known.
-                    if j < n_vars:
-                        smem_rhs[b_offset + j] = lu_dtype(stage_rhs)
-                    else:
-                        work_global[i, j] = stage_rhs
-            block_solve(
-                smem_lu,
-                smem_ipiv,
-                smem_rhs,
-                work_global,
-                smem_k5,
-                y_global,
-                params,
-                smem_t[batch],
-                i,
-                lane,
-                batch_lanes,
-                active,
-                i < y0.shape[0],
-                v_offset,
-                b_offset,
-            )
-
-            if active:
-                for j in range(lane, size, batch_lanes):
-                    smem_u[v_offset + j] = smem_y[v_offset + j] + (
-                        A61 * smem_k1[v_offset + j]
-                        + A62 * smem_k2[v_offset + j]
-                        + A63 * smem_k3[v_offset + j]
-                        + A64 * smem_k4[v_offset + j]
-                        + A65 * smem_k5[v_offset + j]
-                    )
-                    u_global[i, j] = smem_u[v_offset + j]
-            cuda.syncthreads()
-            if active:
-                ode_write(
-                    u_global,
-                    smem_t_end[batch],
-                    params,
-                    work_global,
-                    i,
-                    lane,
-                    batch_lanes,
-                )
-            cuda.syncthreads()
-            if active:
-                for j in range(lane, size, batch_lanes):
-                    stage_rhs = (
-                        work_global[i, j]
-                        + (
-                            C61 * smem_k1[v_offset + j]
-                            + C62 * smem_k2[v_offset + j]
-                            + C63 * smem_k3[v_offset + j]
-                            + C64 * smem_k4[v_offset + j]
-                            + C65 * smem_k5[v_offset + j]
-                        )
-                        * smem_inv_dt[batch]
-                    )
-                    # The state rows go straight to the shared solver
-                    # buffer, which holds one n_vars block per batch;
-                    # the sensitivity rows are staged until their own
-                    # solve, after the coupling term is known.
-                    if j < n_vars:
-                        smem_rhs[b_offset + j] = lu_dtype(stage_rhs)
-                    else:
-                        work_global[i, j] = stage_rhs
-            block_solve(
-                smem_lu,
-                smem_ipiv,
-                smem_rhs,
-                work_global,
-                smem_k6,
-                y_global,
-                params,
-                smem_t[batch],
-                i,
-                lane,
-                batch_lanes,
-                active,
-                i < y0.shape[0],
-                v_offset,
-                b_offset,
-            )
-            if i < y0.shape[0]:
-                for j in range(lane, size, batch_lanes):
-                    smem_u[v_offset + j] += smem_k6[v_offset + j]
-                    u_global[i, j] = smem_u[v_offset + j]
-            cuda.syncthreads()
-
-            if active:
-                ode_write(
-                    u_global,
-                    smem_t_end[batch],
-                    params,
-                    work_global,
-                    i,
-                    lane,
-                    batch_lanes,
-                )
-            cuda.syncthreads()
-            if active:
-                for j in range(lane, size, batch_lanes):
-                    stage_rhs = (
-                        work_global[i, j]
-                        + (
-                            C71 * smem_k1[v_offset + j]
-                            + C72 * smem_k2[v_offset + j]
-                            + C73 * smem_k3[v_offset + j]
-                            + C74 * smem_k4[v_offset + j]
-                            + C75 * smem_k5[v_offset + j]
-                            + C76 * smem_k6[v_offset + j]
-                        )
-                        * smem_inv_dt[batch]
-                    )
-                    # The state rows go straight to the shared solver
-                    # buffer, which holds one n_vars block per batch;
-                    # the sensitivity rows are staged until their own
-                    # solve, after the coupling term is known.
-                    if j < n_vars:
-                        smem_rhs[b_offset + j] = lu_dtype(stage_rhs)
-                    else:
-                        work_global[i, j] = stage_rhs
-            block_solve(
-                smem_lu,
-                smem_ipiv,
-                smem_rhs,
-                work_global,
-                smem_k7,
-                y_global,
-                params,
-                smem_t[batch],
-                i,
-                lane,
-                batch_lanes,
-                active,
-                i < y0.shape[0],
-                v_offset,
-                b_offset,
-            )
-            if i < y0.shape[0]:
-                for j in range(lane, size, batch_lanes):
-                    smem_u[v_offset + j] += smem_k7[v_offset + j]
-                    u_global[i, j] = smem_u[v_offset + j]
-            cuda.syncthreads()
-
-            if active:
-                ode_write(
-                    u_global,
-                    smem_t_end[batch],
-                    params,
-                    work_global,
-                    i,
-                    lane,
-                    batch_lanes,
-                )
-            cuda.syncthreads()
-            if active:
-                for j in range(lane, size, batch_lanes):
-                    stage_rhs = (
-                        work_global[i, j]
-                        + (
-                            C81 * smem_k1[v_offset + j]
-                            + C82 * smem_k2[v_offset + j]
-                            + C83 * smem_k3[v_offset + j]
-                            + C84 * smem_k4[v_offset + j]
-                            + C85 * smem_k5[v_offset + j]
-                            + C86 * smem_k6[v_offset + j]
-                            + C87 * smem_k7[v_offset + j]
-                        )
-                        * smem_inv_dt[batch]
-                    )
-                    # The state rows go straight to the shared solver
-                    # buffer, which holds one n_vars block per batch;
-                    # the sensitivity rows are staged until their own
-                    # solve, after the coupling term is known.
-                    if j < n_vars:
-                        smem_rhs[b_offset + j] = lu_dtype(stage_rhs)
-                    else:
-                        work_global[i, j] = stage_rhs
-            block_solve(
-                smem_lu,
-                smem_ipiv,
-                smem_rhs,
-                work_global,
-                smem_k8,
-                y_global,
-                params,
-                smem_t[batch],
-                i,
-                lane,
-                batch_lanes,
-                active,
-                i < y0.shape[0],
-                v_offset,
-                b_offset,
-            )
-
+            # Weighted RMS error estimate.
             err_local = 0.0
-            if active:
-                for j in range(lane, size, batch_lanes):
-                    y_new_j = smem_u[v_offset + j] + smem_k8[v_offset + j]
-                    scale = atol + rtol * max(
-                        math.fabs(smem_y[v_offset + j]), math.fabs(y_new_j)
-                    )
-                    r = weights[i, j] * smem_k8[v_offset + j] / scale
-                    err_local += r * r
-            smem_err[tx] = err_local
-            cuda.syncthreads()
+            for j in range(size):
+                y_new_j = u[j] + k_stages[7, j]
+                scale = atol + rtol * max(math.fabs(y[j]), math.fabs(y_new_j))
+                r = weights[i, j] * k_stages[7, j] / scale
+                err_local += r * r
+            err_norm = math.sqrt(err_local / n_error)
+            accept = err_norm <= 1.0 and not math.isnan(err_norm)
 
-            if lane == 0:
-                for other_lane in range(1, batch_lanes):
-                    smem_err[tx] += smem_err[batch + other_lane * batches_per_block]
+            if math.isnan(err_norm) or err_norm > 1e18:
+                safe_err = 1e18
+            elif err_norm == 0.0:
+                safe_err = 1e-18
+            else:
+                safe_err = err_norm
+            factor = SAFETY * safe_err**e1 * err_prev**e2 * err_prev2**e3
+            # Advance the PID error history only on accepted steps.
+            if accept:
+                err_prev2 = err_prev
+                err_prev = safe_err
+            if factor < FACTOR_MIN:
+                factor = FACTOR_MIN
+            elif factor > FACTOR_MAX:
+                factor = FACTOR_MAX
+            dt = dt_use * factor
 
-                if active:
-                    err_norm = math.sqrt(smem_err[tx] / n_error)
-                    accept = err_norm <= 1.0 and not math.isnan(err_norm)
-                    smem_accept[batch] = 1 if accept else 0
-
-                    if math.isnan(err_norm) or err_norm > 1e18:
-                        safe_err = 1e18
-                    elif err_norm == 0.0:
-                        safe_err = 1e-18
-                    else:
-                        safe_err = err_norm
-                    factor = (
-                        SAFETY
-                        * safe_err**e1
-                        * smem_err_prev[batch] ** e2
-                        * smem_err_prev2[batch] ** e3
-                    )
-                    # Advance the PID error history only on accepted steps.
-                    if accept:
-                        smem_err_prev2[batch] = smem_err_prev[batch]
-                        smem_err_prev[batch] = safe_err
-                    if factor < FACTOR_MIN:
-                        factor = FACTOR_MIN
-                    elif factor > FACTOR_MAX:
-                        factor = FACTOR_MAX
-                    smem_dt[batch] = smem_dt_use[batch] * factor
-                else:
-                    smem_accept[batch] = 0
-            cuda.syncthreads()
-
-            if smem_accept[batch] != 0:
-                t_old = smem_t[batch]
-                t_new = t_old + smem_dt_use[batch]
-                save_idx = smem_save_idx[batch]
+            if accept:
+                t_old = t
+                t_new = t_old + dt_use
                 while save_idx < n_save and times[save_idx] <= t_new + 1e-12 * max(
                     1.0, math.fabs(times[save_idx])
                 ):
-                    theta = (times[save_idx] - t_old) / smem_dt_use[batch]
+                    theta = (times[save_idx] - t_old) / dt_use
                     theta1 = 1.0 - theta
-                    for j in range(lane, size, batch_lanes):
+                    for j in range(size):
                         h1 = (
-                            25.948786856663858 * smem_k1[v_offset + j]
-                            - 2.5579724845846235 * smem_k2[v_offset + j]
-                            + 10.433815404888879 * smem_k3[v_offset + j]
-                            - 2.3679251022685204 * smem_k4[v_offset + j]
-                            + 0.524948541321073 * smem_k5[v_offset + j]
-                            + 1.1241088310450404 * smem_k6[v_offset + j]
-                            + 0.4272876194431874 * smem_k7[v_offset + j]
-                            - 0.17202221070155493 * smem_k8[v_offset + j]
+                            25.948786856663858 * k_stages[0, j]
+                            - 2.5579724845846235 * k_stages[1, j]
+                            + 10.433815404888879 * k_stages[2, j]
+                            - 2.3679251022685204 * k_stages[3, j]
+                            + 0.524948541321073 * k_stages[4, j]
+                            + 1.1241088310450404 * k_stages[5, j]
+                            + 0.4272876194431874 * k_stages[6, j]
+                            - 0.17202221070155493 * k_stages[7, j]
                         )
                         h2 = (
-                            -9.91568850695171 * smem_k1[v_offset + j]
-                            - 0.9689944594115154 * smem_k2[v_offset + j]
-                            + 3.0438037242978453 * smem_k3[v_offset + j]
-                            - 24.495224566215796 * smem_k4[v_offset + j]
-                            + 20.176138334709044 * smem_k5[v_offset + j]
-                            + 15.98066361424651 * smem_k6[v_offset + j]
-                            - 6.789040303419874 * smem_k7[v_offset + j]
-                            - 6.710236069923372 * smem_k8[v_offset + j]
+                            -9.91568850695171 * k_stages[0, j]
+                            - 0.9689944594115154 * k_stages[1, j]
+                            + 3.0438037242978453 * k_stages[2, j]
+                            - 24.495224566215796 * k_stages[3, j]
+                            + 20.176138334709044 * k_stages[4, j]
+                            + 15.98066361424651 * k_stages[5, j]
+                            - 6.789040303419874 * k_stages[6, j]
+                            - 6.710236069923372 * k_stages[7, j]
                         )
                         h3 = (
-                            11.419903575922262 * smem_k1[v_offset + j]
-                            + 2.8879645146136994 * smem_k2[v_offset + j]
-                            + 72.92137995996029 * smem_k3[v_offset + j]
-                            + 80.12511834622643 * smem_k4[v_offset + j]
-                            - 52.072871366152654 * smem_k5[v_offset + j]
-                            - 59.78993625266729 * smem_k6[v_offset + j]
-                            - 0.15582684282751913 * smem_k7[v_offset + j]
-                            + 4.883087185713722 * smem_k8[v_offset + j]
+                            11.419903575922262 * k_stages[0, j]
+                            + 2.8879645146136994 * k_stages[1, j]
+                            + 72.92137995996029 * k_stages[2, j]
+                            + 80.12511834622643 * k_stages[3, j]
+                            - 52.072871366152654 * k_stages[4, j]
+                            - 59.78993625266729 * k_stages[5, j]
+                            - 0.15582684282751913 * k_stages[6, j]
+                            + 4.883087185713722 * k_stages[7, j]
                         )
-                        y_new_j = smem_u[v_offset + j] + smem_k8[v_offset + j]
-                        hist[i, save_idx, j] = theta1 * smem_y[v_offset + j] + theta * (
+                        y_new_j = u[j] + k_stages[7, j]
+                        # Rosenbrock continuous extension between y_old and
+                        # y_new. y[j] is still y_old here; it is advanced
+                        # after this loop.
+                        hist[i, save_idx, j] = theta1 * y[j] + theta * (
                             y_new_j + theta1 * (h1 + theta * (h2 + theta * h3))
                         )
                     save_idx += 1
-                if lane == 0:
-                    smem_save_idx[batch] = save_idx
-                for j in range(lane, size, batch_lanes):
-                    smem_y[v_offset + j] = smem_u[v_offset + j] + smem_k8[v_offset + j]
-            cuda.syncthreads()
+                for j in range(size):
+                    y[j] = u[j] + k_stages[7, j]
+                t += dt_use
+                accepted += 1
+            else:
+                rejected += 1
+            n_steps += 1
 
-            if lane == 0 and active:
-                if smem_accept[batch] != 0:
-                    smem_t[batch] += smem_dt_use[batch]
-                    smem_accepted[batch] += 1
-                else:
-                    smem_rejected[batch] += 1
-                smem_n_steps[batch] += 1
-            cuda.syncthreads()
+        # Save times past this trajectory's own end time hold its final state.
+        while save_idx < n_save:
+            for j in range(size):
+                hist[i, save_idx, j] = y[j]
+            save_idx += 1
+        accepted_out[i] = accepted
+        rejected_out[i] = rejected
+        loop_out[i] = n_steps
 
-            if tx == 0:
-                keep_going = 0
-                for b in range(batches_per_block):
-                    bi = block_start + b
-                    if (
-                        bi < y0.shape[0]
-                        and smem_save_idx[b] < n_save
-                        and smem_t[b] < tf
-                        and smem_n_steps[b] < max_steps
-                    ):
-                        keep_going = 1
-                smem_continue[0] = keep_going
-            cuda.syncthreads()
-
-        if tx < batches_per_block and i < y0.shape[0]:
-            accepted_out[i] = smem_accepted[batch]
-            rejected_out[i] = smem_rejected[batch]
-            loop_out[i] = smem_n_steps[batch]
-
-    return kernel, lu_solver
+    return kernel, tpb
 
 
 def prepare_solve(
@@ -1165,22 +954,22 @@ def prepare_solve(
     icoeff=1.0,
     dcoeff=0.0,
     lu_precision: str = "fp32",
-    batches_per_block="suggested",
+    trajectories_per_block=None,
 ):
     y0_arr, times, params_arr, dt0 = _normalize_inputs(y0, t_span, params, first_step)
     n, n_vars = y0_arr.shape
     n_save = times.shape[0]
     n_params = params_arr.shape[1]
     weights_arr = build_error_weights(error_weights, n, n_vars)
+    trajectories_per_block = trajectories_per_block_or_default(trajectories_per_block)
 
-    # Scratch: the state and stage vectors the kernel stages through global
-    # memory (y, u, the right-hand side) plus df/dt.
+    # No global scratch: every per-trajectory vector is thread-local.
     workspace = get_workspace(
-        _WORKSPACE_CACHE, n, n_vars, n_save, n_params, transposed=False, n_work=4
+        _WORKSPACE_CACHE, n, n_vars, n_save, n_params, transposed=False, n_work=0
     )
     copy_workspace_inputs(workspace, y0_arr, times, params_arr, weights_arr)
 
-    kernel, lu_solver = _make_kernel(
+    kernel, trajectories_per_block = _make_kernel(
         ode_fn,
         n_vars,
         n_params,
@@ -1188,11 +977,10 @@ def prepare_solve(
         icoeff,
         dcoeff,
         lu_precision,
-        batches_per_block,
+        trajectories_per_block,
     )
-    batches_per_block = lu_solver.batches_per_block
-    threads = lu_solver.block_dim
-    blocks = (n + batches_per_block - 1) // batches_per_block
+    threads = (trajectories_per_block, 1, 1)
+    blocks = (n + trajectories_per_block - 1) // trajectories_per_block
 
     return PreparedNumbaSolve(
         kernel=kernel,
@@ -1227,10 +1015,16 @@ def _make_jax_launch(
     icoeff: float = 1.0,
     dcoeff: float = 0.0,
     lu_precision: str = "fp32",
-    batches_per_block="suggested",
+    trajectories_per_block: int = _DEFAULT_TRAJECTORIES_PER_BLOCK,
     spec: SensitivitySpec | None = None,
+    linear_solver=None,
+    jac_fn=None,
+    time_derivative_fn=None,
+    lu_structure: LUStructure | None = None,
+    tf_index: int = -1,
+    max_registers: int | None = None,
 ):
-    kernel, lu_solver = _make_kernel(
+    kernel, trajectories_per_block = _make_kernel(
         ode_fn,
         n_vars,
         n_params,
@@ -1238,13 +1032,22 @@ def _make_jax_launch(
         icoeff,
         dcoeff,
         lu_precision,
-        batches_per_block,
+        trajectories_per_block,
         spec,
+        linear_solver,
+        jac_fn,
+        time_derivative_fn,
+        lu_structure,
+        tf_index,
+        max_registers,
     )
-    argtypes = SOLVER_ARGTYPES + (SCRATCH_ARGTYPE,) * 4
-    batches_per_block = lu_solver.batches_per_block
-    blocks = (n + batches_per_block - 1) // batches_per_block
-    return make_launch(kernel, argtypes, grid=blocks, block=lu_solver.block_dim)
+    blocks = (n + trajectories_per_block - 1) // trajectories_per_block
+    return make_launch(
+        kernel,
+        SOLVER_ARGTYPES,
+        grid=blocks,
+        block=(trajectories_per_block, 1, 1),
+    )
 
 
 def solve(
@@ -1263,8 +1066,14 @@ def solve(
     icoeff=1.0,
     dcoeff=0.0,
     lu_precision: str = "fp32",
-    batches_per_block="suggested",
+    trajectories_per_block=None,
     sens_error_control=True,
+    linear_solver=None,
+    jac_fn=None,
+    time_derivative_fn=None,
+    lu_structure=None,
+    tf_index=None,
+    max_registers=None,
 ):
     """JAX-callable Rodas5 custom-kernel solve.
 
@@ -1293,12 +1102,6 @@ def solve(
     ``pcoeff``/``icoeff``/``dcoeff`` are the PID step-controller gains; the
     default ``(0, 1, 0)`` is the classic I-controller.
 
-    ``batches_per_block`` sets how many trajectories are packed into (and solved
-    cooperatively by) a single CUDA block; it is forwarded to the nvmath
-    ``LUPivotSolver`` and the whole kernel is sized from it. The default
-    ``"suggested"`` lets nvmath pick a value tuned for LU throughput; an explicit
-    integer overrides that to trade occupancy against per-trajectory lanes and
-    shared-memory footprint (bounded by available shared memory).
 
     The solve is an XLA custom call into the numba-cuda kernel, so it carries a
     ``jax.custom_jvp`` rule rather than being differentiated by XLA: asking for
@@ -1312,11 +1115,11 @@ def solve(
     matrix is *not* factorised whole: it is block lower triangular with the same
     ``M0 = I/(h*gamma) - J_y`` on every diagonal block, so one ``n_vars``
     factorisation serves the state and every sensitivity column and the coupling
-    is a forward substitution. The cost that does grow with ``n_sens`` is
-    occupancy -- ten stage vectors of the augmented state live in shared memory,
-    so the batch per block shrinks and ``batches_per_block`` is re-fitted
-    automatically. This is still a solver for problems with few parameters
-    relative to the state dimension.
+    is a forward substitution. What grows with ``n_sens`` is the thread's own
+    working set -- ten stage vectors of the augmented state, in local memory --
+    rather than the block's shared budget, which carries only the ``n_vars``
+    matrix. This is still a solver for problems with few parameters relative to
+    the state dimension.
 
     ``sens_error_control`` decides whether the sensitivity components take part
     in the step-size error norm. The default ``True`` controls them to the same
@@ -1333,7 +1136,68 @@ def solve(
     property -- order 5 survives an approximate Jacobian -- but not cheap: the
     error constant it costs was measured at 200x the steps on a right-hand side
     bilinear in state and parameters, which is most reaction networks.
+
+    ``lu_structure`` says how one trajectory's iteration matrix is laid out in
+    the shared buffer (see :class:`LUStructure`). The default is dense
+    ``n_vars x n_vars``, which is what :func:`dense_lu_solver` and Enzyme's
+    derived Jacobian both expect. A compressed structure stores only the entries
+    a structured solver reads, which at large ``n_vars`` is the difference
+    between a thread holding thousands of elements and a few hundred; it needs a
+    ``jac_fn`` written against that layout, and a ``linear_solver`` that
+    factorises it.
+
+    ``jac_fn(y_row, t, p_row, lu)`` writes ``J`` into the buffer in the
+    structure's layout; the kernel negates it and adds ``1/(h*gamma)`` on the
+    structure's diagonal slots to finish ``M``. ``time_derivative_fn`` supplies
+    ``df/dt`` the same way (omit it for an autonomous system). Without a
+    ``jac_fn`` both come from ``ode_fn`` by Enzyme, and ``ode_fn`` is the tuple
+    form; with one, ``ode_fn`` may use whichever form its callbacks share.
+
+    ``linear_solver`` replaces the default :func:`dense_lu_solver` with a
+    factorisation that exploits that layout -- see :func:`check_linear_solver`.
+    It owns neither the buffer nor the Jacobian, so it is just the two device
+    functions. Forward sensitivities are not available with one, since the joint
+    system's iteration matrix is block lower triangular in blocks such a solver
+    has never been shown.
+
+    ``tf_index`` names a column of ``params`` holding each trajectory's own end
+    time, for ensembles whose members finish at different times; save times
+    past a trajectory's end hold its final state. The default ``None`` ends
+    every trajectory at ``t_span[-1]``.
+
+    ``trajectories_per_block`` is one thread's worth of work each, defaulting to
+    a warp; nothing on chip bounds it, since every per-trajectory buffer is
+    thread-local. ``max_registers`` caps the
+    kernel's per-thread register count, trading spills against occupancy.
     """
+    n_vars = jnp.shape(y0)[-1]
+    if linear_solver is not None:
+        check_linear_solver(linear_solver)
+    if lu_structure is None:
+        lu_structure = dense_lu_structure(n_vars)
+        if jac_fn is not None:
+            raise ValueError(
+                "a jac_fn writes into the LU buffer, so it needs the lu_structure "
+                "describing that buffer; pass one, or drop jac_fn and let Enzyme "
+                "fill the dense structure"
+            )
+    else:
+        if lu_structure.n_vars != n_vars:
+            raise ValueError(
+                f"lu_structure describes {lu_structure.n_vars} variables but y0 has "
+                f"{n_vars}"
+            )
+        if jac_fn is None:
+            raise ValueError(
+                "a compressed lu_structure needs a jac_fn written against it; "
+                "Enzyme's derived Jacobian only fills the dense structure"
+            )
+    if jac_fn is None and time_derivative_fn is not None:
+        raise ValueError(
+            "time_derivative_fn goes with jac_fn; without one, df/dt comes from "
+            "ode_fn by the same Enzyme sweep as the Jacobian"
+        )
+    trajectories_per_block = trajectories_per_block_or_default(trajectories_per_block)
 
     settings = dict(
         rtol=rtol,
@@ -1346,8 +1210,21 @@ def solve(
         icoeff=icoeff,
         dcoeff=dcoeff,
         lu_precision=lu_precision,
-        batches_per_block=batches_per_block,
+        trajectories_per_block=trajectories_per_block,
+        linear_solver=linear_solver,
+        jac_fn=jac_fn,
+        time_derivative_fn=time_derivative_fn,
+        lu_structure=lu_structure,
+        tf_index=-1 if tf_index is None else int(tf_index),
+        max_registers=max_registers,
     )
+    if linear_solver is not None:
+        # No sensitivity path: the joint system's iteration matrix is block
+        # lower triangular in blocks this solver has never been shown.
+        return make_custom_vmap_solver(
+            functools.partial(_solve_impl, ode_fn, **settings),
+            return_stats=return_stats,
+        )(y0, t_span, params)
     # The JVP rule wraps the vmap-aware solvers rather than the other way
     # round: custom_vmap's own JVP path instantiates symbolic zeros, which is
     # what tells the rule which sensitivity blocks it has to integrate.
@@ -1388,8 +1265,14 @@ def _solve_impl(
     icoeff=1.0,
     dcoeff=0.0,
     lu_precision: str = "fp32",
-    batches_per_block="suggested",
+    trajectories_per_block: int = _DEFAULT_TRAJECTORIES_PER_BLOCK,
     spec=None,
+    linear_solver=None,
+    jac_fn=None,
+    time_derivative_fn=None,
+    lu_structure: LUStructure | None = None,
+    tf_index: int = -1,
+    max_registers: int | None = None,
 ):
     y0_arr, params_arr, n, n_vars = normalize_y0_params(y0, params)
     times = jnp.asarray(t_span, dtype=jnp.float64)
@@ -1415,15 +1298,21 @@ def _solve_impl(
         icoeff,
         dcoeff,
         lu_precision,
-        batches_per_block,
+        trajectories_per_block,
         spec,
+        linear_solver,
+        jac_fn,
+        time_derivative_fn,
+        lu_structure,
+        tf_index,
+        max_registers,
     )
-    # Scratch: y, u, the staged right-hand side, and df/dt.
-    scratch_specs = (jax.ShapeDtypeStruct((n, n_system), jnp.float64),) * 4
+    # No global scratch: the kernel keeps the state, the ten stage vectors and
+    # df/dt in registers and thread-local memory.
     hist, accepted, rejected, loop_steps = ensemble_ffi_call(
         launch,
         (y0_arr, times, params_arr, weights_arr),
-        scratch_specs,
+        (),
         n=n,
         n_vars=n_system,
         n_save=n_save,

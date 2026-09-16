@@ -282,17 +282,37 @@ def make_cuda_transposed_vector_writer(fn, n_vars: int):
 
 
 @functools.cache
-def make_cuda_striped_vector_writer(fn, n_vars: int):
-    """A vector writer in which each lane writes a disjoint
-    output stripe ``j = lane, lane + stride, ...`` so a batch's lanes share the
-    n_vars-element write. Every lane evaluates the full callback (cheap and
-    wall-clock-free under SIMT lockstep); only the global write is split."""
+def make_cuda_out_vector_writer(fn):
+    """A vector writer for a callback that fills an out-array itself.
+
+    The tuple-returning form the other writers expect exists so Enzyme can
+    differentiate the callback; a caller supplying its own ``jac_fn`` has taken
+    Enzyme out of the picture, and can write the right-hand side straight into
+    the output instead -- which a large state makes far cheaper than returning
+    a tuple of that many scalars.
+    """
     fn_device = as_cuda_device(fn)
 
     @cuda.jit(device=True)
-    def write_vector(y, t, p, out, i, lane, stride):
-        values = fn_device(y[i], t, p[i])
-        for j in range(lane, n_vars, stride):
-            out[i, j] = values[j]
+    def write_vector(y_row, t, p_row, out):
+        fn_device(y_row, t, p_row, out)
+
+    return write_vector
+
+
+def make_cuda_local_vector_writer(fn, n_vars: int):
+    """A vector writer over one trajectory's own thread-local arrays.
+
+    Rodas5P runs one trajectory per thread, so there is no stripe to share: the
+    thread owning the trajectory writes the whole vector, and both ``y_row`` and
+    ``out`` are its own local memory rather than rows of a global scratch array.
+    """
+    fn_device = as_cuda_device(fn)
+
+    @cuda.jit(device=True)
+    def write_vector(y_row, t, p_row, out):
+        values = fn_device(y_row, t, p_row)
+        for j in range(n_vars):
+            out[j] = values[j]
 
     return write_vector

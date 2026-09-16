@@ -315,11 +315,12 @@ still one CUDA thread per trajectory with no cross-trajectory communication.
 
 The asymptotics are not the only obstacle to differentiating the solver kernel
 itself with Enzyme, the way `ode_fn` is differentiated; it is impractical here
-for mechanical reasons too. The kernels are not ordinary functions: they are hand-written CUDA with per-trajectory adaptive stepping,
-cooperative lane-striped work, `syncthreads` barriers and shared-memory
-workspaces, and Rodas5P calls into nvmath's `LUPivotSolver`, a closed device
-template. Reverse mode through cross-thread communication and opaque CUDA library
-calls is exactly where Enzyme-GPU stops working, and a reverse pass would in any
+for mechanical reasons too. The kernels are not ordinary functions: they are
+hand-written CUDA with per-trajectory adaptive stepping, hand-written linear
+algebra over thread-local buffers, and `syncthreads` barriers in Tsit5's shared
+backend.
+Reverse mode through that, and through the step controller's data-dependent
+control flow, is exactly where Enzyme-GPU stops working, and a reverse pass would in any
 case need a tape of every stage of every step — at $10^5$ trajectories and
 $\sim\!10^3$ adaptive steps that is hundreds of gigabytes, on a device with tens.
 Integrating the sensitivity equation instead keeps the whole derivative inside

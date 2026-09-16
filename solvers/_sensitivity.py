@@ -248,15 +248,16 @@ def make_augmented_transposed_writer(ode_fn, spec: SensitivitySpec):
 
 
 @functools.cache
-def make_augmented_striped_writer(ode_fn, spec: SensitivitySpec):
-    """Joint ``[f, J_y S + J_p]`` writer for Rodas5P's ``(n, n_aug)`` state.
+def make_augmented_local_writer(ode_fn, spec: SensitivitySpec):
+    """Joint ``[f, J_y S + J_p]`` writer for Rodas5P's thread-local state.
 
-    The state block keeps the existing lane-striped write.  The sensitivity
-    directions are independent of one another -- each is its own forward sweep
-    seeded with ``(S_k, 0, e_k)`` -- so the lanes stripe over directions too and
-    every lane writes a disjoint block of ``out``, with no race and no
+    Rodas5P runs one trajectory per thread, so the whole augmented vector --
+    the state block and every sensitivity direction -- is written by the thread
+    that owns it, out of and into its own local arrays.  The directions stay
+    independent of one another (each is its own forward sweep seeded with
+    ``(S_k, 0, e_k)``); nothing is shared, so there is no race and no
     synchronisation inside a device function whose callers invoke it under a
-    divergent ``if active``.
+    divergent ``if running``.
     """
     n_vars = spec.n_vars
     n_sens = spec.n_sens
@@ -268,16 +269,14 @@ def make_augmented_striped_writer(ode_fn, spec: SensitivitySpec):
     seeds = seed_table(spec)
 
     @cuda.jit(device=True)
-    def write_vector(z, t, p, out, i, lane, stride):
+    def write_vector(z_row, t, p_row, out):
         seed = cuda.const.array_like(seeds)
-        z_row = z[i]
-        p_row = p[i]
         values = fn_device(z_row, t, p_row)
-        for j in range(lane, n_vars, stride):
-            out[i, j] = values[j]
+        for j in range(n_vars):
+            out[j] = values[j]
 
         tangent = cuda.local.array(n_vars, types.float64)
-        for k in range(lane, n_sens, stride):
+        for k in range(n_sens):
             base = n_vars + k * n_vars
             start = 0 if k < n_y0_dirs else length - (k - n_y0_dirs)
             tangent_of(
@@ -290,7 +289,7 @@ def make_augmented_striped_writer(ode_fn, spec: SensitivitySpec):
                 seed[start : start + n_params],
             )
             for r in range(n_vars):
-                out[i, base + r] = tangent[r]
+                out[base + r] = tangent[r]
 
     return write_vector
 
@@ -306,7 +305,7 @@ def clear_caches() -> None:
     make_second_tangent.cache_clear()
     seed_table.cache_clear()
     make_augmented_transposed_writer.cache_clear()
-    make_augmented_striped_writer.cache_clear()
+    make_augmented_local_writer.cache_clear()
 
 
 def augmented_y0(y0_arr, spec: SensitivitySpec):
