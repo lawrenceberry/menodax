@@ -6,8 +6,10 @@ hand-written Jacobians, which makes them the natural check on that derivation â€
 and on the ``df/dt`` the solver takes from the same sweeps, which no reference
 system supplies but which is zero for all of them, every one being autonomous.
 
-The derivative is built here exactly as ``rodas5P._make_kernel`` builds it, so
-this pins the call shape the kernel depends on as well as the values.
+The derivative is built here exactly as ``rodas5P._make_kernel`` builds it --
+one directional derivative, seeded with a unit column at a time rather than
+with a colour group -- so this pins the call shape the kernel depends on as
+well as the values.
 
 """
 
@@ -28,36 +30,53 @@ def evaluate_derivatives(ode_fn, y, t, params):
     are ``(n, n_vars, n_vars)`` and ``(n, n_vars)``.
     """
     from numba_cuda_mlir import types
-    from numba_enzyme import jacfwd_column
 
-    from solvers._numba_common import as_cuda_device
+    from solvers._sensitivity import make_tangent
 
     y = np.ascontiguousarray(y, dtype=np.float64)
     params = np.ascontiguousarray(params, dtype=np.float64)
     n, n_vars = y.shape
     n_params = params.shape[1]
-    jacobian_column = jacfwd_column(
-        as_cuda_device(ode_fn),
-        signature=types.UniTuple(types.float64, n_vars)(
-            types.UniTuple(types.float64, n_vars),
-            types.float64,
-            types.UniTuple(types.float64, n_params),
-        ),
-    )
+    tangent_of = make_tangent(ode_fn, n_vars, n_params)
+
+    # The unit and zero directions the sweeps are seeded with, laid out the way
+    # the kernel lays them out: row ``c`` is ``e_c`` and the last row is zero.
+    length = max(n_vars, n_params)
+    seeds = np.zeros((n_vars + 1, length), dtype=np.float64)
+    for col in range(n_vars):
+        seeds[col, col] = 1.0
 
     @cuda.jit
-    def kernel(y, t, p, jacobian, time_jacobian):
+    def kernel(y, t, p, seed, jacobian, time_jacobian):
         i = cuda.grid(1)
         if i < y.shape[0]:
             column = cuda.local.array(n_vars, types.float64)
-            for col in range(n_vars + 1):
-                jacobian_column(column, y[i], t, p[i], col)
-                if col == n_vars:
-                    for row in range(n_vars):
-                        time_jacobian[i, row] = column[row]
-                else:
-                    for row in range(n_vars):
-                        jacobian[i, row, col] = column[row]
+            zero = n_vars  # the seed table's trailing all-zero row
+            for col in range(n_vars):
+                # J . e_col, one sweep for one column of df/dy.
+                tangent_of(
+                    column,
+                    y[i],
+                    t,
+                    p[i],
+                    seed[col, 0:n_vars],
+                    0.0,
+                    seed[zero, 0:n_params],
+                )
+                for row in range(n_vars):
+                    jacobian[i, row, col] = column[row]
+            # Seeding time rather than the state gives df/dt whole.
+            tangent_of(
+                column,
+                y[i],
+                t,
+                p[i],
+                seed[zero, 0:n_vars],
+                1.0,
+                seed[zero, 0:n_params],
+            )
+            for row in range(n_vars):
+                time_jacobian[i, row] = column[row]
 
     d_jacobian = cuda.device_array((n, n_vars, n_vars), dtype=np.float64)
     d_time_jacobian = cuda.device_array((n, n_vars), dtype=np.float64)
@@ -66,6 +85,7 @@ def evaluate_derivatives(ode_fn, y, t, params):
         cuda.to_device(y),
         float(t),
         cuda.to_device(params),
+        cuda.to_device(seeds),
         d_jacobian,
         d_time_jacobian,
     )

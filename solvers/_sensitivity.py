@@ -36,13 +36,14 @@ present only when ``y0`` is differentiated) and then the parameter block
 the blocks JAX actually asks for are integrated, so differentiating with respect
 to parameters alone does not pay for the ``n_vars`` initial-state columns.
 
-``J_y`` and ``J_p`` both come from ``numba_enzyme.jacfwd_column`` applied to the
-user's ``ode_fn``, which seeds one entry of the callback's *flattened* argument
-list ``(y_0 ... y_n-1, t, p_0 ... p_m-1)``: columns ``0 .. n_vars - 1`` are the
-Jacobian, column ``n_vars`` is ``df/dt`` (what Rodas5P already uses), and
-columns ``n_vars + 1 ...`` are ``df/dp``.  So the parameter derivatives the
-sensitivity system needs come from the same device function the stiff kernel
-already builds, with no second derivatives and nothing extra from the caller.
+``J_y S_k + J_p_k`` comes from ``numba_enzyme.jvp`` applied to the user's
+``ode_fn``, seeded with a direction over the callback's *flattened* argument
+list ``(y_0 ... y_n-1, t, p_0 ... p_m-1)``: seeding ``(S_k, 0, e_k)`` returns
+that whole right-hand side in one sweep, and seeding the time argument instead
+returns ``df/dt`` (what Rodas5P already uses).  So the parameter derivatives
+the sensitivity system needs come from the same device function the stiff
+kernel already builds, with nothing extra from the caller and no Jacobian ever
+formed.
 """
 
 from __future__ import annotations
@@ -55,7 +56,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.custom_derivatives import SymbolicZero
 from numba_cuda_mlir import cuda, types
-from numba_enzyme import jacfwd_column, jvp
+from numba_enzyme import jvp
 
 from solvers._numba_common import as_cuda_device
 
@@ -132,25 +133,6 @@ class SensitivitySpec:
         norm bit for bit, and with it its exact step sequence.
         """
         return self.n_aug if self.error_control else self.n_vars
-
-
-@functools.cache
-def make_jacobian_column(ode_fn, n_vars: int, n_params: int):
-    """One forward-mode column of ``ode_fn``'s flattened Jacobian.
-
-    Column ``c < n_vars`` is ``df/dy_c``, column ``n_vars`` is ``df/dt``, and
-    column ``n_vars + 1 + k`` is ``df/dp_k``.  The signature is required: an
-    array cannot say how long the tuple it stands for is, and the kernels'
-    own calls specialise ``ode_fn`` for array arguments instead.
-    """
-    return jacfwd_column(
-        as_cuda_device(ode_fn),
-        signature=types.UniTuple(types.float64, n_vars)(
-            types.UniTuple(types.float64, n_vars),
-            types.float64,
-            types.UniTuple(types.float64, n_params),
-        ),
-    )
 
 
 @functools.cache
@@ -322,7 +304,6 @@ def clear_caches() -> None:
     Each ``(ode_fn, spec)`` pair compiles its own writer, and nothing releases
     them: the module-level caches hold them for the process's lifetime.
     """
-    make_jacobian_column.cache_clear()
     make_tangent.cache_clear()
     make_second_tangent.cache_clear()
     seed_table.cache_clear()

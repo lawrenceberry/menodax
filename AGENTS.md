@@ -228,7 +228,7 @@ Things to know when touching this:
   arguments at any `n_vars`; numba-enzyme's entry point loads the scalars out
   of those rows before handing them to Enzyme. There is no generated Python
   here at all, and no module either: the derivative is a signature and one
-  `jacfwd_column` call inside `_make_kernel`.
+  `jvp` call inside `_make_kernel`.
 - The column index runs over the primal's **flattened** arguments, which is why
   `df/dt` is free: `t` is the argument after the state. It is a run-time
   argument and the unit seed is built inside the derivative, so this is one

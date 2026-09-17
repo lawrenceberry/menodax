@@ -103,9 +103,10 @@ The fork carries changes that are not upstream:
   primal. `jvp` differentiates a scalar-output primal, so a sweep yields a
   single Jacobian entry; a sweep of a multi-output one yields a whole column.
   `jacfwd` fills the whole matrix, one sweep per column; `jacfwd_column` fills
-  a single column chosen by a run-time index. The solver uses the latter for
-  the iteration matrix: the whole matrix would have to live in per-thread local
-  memory. See `_make_kernel` in `solvers/rodas5P.py`.
+  a single column chosen by a run-time index. modax uses neither: the whole
+  matrix would have to live in per-thread local memory, and a unit column is
+  a needlessly narrow seed once the sparsity pattern lets a whole colour group
+  go in at once. See `_make_kernel` in `solvers/rodas5P.py`.
 - **`jvp` for tuple-returning primals** — `jvp` used to be scalar-output only,
   so a directional derivative of a vector field had to be assembled from
   `n_vars + 1` unit columns. It now also takes the array call shape,
