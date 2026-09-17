@@ -124,9 +124,28 @@ documents the protocol — `factorize_local(lu, ipiv)` and
 `solve_local(lu, ipiv, rhs)`, plus an optional `ipiv_size` when it pivots
 something smaller than the state — and the default `dense_lu_solver` satisfies
 it like any caller's would. A solver owns neither the buffer nor the Jacobian;
-it is told nothing about the step size and allocates nothing. It does need to
-read the layout it was given, which is why a compressed layout with the default
-solver is an error rather than garbage.
+it is told nothing about the step size and allocates nothing.
+
+**A pattern does not oblige you to write one.** The pattern buys the sweeps and
+the solver buys the storage, and they are separable: with no `linear_solver` the
+sweeps stay compressed and each is scattered into an ordinary row-major matrix,
+which `dense_lu_solver` factorises as it always has. That costs `n_vars ** 2`
+slots instead of `n_vars * n_colours`, so it is the cheap half of a pattern
+without the expensive half — worth knowing that on DISCO-EB it is **10x slower**
+than SchurEB, which is what the compressed layout is for.
+
+**`pack` squeezes the grid to one slot per declared entry.** The grid keeps a
+slot for every `(row, colour)` because that makes the AD write a straight run; a
+pattern that colours well leaves most of them empty, and the matrix is
+per-thread local memory. Packing keeps the addressing — a slot is still a
+compile-time constant per `(r, c)`, no `rowptr` to chase and no search — and
+trades the run for a scatter. DISCO-EB goes from 600 slots to 238, worth ~3%.
+Two consequences: a packed layout allocates its own slots for diagonals the
+pattern leaves out, since `I/(h*gamma)` lands on all of them; and `slot(r, c)`
+raises for an entry the pattern never declared, where the grid would have
+silently handed back another column's slot. Pass the packed `CompressedJacobian`
+straight to `solve` as `sparsity`, which is how the layout the solver was bound
+to and the layout the kernel uses are guaranteed to be the same object.
 
 Forward sensitivities work with a custom solver: the joint iteration matrix is
 block lower triangular with the same `M0` on every diagonal block, so the solver

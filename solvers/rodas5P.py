@@ -303,9 +303,29 @@ def _make_kernel(
     n_sens = 0 if spec is None else spec.n_sens
 
     tpb = int(trajectories_per_block)
-    lu_size = structure.size
     n_colours = structure.n_colours
-    diag_table = np.asarray(structure.diagonal, dtype=np.int32)
+
+    # A pattern and a linear solver are separable decisions. The pattern buys
+    # the *sweeps*: n_colours of them instead of n_vars, which is the expensive
+    # half and costs the caller nothing but the pattern. Storing the result
+    # compressed buys the *space*, but only a solver written against that
+    # layout can read it back. With no such solver the sweeps stay compressed
+    # and their results are scattered into an ordinary row-major matrix, which
+    # dense_lu_solver factorises as it always has -- the cheap win without the
+    # expensive obligation.
+    expand_to_dense = linear_solver is None and not structure.is_row_major_dense
+    if expand_to_dense:
+        lu_size = n_vars * n_vars
+        diag_table = np.arange(n_vars, dtype=np.int32) * (n_vars + 1)
+        store_table = structure.dense_slots()
+    else:
+        lu_size = structure.size
+        diag_table = np.asarray(structure.diagonal, dtype=np.int32)
+        store_table = structure.store_slots()
+    # Only a layout with slots nothing writes needs clearing first. The grid
+    # writes every slot and a packed layout has one slot per entry, so both
+    # come out fully defined; only the dense expansion has structural zeros.
+    needs_clear = store_table is not None and lu_size > int((store_table >= 0).sum())
 
     if linear_solver is None:
         linear_solver = dense_lu_solver(n_vars)
@@ -387,10 +407,47 @@ def _make_kernel(
     colour_seeds = structure.seed_table(n_params)
     zero_row = n_colours  # the seed table's trailing all-zero row
 
+    # Where a sweep's column lands, which is the only thing the two buffer
+    # layouts disagree about. Compressed, the group's own column block is a
+    # contiguous run and every slot is written, so nothing needs clearing.
+    # Expanded, each value goes to the one dense column of that group holding
+    # an entry in that row, and the slots no group claims must be zeroed --
+    # they are the structural zeros the pattern promised.
+    if needs_clear:
+
+        @cuda.jit(device=True)
+        def clear_matrix(lu):
+            for i in range(lu_size):
+                lu[i] = lu_dtype(0.0)
+
+    else:
+
+        @cuda.jit(device=True)
+        def clear_matrix(lu):
+            pass
+
+    if store_table is None:
+
+        @cuda.jit(device=True)
+        def store_colour(lu, column, g):
+            for row in range(n_vars):
+                lu[row * n_colours + g] = lu_dtype(-column[row])
+
+    else:
+
+        @cuda.jit(device=True)
+        def store_colour(lu, column, g):
+            slot = cuda.const.array_like(store_table)
+            for row in range(n_vars):
+                s = slot[row * n_colours + g]
+                if s >= 0:
+                    lu[s] = lu_dtype(-column[row])
+
     @cuda.jit(device=True)
     def write_negated_jacobian(y_local, t, p_row, lu, dT):
         seed = cuda.const.array_like(colour_seeds)
         column = cuda.local.array(n_vars, types.float64)
+        clear_matrix(lu)
         for g in range(n_colours):
             # J . v_g, with v_g the indicator of colour group g.
             tangent_of(
@@ -402,8 +459,7 @@ def _make_kernel(
                 0.0,
                 seed[zero_row, 0:n_params],
             )
-            for row in range(n_vars):
-                lu[row * n_colours + g] = lu_dtype(-column[row])
+            store_colour(lu, column, g)
         # Seeding time rather than the state gives df/dt whole, from one more
         # sweep rather than one per row.
         tangent_of(
@@ -1121,6 +1177,21 @@ def solve(
     or writes, fill-in included: a superset by construction, and it leaves the
     factors room in the same buffer.
 
+    A pattern on its own is enough: with no ``linear_solver`` the sweeps stay
+    compressed and each one is scattered into an ordinary row-major matrix,
+    which the default :func:`dense_lu_solver` factorises. That keeps the saving
+    a pattern is mostly there for -- ``n_colours + 1`` sweeps rather than
+    ``n_vars + 1`` -- at a dense matrix's storage, and asks nothing of the
+    caller. Passing a solver is what turns the pattern into a saving in space
+    and factorisation cost as well.
+
+    A ``CompressedJacobian`` may be passed as ``sparsity`` in place of a
+    pattern -- which is what a caller with its own solver should do, since the
+    layout it bound the solver to is then the layout the kernel uses. Running
+    it through :func:`pack` first trades the grid's straight write for a
+    scatter and gets one slot per declared entry instead of
+    ``n_vars * n_colours``, which is per-thread local memory saved.
+
     ``linear_solver`` replaces the default :func:`dense_lu_solver` with a
     factorisation that exploits that layout -- see :func:`check_linear_solver`.
     It owns neither the buffer nor the Jacobian, so it is two device functions,
@@ -1144,23 +1215,14 @@ def solve(
     n_vars = jnp.shape(y0)[-1]
     if linear_solver is not None:
         check_linear_solver(linear_solver)
-    if linear_solver is not None:
-        check_linear_solver(linear_solver)
     if sparsity is None:
         compressed = dense_jacobian(n_vars)
+    elif isinstance(sparsity, CompressedJacobian):
+        # A caller with a structured solver has already built the layout to
+        # bind it to; taking that object back is what guarantees the two agree.
+        compressed = sparsity
     else:
         compressed = colour_sparsity(normalize_sparsity(sparsity, n_vars))
-        if linear_solver is None and not compressed.is_dense:
-            # The default solver reads lu[i * n_vars + j]; a compressed buffer
-            # is n_vars x n_colours and means nothing to it. Compressing the
-            # Jacobian and factorising it are one decision, not two.
-            raise ValueError(
-                f"sparsity compressed the Jacobian to {compressed.n_colours} "
-                f"columns, which dense_lu_solver cannot factorise: pass a "
-                "linear_solver written against that layout (its slot for entry "
-                "(r, c) is r * n_colours + colour[c]), or drop sparsity to keep "
-                "the dense matrix"
-            )
     trajectories_per_block = trajectories_per_block_or_default(trajectories_per_block)
 
     settings = dict(
