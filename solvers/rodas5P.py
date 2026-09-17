@@ -223,6 +223,84 @@ def dense_lu_solver(n_vars: int):
     return _DenseLUSolver(factorize_local, solve_local)
 
 
+_LITERAL_SEED_SOURCES = 0
+
+# Direction sets per jvp call. Several seeds in one call share one Enzyme entry
+# function, so once nvJitLink has inlined it the primal work the sweeps have in
+# common -- for an ODE whose coefficients depend on t alone, all of it -- is one
+# computation for LLVM to CSE rather than one per sweep. On DISCO-EB that was
+# the difference between 580 ms and 509 ms at N128, on top of the literal
+# seeds. numba-enzyme accepts up to 8 sets per call (its _MAX_DIRECTIONS), so
+# 12 colours take two calls; the cap here mirrors that limit.
+SEED_BATCH = 8
+_MAX_SEED_BATCH = 8
+
+
+def _make_literal_seed_jacobian(*, n_vars, n_params, n_colours, store_table, namespace):
+    """Generate the Jacobian writer with every colour's seed row spelled out.
+
+    ``store_table`` is the layout's destination table, ``(row, colour) ->
+    slot`` with ``-1`` for none, or ``None`` for the plain colour grid where
+    entry ``(row, g)`` sits at ``row * n_colours + g``.
+    """
+    global _LITERAL_SEED_SOURCES
+    import linecache
+
+    zero_row = n_colours
+    batch = max(1, min(_MAX_SEED_BATCH, SEED_BATCH))
+
+    def slots_for(g):
+        for row in range(n_vars):
+            if store_table is None:
+                yield row, row * n_colours + g
+            else:
+                slot = int(store_table[row * n_colours + g])
+                if slot >= 0:
+                    yield row, slot
+
+    lines = [
+        "def write_negated_jacobian(y_local, t, p_row, lu, dT):",
+        "    seed = cuda.const.array_like(colour_seeds)",
+        f"    column = cuda.local.array({n_vars}, float64)",
+        "    clear_matrix(lu)",
+    ]
+    if batch > 1:
+        lines.append(f"    block = cuda.local.array(({batch}, {n_vars}), float64)")
+    for start in range(0, n_colours, batch):
+        group = list(range(start, min(start + batch, n_colours)))
+        if len(group) == 1:
+            g = group[0]
+            lines.append(
+                f"    tangent_of(column, y_local, t, p_row, seed[{g}, 0:{n_vars}], 0.0, "
+                f"seed[{zero_row}, 0:{n_params}])"
+            )
+            for row, slot in slots_for(g):
+                lines.append(f"    lu[{slot}] = lu_dtype(-column[{row}])")
+        else:
+            dirs = ", ".join(
+                f"seed[{g}, 0:{n_vars}], 0.0, seed[{zero_row}, 0:{n_params}]"
+                for g in group
+            )
+            lines.append(f"    tangent_of(block, y_local, t, p_row, {dirs})")
+            for k, g in enumerate(group):
+                for row, slot in slots_for(g):
+                    lines.append(f"    lu[{slot}] = lu_dtype(-block[{k}, {row}])")
+    lines += [
+        f"    tangent_of(column, y_local, t, p_row, seed[{zero_row}, 0:{n_vars}], 1.0, "
+        f"seed[{zero_row}, 0:{n_params}])",
+        f"    for row in range({n_vars}):",
+        "        dT[row] = column[row]",
+    ]
+    source = "\n".join(lines) + "\n"
+    _LITERAL_SEED_SOURCES += 1
+    filename = f"<modax literal-seed jacobian {_LITERAL_SEED_SOURCES}>"
+    linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)
+    code = compile(source, filename, "exec")
+    ns = dict(namespace)
+    exec(code, ns)
+    return ns["cuda"].jit(device=True)(ns["write_negated_jacobian"])
+
+
 def check_linear_solver(linear_solver):
     """Validate a linear solver against the documented protocol.
 
@@ -266,6 +344,7 @@ def _make_kernel(
     compressed: CompressedJacobian | None = None,
     tf_index: int = -1,
     max_registers: int | None = None,
+    array_rhs=None,
 ):
     """Rodas5P, one trajectory per CUDA thread.
 
@@ -338,6 +417,19 @@ def _make_kernel(
 
     if spec is not None:
         ode_write = make_augmented_local_writer(ode_fn, spec)
+    elif array_rhs is not None:
+        # The primal stage evaluations need no tuple form: that exists for
+        # Enzyme, which only ever sees ode_fn. A caller whose right-hand side
+        # also comes as ``f(y, t, p, out)`` over arrays can hand that in, and
+        # the eight stage evaluations per step call it directly.
+        from solvers._numba_common import as_cuda_device as _as_device
+
+        _array_rhs = _as_device(array_rhs)
+
+        @cuda.jit(device=True)
+        def ode_write(y_row, t, p_row, out):
+            _array_rhs(y_row, t, p_row, out)
+
     else:
         ode_write = make_cuda_local_vector_writer(ode_fn, n_vars)
 
@@ -405,14 +497,11 @@ def _make_kernel(
     # per-step round-trip of the whole matrix.
     tangent_of = make_tangent(ode_fn, n_vars, n_params)
     colour_seeds = structure.seed_table(n_params)
-    zero_row = n_colours  # the seed table's trailing all-zero row
 
-    # Where a sweep's column lands, which is the only thing the two buffer
-    # layouts disagree about. Compressed, the group's own column block is a
-    # contiguous run and every slot is written, so nothing needs clearing.
-    # Expanded, each value goes to the one dense column of that group holding
-    # an entry in that row, and the slots no group claims must be zeroed --
-    # they are the structural zeros the pattern promised.
+    # The grid writes every slot and a packed layout has one slot per entry,
+    # so both come out fully defined by the sweeps. Only a layout with slots
+    # nothing writes -- the dense expansion's structural zeros, or a packed
+    # diagonal the pattern left out -- is cleared first.
     if needs_clear:
 
         @cuda.jit(device=True)
@@ -426,53 +515,29 @@ def _make_kernel(
         def clear_matrix(lu):
             pass
 
-    if store_table is None:
-
-        @cuda.jit(device=True)
-        def store_colour(lu, column, g):
-            for row in range(n_vars):
-                lu[row * n_colours + g] = lu_dtype(-column[row])
-
-    else:
-
-        @cuda.jit(device=True)
-        def store_colour(lu, column, g):
-            slot = cuda.const.array_like(store_table)
-            for row in range(n_vars):
-                s = slot[row * n_colours + g]
-                if s >= 0:
-                    lu[s] = lu_dtype(-column[row])
-
-    @cuda.jit(device=True)
-    def write_negated_jacobian(y_local, t, p_row, lu, dT):
-        seed = cuda.const.array_like(colour_seeds)
-        column = cuda.local.array(n_vars, types.float64)
-        clear_matrix(lu)
-        for g in range(n_colours):
-            # J . v_g, with v_g the indicator of colour group g.
-            tangent_of(
-                column,
-                y_local,
-                t,
-                p_row,
-                seed[g, 0:n_vars],
-                0.0,
-                seed[zero_row, 0:n_params],
-            )
-            store_colour(lu, column, g)
-        # Seeding time rather than the state gives df/dt whole, from one more
-        # sweep rather than one per row.
-        tangent_of(
-            column,
-            y_local,
-            t,
-            p_row,
-            seed[zero_row, 0:n_vars],
-            1.0,
-            seed[zero_row, 0:n_params],
-        )
-        for row in range(n_vars):
-            dT[row] = column[row]
+    # The colour loop is unrolled into call sites whose seed rows are
+    # *literals*. The derivative links as LTO IR and nvJitLink inlines it into
+    # the kernel before constant propagation, so a seed the compiler can see
+    # folds: the zero components kill their tangent arithmetic and each sweep
+    # collapses to its own colour group's columns. The same seed read through
+    # a loop variable arrives in registers and cannot fold, which is what had
+    # this kernel at the register cap with a 13 KB spill frame. Several seeds
+    # go into each call (SEED_BATCH) so the sweeps' shared primal is computed
+    # once, and the stores are literal too, one per entry the colour holds.
+    write_negated_jacobian = _make_literal_seed_jacobian(
+        n_vars=n_vars,
+        n_params=n_params,
+        n_colours=n_colours,
+        store_table=store_table,
+        namespace=dict(
+            cuda=cuda,
+            float64=types.float64,
+            tangent_of=tangent_of,
+            colour_seeds=colour_seeds,
+            clear_matrix=clear_matrix,
+            lu_dtype=lu_dtype,
+        ),
+    )
 
     # --- one Rosenbrock stage, state row plus any sensitivity rows -----------
     if spec is None:
@@ -1039,6 +1104,7 @@ def _make_jax_launch(
     compressed: CompressedJacobian | None = None,
     tf_index: int = -1,
     max_registers: int | None = None,
+    array_rhs=None,
 ):
     kernel, trajectories_per_block = _make_kernel(
         ode_fn,
@@ -1054,6 +1120,7 @@ def _make_jax_launch(
         compressed,
         tf_index,
         max_registers,
+        array_rhs,
     )
     blocks = (n + trajectories_per_block - 1) // trajectories_per_block
     return make_launch(
@@ -1087,6 +1154,7 @@ def solve(
     sparsity=None,
     tf_index=None,
     max_registers=None,
+    array_rhs=None,
 ):
     """JAX-callable Rodas5 custom-kernel solve.
 
@@ -1240,6 +1308,7 @@ def solve(
         linear_solver=linear_solver,
         compressed=compressed,
         tf_index=-1 if tf_index is None else int(tf_index),
+        array_rhs=array_rhs,
         max_registers=max_registers,
     )
     # The JVP rule wraps the vmap-aware solvers rather than the other way
@@ -1291,6 +1360,7 @@ def _solve_impl(
     compressed: CompressedJacobian | None = None,
     tf_index: int = -1,
     max_registers: int | None = None,
+    array_rhs=None,
 ):
     y0_arr, params_arr, n, n_vars = normalize_y0_params(y0, params)
     times = jnp.asarray(t_span, dtype=jnp.float64)
@@ -1322,6 +1392,7 @@ def _solve_impl(
         compressed,
         tf_index,
         max_registers,
+        array_rhs,
     )
     # No global scratch: the kernel keeps the state, the ten stage vectors and
     # df/dt in registers and thread-local memory.

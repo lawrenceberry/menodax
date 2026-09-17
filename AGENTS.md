@@ -204,6 +204,28 @@ the whole matrix; that would put `n_vars ** 2` doubles in per-thread local
 memory, where one group at a time keeps the working set at `O(n_vars)` and folds
 straight into the LU buffer.
 
+**The seed rows are literals, several to a call.** The derivative links as LTO
+IR and nvJitLink inlines it into the kernel before constant propagation, so a
+seed the compiler can *see* folds: the zero components kill their tangent
+arithmetic and a colour sweep collapses to its own group's columns. The same
+seed read through a loop variable arrives in registers and cannot fold, and
+that version of this kernel sat at the 168-register cap with a 13 KB spill
+frame and cost 114 ms of DISCO-EB's 128 ms regression against a hand-written
+Jacobian (see numba-enzyme's `test_a_compile_time_jvp_direction_folds`).
+`_make_literal_seed_jacobian` therefore generates the writer with the colour
+loop unrolled: one `jvp` call per `SEED_BATCH` colours, each seed row a
+literal index into the constant-memory table, and one literal store per entry
+the colour holds. Batching is what recovers the rest: the sweeps in one call
+share one Enzyme entry, so once inlined the primal work they have in common --
+for a right-hand side whose coefficients depend on `t` alone, all of it -- is
+one computation for LLVM to CSE rather than one per sweep. Measured at N128:
+665.9 ms with the loop, 594.7 ms with literal seeds, 508.8 ms with eight seeds
+per call, against 552 ms for the hand-written Jacobian the sweeps replaced.
+`array_rhs` is the last piece: the primal stage evaluations do not need the
+tuple form (that exists for Enzyme), so a caller with an `f(y, t, p, out)`
+device function hands it in and the eight evaluations per step call it
+directly, worth 15 ms on DISCO-EB.
+
 Enzyme's `opt` pipeline is `-passes=enzyme,adce,globaldce,instnamer`.
 `instcombine` used to sit in it and had to come out: on a large kernel it
 canonicalises a clamp into `llvm.smax.i64`, and the vendored LLVM's NVPTX path
