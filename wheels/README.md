@@ -7,7 +7,7 @@ asset:
 
 ```toml
 [tool.uv.sources]
-numba-enzyme = { url = "https://github.com/lawrenceberry/numba-enzyme/releases/download/v0.1.3-cuda.1/numba_enzyme-0.1.3-py3-none-linux_x86_64.whl" }
+numba-enzyme = { url = "https://github.com/lawrenceberry/numba-enzyme/releases/download/v0.1.3-cuda.2/numba_enzyme-0.1.3-py3-none-linux_x86_64.whl" }
 ```
 
 Nothing has to be built or staged by hand: `uv sync` downloads that wheel and
@@ -20,12 +20,6 @@ wheel under `numba_enzyme/_vendor/` — 237 MB installed, 73 MB compressed. No
 system LLVM is involved, and `toolchain.py` resolves `_vendor/` ahead of
 `PATH`. It is tagged `py3-none-linux_x86_64` rather than a CPython tag: the
 package has no extension modules, so it installs on any Python ≥ 3.11.
-
-> **The pinned release predates the `jvp` additions below.** The
-> forward-sensitivity support in `solvers/_sensitivity.py` needs them, so until
-> a new asset is cut (see "Cutting a new release") the fork has to be resolved
-> from a working tree — either point `[tool.uv.sources]` at a local path or
-> install it over the wheel.
 
 [ne]: https://github.com/Qruise-ai/numba-enzyme
 [fork]: https://github.com/lawrenceberry/numba-enzyme/tree/cuda
@@ -49,6 +43,16 @@ source re-downloads and re-stages ~73 MB on every fresh resolve. Prefer the
 branch when tracking fork changes matters more than resolve time, and set
 `NUMBA_ENZYME_VENDOR_FROM_PYPI=0` to suppress the staging deliberately.
 
+> **Do not symlink `site-packages/numba_enzyme` at the fork's working tree.**
+> It is a tempting way to iterate on the fork without reinstalling, and the
+> next `uv sync` that replaces the package deletes *through* the link: it
+> empties the real `src/numba_enzyme/`, taking the untracked 237 MB
+> `_vendor/` with it, and only then fails on `rmdir` with "Not a directory".
+> Tracked files come back with `git checkout`, and `_vendor/` can be
+> unzipped out of any built wheel, but neither is a step you want to
+> discover mid-sync. Point `[tool.uv.sources]` at a local path instead and
+> let uv own the directory.
+
 ## Cutting a new release
 
 After pushing a change to the fork's `cuda` branch:
@@ -57,10 +61,10 @@ After pushing a change to the fork's `cuda` branch:
 cd ../numba-enzyme
 uv build --wheel          # hatch_build.py stages _vendor/ from PyPI if absent
 
-gh release create v0.1.3-cuda.2 \
+gh release create v0.1.3-cuda.3 \
     dist/numba_enzyme-0.1.3-py3-none-linux_x86_64.whl \
     --repo lawrenceberry/numba-enzyme --target cuda \
-    --title "v0.1.3-cuda.2"
+    --title "v0.1.3-cuda.3"
 ```
 
 Then point this repository at the new asset:
