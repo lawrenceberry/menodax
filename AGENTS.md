@@ -56,6 +56,13 @@ Shared support modules:
 - **`_jax_common.py`** — the JAX-facing glue: ensemble shape normalisation and
   `make_custom_vmap_solver`, whose `custom_vmap` rule lowers an outer
   `jax.vmap` over a single solve into one native ensemble launch.
+- **`_sparsity.py`** — colours a sparsity pattern's column intersection graph
+  and defines `CompressedJacobian`, the layout the Enzyme sweeps write into.
+- **`_sparse_direct.py`** — orders a pattern with AMD, factorises it
+  symbolically, and compiles a sparse LU and sparse triangular solves for it as
+  `cuda.jit(device=True)` functions. Needs `scikit-sparse` (the `sparse` extra,
+  plus SuiteSparse on the machine) for the ordering; `ordering="natural"` needs
+  neither.
 
 Because the solvers go through `jax.ffi.ffi_call`, they are `jit`-traceable and
 usable inside `lax.scan`/`vmap` — see `examples/bbn_estimation`, which calls one
@@ -86,9 +93,11 @@ thread-local; `trajectories_per_block_or_default` is where that decision is
 made.
 
 `sparsity` takes an `(n_vars, n_vars)` mask, a scipy sparse matrix, or an
-`(nnz, 2)` index array, and compresses the Jacobian by colouring — see below.
+`(nnz, 2)` index array. It compresses the Jacobian by colouring *and* selects a
+compiled sparse direct linear solve; `ordering` picks its fill-reducing
+permutation. See below.
 
-### Sparsity, colouring, and custom linear solvers
+### Sparsity, colouring, and the sparse direct solver
 
 One kernel, one trajectory per CUDA thread: the state, the ten stage vectors,
 `df/dt`, the step controller and the iteration matrix are all that thread's own
@@ -113,44 +122,96 @@ uninformative end of the same mechanism.
 only costs sweeps; colouring a subset silently corrupts the entries where two
 columns of a group do overlap after all. `_check_orthogonal` rejects a colouring
 that violates this, because it is the one way the scheme can be quietly wrong.
-For a structured solver the pattern to give is everything its factorisation
-reads *or writes*, fill-in included — a superset by construction, and it leaves
-the factors room in the same buffer. Colouring DISCO-EB's *true* pattern gives
-11 colours but lets two core columns share one, which collides once the core LU
-fills in; colouring the factorisation pattern gives 12 and zero collisions.
+It need *not* cover the factorisation's fill-in, which gets slots of its own.
 
-**The linear solver is a parameter, not a branch.** `check_linear_solver`
-documents the protocol — `factorize_local(lu, ipiv)` and
-`solve_local(lu, ipiv, rhs)`, plus an optional `ipiv_size` when it pivots
-something smaller than the state — and the default `dense_lu_solver` satisfies
-it like any caller's would. A solver owns neither the buffer nor the Jacobian;
-it is told nothing about the step size and allocates nothing.
+**`sparsity` is the whole interface.** There is no `linear_solver` argument and
+no protocol to satisfy: the kernel builds the solver from the pattern itself.
+With none it is `dense_lu_solver` over the dense colour grid; with one it is
+`solvers/_sparse_direct.py`, which compiles a direct sparse LU and a pair of
+sparse triangular solves for that exact structure — any pattern, no structure
+assumed, which is the win a hand-written solver bought without the hand-written
+solver. The two are the same `(factorize_local, solve_local)` shape, so the
+kernel has no branch. Four host-side steps at kernel-build time:
 
-**A pattern does not oblige you to write one.** The pattern buys the sweeps and
-the solver buys the storage, and they are separable: with no `linear_solver` the
-sweeps stay compressed and each is scattered into an ordinary row-major matrix,
-which `dense_lu_solver` factorises as it always has. That costs `n_vars ** 2`
-slots instead of `n_vars * n_colours`, so it is the cheap half of a pattern
-without the expensive half — worth knowing that on DISCO-EB it is **10x slower**
-than SchurEB, which is what the compressed layout is for.
+1. **Order.** The symmetrised pattern goes to SuiteSparse's AMD through
+   scikit-sparse. AMD rather than COLAMD because COLAMD orders columns to bound
+   fill under whatever row permutation *partial pivoting* chooses, and there is
+   no pivoting here — the pattern is compiled in and cannot depend on the
+   numbers. AMD's permutation is symmetric, so `I/(h*gamma)`'s diagonal stays on
+   the diagonal and every pivot exists structurally. (CHOLMOD's `order="colamd"`
+   runs AMD anyway on a symmetric analysis, so the two are not even distinct
+   here.)
+2. **Factorise symbolically.** Pattern-only Gaussian elimination gives the exact
+   `L + U`, fill included. Exact, and value-independent: a sample factorisation
+   would drop an entry wherever those particular numbers cancelled, and the
+   buffer would then be short by one slot in a kernel with no way to say so.
+3. **Lay out.** One CSR image of `L + U` — CSR because all three routines read it
+   *by rows*: the up-looking factorisation, the forward substitution and the back
+   substitution. `L` strictly left of the diagonal and `U` from it rightwards,
+   sharing the buffer, since the factorisation is in place and a unit diagonal
+   needs no storage. `nnz(L + U)` is the whole footprint.
+4. **Compile.** Two `cuda.jit(device=True)` functions. Where the structure fits
+   they are emitted as straight-line code with every slot a *literal*; above
+   `MAX_UNROLLED_SUBSTITUTIONS` / `MAX_UNROLLED_UPDATES` they fall back to loops
+   over index tables in constant memory. Either way the factorisation's inner
+   merge — which slot of row `i` each update from row `k` lands in, the part a
+   runtime sparse solver spends its time searching for — is resolved on the
+   host.
 
-**`pack` squeezes the grid to one slot per declared entry.** The grid keeps a
-slot for every `(row, colour)` because that makes the AD write a straight run; a
-pattern that colours well leaves most of them empty, and the matrix is
-per-thread local memory. Packing keeps the addressing — a slot is still a
-compile-time constant per `(r, c)`, no `rowptr` to chase and no search — and
-trades the run for a scatter. DISCO-EB goes from 600 slots to 238, worth ~3%.
-Two consequences: a packed layout allocates its own slots for diagonals the
-pattern leaves out, since `I/(h*gamma)` lands on all of them; and `slot(r, c)`
-raises for an entry the pattern never declared, where the grid would have
-silently handed back another column's slot. Pass the packed `CompressedJacobian`
-straight to `solve` as `sparsity`, which is how the layout the solver was bound
-to and the layout the kernel uses are guaranteed to be the same object.
+The unrolling is where most of the speed is, and for a reason worth knowing:
+table-driven, a sparse routine spends a broadcast load on the index of every
+value before it can issue the load of the value itself, and that dependent pair
+is only free when there are enough other trajectories in flight to cover it.
+DISCO-EB's single-cosmology case is 128 trajectories — four warps on a 46-SM
+device — and nothing covers it. Unrolling costs no registers either, since the
+kernel indexes both the matrix and the right-hand side with loop variables of
+its own and so neither can leave local memory whatever this does. Measured at
+N128: **528 ms** table-driven, **419 ms** with the solves unrolled, **398 ms**
+with the factorisation unrolled too, against **509 ms** for the hand-written
+Schur solver. `tests/test_sparse_direct.py` runs the two emissions against each
+other and requires them bit-identical.
 
-Forward sensitivities work with a custom solver: the joint iteration matrix is
-block lower triangular with the same `M0` on every diagonal block, so the solver
-only ever factorises the `n_vars` block it was written for, and the coupling
-between blocks is a forward substitution the kernel does itself.
+No pivoting is sound here for the same reason the Jacobian may be approximate:
+Rodas5P is a Rosenbrock-**W** method, so order 5 survives, and a pivot that
+reaches zero leaves an infinity, the error norm goes to NaN, the step is
+rejected, and the smaller step puts a larger `1/(h*gamma)` on that very diagonal.
+
+It also decouples colouring from storage, which a hand-written solver could not.
+Such a solver owned its buffer, so it had to declare its own fill-in in the
+pattern to have somewhere to put it, and paid colours for that — DISCO-EB's 12
+rather than 11. Here the fill has slots of its own by construction, so the
+pattern may be as tight as it really is; `CompressedJacobian.n_slots` is what
+lets the buffer be larger than the slots any entry claims.
+
+On DISCO-EB's 50-variable Einstein-Boltzmann Jacobian AMD returns a *perfect*
+elimination order — zero fill, `nnz(L + U) == nnz(J) == 238`, one slot per
+entry — and the order it finds is the hand-written Schur solver's: peel each
+free-streaming hierarchy from its truncated end inwards, where every variable has
+degree two, then eliminate the dense core last. It replaced that solver and is
+22% faster than it. The README's "Sparse systems" section carries the full
+design argument — why AMD and not COLAMD, why no pivoting, why symbolic, why
+CSR, why unrolled — and is what to read before touching any of it.
+
+**A negative value in a constant index table is fatal, and silent.** An `int32`
+read out of a `cuda.const` array promotes as though it were *unsigned* once it
+enters arithmetic: with `t[i] == -1`, `t[i] + 4` evaluates to `2 ** 32 + 3`, so
+an index built that way addresses nothing in particular and nothing complains.
+It cost an afternoon here, where a destination offset was stored relative to a
+source slot and came out negative for the first few rows; the factorisation was
+wrong, every step was rejected, and the solve returned its initial state.
+`_pack` now rejects a table with any negative entry, and every table the module
+builds is an offset, so non-negativity is the natural form anyway. Casting with
+`np.int64(...)` first is the other way out.
+
+Forward sensitivities work with either solver: the joint iteration matrix is
+block lower triangular with the same `M0` on every diagonal block, so only the
+`n_vars` block is ever factorised, and the coupling between blocks is a forward
+substitution the kernel does itself.
+
+The colouring and the storage are separate questions, which is what lets the
+pattern be declared as tightly as it really is. A solver owning its own buffer
+had to declare its fill-in in the pattern to have somewhere to put it, and paid
+colours for that — DISCO-EB's 12 rather than 11.
 
 Things to know when touching this:
 

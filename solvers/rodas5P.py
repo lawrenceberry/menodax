@@ -36,12 +36,8 @@ from solvers._sensitivity import (
     make_tangent,
     seed_table,
 )
-from solvers._sparsity import (
-    CompressedJacobian,
-    colour_sparsity,
-    dense_jacobian,
-    normalize_sparsity,
-)
+from solvers._sparse_direct import sparse_direct_solver_for
+from solvers._sparsity import dense_jacobian, normalize_sparsity
 
 # fmt: off
 # Rodas5P W-transformed coefficients (Steinebach 2023, BIT 63:27).
@@ -143,22 +139,15 @@ def trajectories_per_block_or_default(requested=None) -> int:
     return requested
 
 
-class _DenseLUSolver:
-    """The default solver, in the same shape a caller's own would take."""
-
-    def __init__(self, factorize_local, solve_local):
-        self.factorize_local = factorize_local
-        self.solve_local = solve_local
-
-
 @functools.cache
 def dense_lu_solver(n_vars: int):
     """Dense LU with partial pivoting, one system per thread.
 
-    This is the default linear solver, and it is an ordinary instance of the
-    protocol :func:`check_linear_solver` documents rather than a privileged
-    path: right-looking LU over the thread's own row-major buffer, then the two
-    triangular solves in place.
+    This is what the kernel uses when it is given no sparsity pattern:
+    right-looking LU over the thread's own row-major buffer, then the two
+    triangular solves in place. Returned as the same
+    ``(factorize_local, solve_local)`` pair :func:`sparse_direct_solver` builds
+    from a pattern, so the kernel calls one or the other and has no branch.
 
     It replaced nvmath's ``LUPivotSolver``, whose block-collective API was the
     only reason the kernel ever put a matrix in shared memory. That cost a
@@ -220,7 +209,7 @@ def dense_lu_solver(n_vars: int):
                 acc -= lu[i * n + j] * rhs[j]
             rhs[i] = acc / lu[i * n + i]
 
-    return _DenseLUSolver(factorize_local, solve_local)
+    return factorize_local, solve_local
 
 
 _LITERAL_SEED_SOURCES = 0
@@ -301,34 +290,6 @@ def _make_literal_seed_jacobian(*, n_vars, n_params, n_colours, store_table, nam
     return ns["cuda"].jit(device=True)(ns["write_negated_jacobian"])
 
 
-def check_linear_solver(linear_solver):
-    """Validate a linear solver against the documented protocol.
-
-    A solver owns neither the buffer it works on nor the Jacobian that fills
-    it: the kernel allocates one trajectory's matrix in that thread's own
-    memory from a :class:`CompressedJacobian` layout, and Enzyme's colour sweeps
-    fill it. What is left is two device functions, each called by the single
-    thread that owns the trajectory, so neither may synchronise:
-
-    ``factorize_local(lu, ipiv)``
-        factorise ``lu`` in place, recording pivots in ``ipiv``.
-    ``solve_local(lu, ipiv, rhs)``
-        solve ``M x = rhs`` in place.
-
-    A solver may also declare ``ipiv_size`` when it pivots something smaller
-    than the whole state; the default is ``n_vars``.
-
-    :func:`dense_lu_solver` is the default and satisfies this like any other.
-    """
-    required = ("factorize_local", "solve_local")
-    missing = [name for name in required if not hasattr(linear_solver, name)]
-    if missing:
-        raise TypeError(
-            f"{type(linear_solver).__name__} is not a Rodas5P linear solver: it is "
-            f"missing {', '.join(missing)}. See check_linear_solver for the protocol."
-        )
-
-
 @functools.cache
 def _make_kernel(
     ode_fn,
@@ -340,8 +301,8 @@ def _make_kernel(
     lu_precision: str = "fp32",
     trajectories_per_block: int = _DEFAULT_TRAJECTORIES_PER_BLOCK,
     spec: SensitivitySpec | None = None,
-    linear_solver=None,
-    compressed: CompressedJacobian | None = None,
+    sparsity: tuple[tuple[int, ...], ...] | None = None,
+    ordering: str = "amd",
     tf_index: int = -1,
     max_registers: int | None = None,
     array_rhs=None,
@@ -356,10 +317,11 @@ def _make_kernel(
     own matrix -- the ``O(n_vars**2)`` assembly is parallel across trajectories
     rather than across lanes of one.
 
-    The linear solver is a parameter, not a branch: the default
-    :func:`dense_lu_solver` satisfies the same protocol a caller's own does, so
-    there is one code path either way, over a buffer laid out by ``compressed``
-    -- which for an uninformative sparsity pattern *is* the dense matrix.
+    The linear solve is one code path over a buffer the layout describes. With
+    no pattern that layout is the dense row-major matrix and the solver is
+    :func:`dense_lu_solver`; with one it is the sparse factorisation's own CSR
+    image and the solver is compiled for it. The two differ in what they were
+    built from and in nothing else the kernel can see.
     """
     e1 = EXPONENT * (icoeff + pcoeff + dcoeff)
     e2 = -EXPONENT * (pcoeff + 2.0 * dcoeff)
@@ -371,7 +333,16 @@ def _make_kernel(
     lu_dtype = np.float32 if lu_precision == "fp32" else np.float64
     # cuda.local.array wants the numba type rather than the numpy dtype.
     lu_local_dtype = types.float32 if lu_precision == "fp32" else types.float64
-    structure = dense_jacobian(n_vars) if compressed is None else compressed
+    if sparsity is None:
+        structure = dense_jacobian(n_vars)
+        # The dense LU pivots the whole state; the sparse one pivots nothing.
+        factorize_local, solve_local = dense_lu_solver(n_vars)
+        ipiv_per = n_vars
+    else:
+        solver = sparse_direct_solver_for(sparsity, ordering)
+        structure = solver.compressed
+        factorize_local, solve_local = solver.factorize_local, solver.solve_local
+        ipiv_per = solver.ipiv_size
     # With a spec the kernel integrates the joint [y, S] system, so the state,
     # stage and error extents become the augmented ones. The matrix does not:
     # the joint iteration matrix is block lower triangular with the same
@@ -384,36 +355,13 @@ def _make_kernel(
     tpb = int(trajectories_per_block)
     n_colours = structure.n_colours
 
-    # A pattern and a linear solver are separable decisions. The pattern buys
-    # the *sweeps*: n_colours of them instead of n_vars, which is the expensive
-    # half and costs the caller nothing but the pattern. Storing the result
-    # compressed buys the *space*, but only a solver written against that
-    # layout can read it back. With no such solver the sweeps stay compressed
-    # and their results are scattered into an ordinary row-major matrix, which
-    # dense_lu_solver factorises as it always has -- the cheap win without the
-    # expensive obligation.
-    expand_to_dense = linear_solver is None and not structure.is_row_major_dense
-    if expand_to_dense:
-        lu_size = n_vars * n_vars
-        diag_table = np.arange(n_vars, dtype=np.int32) * (n_vars + 1)
-        store_table = structure.dense_slots()
-    else:
-        lu_size = structure.size
-        diag_table = np.asarray(structure.diagonal, dtype=np.int32)
-        store_table = structure.store_slots()
-    # Only a layout with slots nothing writes needs clearing first. The grid
-    # writes every slot and a packed layout has one slot per entry, so both
-    # come out fully defined; only the dense expansion has structural zeros.
+    lu_size = structure.size
+    diag_table = np.asarray(structure.diagonal, dtype=np.int32)
+    store_table = structure.store_slots()
+    # Only a layout with slots nothing writes needs clearing first. The dense
+    # grid writes every slot; a sparse layout has one slot per entry of J and
+    # leaves the factorisation's fill-in for nobody to write.
     needs_clear = store_table is not None and lu_size > int((store_table >= 0).sum())
-
-    if linear_solver is None:
-        linear_solver = dense_lu_solver(n_vars)
-    check_linear_solver(linear_solver)
-    factorize_local = linear_solver.factorize_local
-    solve_local = linear_solver.solve_local
-    # How many pivots the factorisation records is the solver's business, not
-    # the layout's: a bordered-block solver pivots only its dense core.
-    ipiv_per = int(getattr(linear_solver, "ipiv_size", n_vars))
 
     if spec is not None:
         ode_write = make_augmented_local_writer(ode_fn, spec)
@@ -1100,8 +1048,8 @@ def _make_jax_launch(
     lu_precision: str = "fp32",
     trajectories_per_block: int = _DEFAULT_TRAJECTORIES_PER_BLOCK,
     spec: SensitivitySpec | None = None,
-    linear_solver=None,
-    compressed: CompressedJacobian | None = None,
+    sparsity: tuple[tuple[int, ...], ...] | None = None,
+    ordering: str = "amd",
     tf_index: int = -1,
     max_registers: int | None = None,
     array_rhs=None,
@@ -1116,8 +1064,8 @@ def _make_jax_launch(
         lu_precision,
         trajectories_per_block,
         spec,
-        linear_solver,
-        compressed,
+        sparsity,
+        ordering,
         tf_index,
         max_registers,
         array_rhs,
@@ -1150,8 +1098,8 @@ def solve(
     trajectories_per_block=None,
     sens_error_control=True,
     sens_param_columns=None,
-    linear_solver=None,
     sparsity=None,
+    ordering="amd",
     tf_index=None,
     max_registers=None,
     array_rhs=None,
@@ -1227,48 +1175,34 @@ def solve(
     error constant it costs was measured at 200x the steps on a right-hand side
     bilinear in state and parameters, which is most reaction networks.
 
-    ``sparsity`` is where a structured problem pays off. Forward-mode AD
-    returns ``J v``, not ``J``, so the Jacobian costs one sweep per column
-    unless columns can be seeded together -- and columns sharing no row can be,
-    since their contributions never collide. Colouring the column intersection
-    graph (:mod:`solvers._sparsity`) finds the fewest such groups; the Jacobian
-    then costs ``n_colours + 1`` sweeps and is stored column-compressed,
-    ``n_vars x n_colours``. Pass an ``(n_vars, n_vars)`` mask, a scipy sparse
-    matrix, or an ``(nnz, 2)`` array of indices. The default -- no pattern --
-    colours every column apart, which is the dense matrix at the dense cost, so
-    this is one mechanism rather than two paths.
+    ``sparsity`` is where a structured problem pays off, and it is the only
+    thing a caller has to supply to get one. Pass an ``(n_vars, n_vars)`` mask,
+    a scipy sparse matrix, or an ``(nnz, 2)`` array of indices, and two things
+    follow. The Jacobian costs one Enzyme sweep per *colour* of the pattern's
+    column intersection graph rather than one per column, since columns sharing
+    no row can be seeded together and the pattern says which output component
+    belongs to which (:mod:`solvers._sparsity`). And the iteration matrix is
+    ordered, factorised symbolically and given an in-kernel sparse LU and sparse
+    triangular solves compiled for that exact structure
+    (:mod:`solvers._sparse_direct`). The default -- no pattern -- colours every
+    column apart and factorises densely, which is the same mechanism at its
+    uninformative end rather than a second path.
 
     The pattern must be a **superset** of the true nonzeros. Colouring a
     superset only costs sweeps; colouring a subset silently corrupts the entries
-    where two columns of a group do overlap after all. For a structured
-    ``linear_solver`` the pattern to give is everything its factorisation reads
-    or writes, fill-in included: a superset by construction, and it leaves the
-    factors room in the same buffer.
+    where two columns of a group do overlap after all. It need *not* include the
+    factorisation's fill-in, which the symbolic pass works out and gives slots
+    of its own.
 
-    A pattern on its own is enough: with no ``linear_solver`` the sweeps stay
-    compressed and each one is scattered into an ordinary row-major matrix,
-    which the default :func:`dense_lu_solver` factorises. That keeps the saving
-    a pattern is mostly there for -- ``n_colours + 1`` sweeps rather than
-    ``n_vars + 1`` -- at a dense matrix's storage, and asks nothing of the
-    caller. Passing a solver is what turns the pattern into a saving in space
-    and factorisation cost as well.
+    ``ordering`` picks the fill-reducing permutation, ``"amd"`` by default,
+    which needs ``scikit-sparse`` and SuiteSparse on the machine;
+    ``"natural"`` skips the ordering and needs neither. It is ignored without a
+    pattern.
 
-    A ``CompressedJacobian`` may be passed as ``sparsity`` in place of a
-    pattern -- which is what a caller with its own solver should do, since the
-    layout it bound the solver to is then the layout the kernel uses. Running
-    it through :func:`pack` first trades the grid's straight write for a
-    scatter and gets one slot per declared entry instead of
-    ``n_vars * n_colours``, which is per-thread local memory saved.
-
-    ``linear_solver`` replaces the default :func:`dense_lu_solver` with a
-    factorisation that exploits that layout -- see :func:`check_linear_solver`.
-    It owns neither the buffer nor the Jacobian, so it is two device functions,
-    and it may declare ``ipiv_size`` if it pivots something smaller than the
-    whole state. Forward sensitivities work with one: the joint iteration
-    matrix is block lower triangular with the same ``M0`` on every diagonal
-    block, so the solver only ever factorises the ``n_vars`` block it was
-    written for and the coupling between blocks is a forward substitution the
-    kernel does itself.
+    Forward sensitivities work with either solver: the joint iteration matrix is
+    block lower triangular with the same ``M0`` on every diagonal block, so only
+    the ``n_vars`` block is ever factorised and the coupling between blocks is a
+    forward substitution the kernel does itself.
 
     ``tf_index`` names a column of ``params`` holding each trajectory's own end
     time, for ensembles whose members finish at different times; save times
@@ -1281,16 +1215,10 @@ def solve(
     kernel's per-thread register count, trading spills against occupancy.
     """
     n_vars = jnp.shape(y0)[-1]
-    if linear_solver is not None:
-        check_linear_solver(linear_solver)
-    if sparsity is None:
-        compressed = dense_jacobian(n_vars)
-    elif isinstance(sparsity, CompressedJacobian):
-        # A caller with a structured solver has already built the layout to
-        # bind it to; taking that object back is what guarantees the two agree.
-        compressed = sparsity
-    else:
-        compressed = colour_sparsity(normalize_sparsity(sparsity, n_vars))
+    # Normalised here, not in the kernel builder, because that is cached on its
+    # arguments and a pattern has to arrive as the same hashable value twice.
+    if sparsity is not None:
+        sparsity = normalize_sparsity(sparsity, n_vars)
     trajectories_per_block = trajectories_per_block_or_default(trajectories_per_block)
 
     settings = dict(
@@ -1305,8 +1233,8 @@ def solve(
         dcoeff=dcoeff,
         lu_precision=lu_precision,
         trajectories_per_block=trajectories_per_block,
-        linear_solver=linear_solver,
-        compressed=compressed,
+        sparsity=sparsity,
+        ordering=ordering,
         tf_index=-1 if tf_index is None else int(tf_index),
         array_rhs=array_rhs,
         max_registers=max_registers,
@@ -1356,8 +1284,8 @@ def _solve_impl(
     lu_precision: str = "fp32",
     trajectories_per_block: int = _DEFAULT_TRAJECTORIES_PER_BLOCK,
     spec=None,
-    linear_solver=None,
-    compressed: CompressedJacobian | None = None,
+    sparsity: tuple[tuple[int, ...], ...] | None = None,
+    ordering: str = "amd",
     tf_index: int = -1,
     max_registers: int | None = None,
     array_rhs=None,
@@ -1388,8 +1316,8 @@ def _solve_impl(
         lu_precision,
         trajectories_per_block,
         spec,
-        linear_solver,
-        compressed,
+        sparsity,
+        ordering,
         tf_index,
         max_registers,
         array_rhs,

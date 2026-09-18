@@ -26,6 +26,17 @@ dependencies = [
     "scipy>=1.17.1",
 ]
 
+[project.optional-dependencies]
+# SuiteSparse's AMD, which orders a sparsity pattern for the compiled sparse
+# direct solver (solvers/_sparse_direct.py). Kept optional because it needs the
+# CHOLMOD headers on the machine -- `apt install libsuitesparse-dev`, or the
+# equivalent -- and there is no wheel that carries them, so making it a hard
+# dependency would break `uv sync` for everyone who never asks for a sparse
+# solve. `ordering="natural"` skips it entirely.
+sparse = [
+    "scikit-sparse>=0.5",
+]
+
 [tool.uv.sources]
 # A release asset rather than the `cuda` branch itself: the wheel is prebuilt
 # and hash-pinned in uv.lock, so `uv add modax` downloads ~73 MB and is done,
@@ -36,7 +47,6 @@ dependencies = [
 # URL when the fork gains a new release.
 numba-enzyme = { url = "https://github.com/lawrenceberry/numba-enzyme/releases/download/v0.1.3-cuda.2/numba_enzyme-0.1.3-py3-none-linux_x86_64.whl" }
 
-[project.optional-dependencies]
 cuda12 = [
     "jax[cuda12]>=0.9.1",
 ]

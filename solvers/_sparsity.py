@@ -15,15 +15,15 @@ see.
 
 The pattern a caller supplies must be a *superset* of the true nonzeros --
 colouring a superset is conservative, colouring a subset silently corrupts
-entries where two columns in a group turn out to overlap after all. For a
-structured solver the natural pattern is therefore everything its factorisation
-reads or writes, fill-in included, which is a superset by construction.
+entries where two columns in a group turn out to overlap after all. It need not
+cover the factorisation's fill-in: that has slots of its own, laid out by
+:mod:`solvers._sparse_direct`, and no column of ``J`` writes them.
 """
 
 from __future__ import annotations
 
 import functools
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -53,73 +53,39 @@ class CompressedJacobian:
     ``n_colours == n_vars``, and this degenerates exactly to the dense
     row-major matrix -- so the dense path is not a special case in the kernel,
     just the uninformative end of the same mechanism.
+
+    :mod:`solvers._sparse_direct` overrides the grid with ``packed``: the slot
+    of each entry in its own CSR image of ``L + U``, so the sweeps deposit ``-J``
+    straight into the buffer the factorisation will work in.
     """
 
     n_vars: int
     n_colours: int
     colour: tuple[int, ...]
-    # The pattern this was coloured from, kept so the layout can say where a
-    # compressed entry belongs in an ordinary dense matrix. ``None`` for a
-    # layout built without one, which is every layout that is already dense.
-    pattern: tuple[tuple[int, ...], ...] | None = None
-    # Set by :func:`pack`: the packed slot each ``(row, colour)`` grid position
-    # collapses to, ``-1`` where the group has nothing in that row. ``None``
-    # leaves the layout on the grid, where a slot exists for every position.
+    # Set by :func:`solvers._sparse_direct.compressed_jacobian`: the slot each
+    # ``(row, colour)`` grid position collapses to, ``-1`` where the group has
+    # nothing in that row. ``None`` leaves the layout on the grid, where a slot
+    # exists for every position.
     packed: tuple[int, ...] | None = None
     # Slots for diagonal entries the pattern does not declare. ``I/(h*gamma)``
     # lands on every diagonal whether or not ``J`` has anything there, so a
     # packed layout has to keep room for them; nothing writes them, which is
     # why a packed layout with any of these is cleared before the sweeps.
     packed_diagonal: tuple[int, ...] | None = None
-
-    @property
-    def is_packed(self) -> bool:
-        return self.packed is not None
+    # Slots the buffer holds beyond the ones some entry claims: the direct
+    # sparse factorisation needs room for its fill-in, which belongs to no
+    # column of ``J`` and so appears in no slot table. ``None`` means the
+    # claimed slots are the whole buffer.
+    n_slots: int | None = None
 
     @property
     def size(self) -> int:
         """Elements in one trajectory's matrix."""
+        if self.n_slots is not None:
+            return self.n_slots
         if self.packed is not None:
             return 1 + max(max(self.packed), max(self.packed_diagonal))
         return self.n_vars * self.n_colours
-
-    @property
-    def is_dense(self) -> bool:
-        return self.n_colours == self.n_vars
-
-    @property
-    def is_row_major_dense(self) -> bool:
-        """True when a slot *is* ``row * n_vars + col``, so nothing needs moving.
-
-        Stronger than :attr:`is_dense`: a colouring can use ``n_vars`` colours
-        and still permute the columns, and a permuted dense matrix is not one
-        a dense LU may be pointed at.
-        """
-        return (
-            not self.is_packed
-            and self.is_dense
-            and self.colour == tuple(range(self.n_vars))
-        )
-
-    def dense_slots(self) -> np.ndarray:
-        """``(n_vars * n_colours,)`` of row-major destinations, ``-1`` for none.
-
-        Entry ``(row, colour)`` of the compressed buffer belongs at
-        ``row * n_vars + col`` of a dense matrix, where ``col`` is the one
-        column of that colour group with a nonzero in that row -- unique
-        because that is exactly what the colouring guarantees. Slots whose
-        group has no entry in the row hold nothing and map to ``-1``.
-        """
-        if self.pattern is None:
-            raise ValueError(
-                "this layout was built without a pattern, so it cannot say "
-                "where its entries belong in a dense matrix"
-            )
-        table = np.full(self.n_vars * self.n_colours, -1, dtype=np.int32)
-        for row, cols in enumerate(self.pattern):
-            for c in cols:
-                table[row * self.n_colours + self.colour[c]] = row * self.n_vars + c
-        return table
 
     @property
     def diagonal(self) -> tuple[int, ...]:
@@ -127,7 +93,7 @@ class CompressedJacobian:
         return tuple(self.slot(i, i) for i in range(self.n_vars))
 
     def slot(self, row: int, col: int) -> int:
-        """Where entry ``(row, col)`` lives. For solvers written by hand."""
+        """Where entry ``(row, col)`` lives."""
         grid = row * self.n_colours + self.colour[col]
         if self.packed is None:
             return grid
@@ -167,54 +133,6 @@ class CompressedJacobian:
         for c, g in enumerate(self.colour):
             seeds[g, c] = 1.0
         return seeds
-
-
-def pack(compressed: CompressedJacobian) -> CompressedJacobian:
-    """Squeeze a colour grid down to one slot per declared entry.
-
-    The grid stores ``n_vars * n_colours`` slots because that makes the AD
-    write a straight run; a pattern that colours well leaves most of them
-    holding nothing. Packing keeps everything that makes the grid cheap to
-    address -- a slot is still a compile-time constant per ``(row, col)``, with
-    no ``rowptr`` to chase and no search -- and simply stops paying for the
-    holes, which matters because the matrix is per-thread local memory.
-
-    The cost is that the write becomes a scatter rather than a run, and that a
-    solver may only touch entries the pattern declares: on the grid an
-    undeclared ``(r, c)`` silently aliases another column's slot, and packed it
-    raises. For a structured solver that is the right trade, since its pattern
-    already declares its fill-in.
-
-    Entries are packed row-major and, within a row, in colour order, so a row
-    of the factorisation walks contiguous memory.
-    """
-    if compressed.pattern is None:
-        raise ValueError(
-            "packing needs the pattern the layout was coloured from; build it "
-            "with colour_sparsity rather than by hand"
-        )
-    n_vars, n_colours = compressed.n_vars, compressed.n_colours
-    table = np.full(n_vars * n_colours, -1, dtype=np.int64)
-    diagonal = np.full(n_vars, -1, dtype=np.int64)
-    nxt = 0
-    for row, cols in enumerate(compressed.pattern):
-        for c in sorted(cols, key=lambda c: compressed.colour[c]):
-            table[row * n_colours + compressed.colour[c]] = nxt
-            if c == row:
-                diagonal[row] = nxt
-            nxt += 1
-    # ``I/(h*gamma)`` lands on every diagonal, including the ones J leaves
-    # structurally zero, so those get a slot of their own here. Nothing writes
-    # them, so the kernel clears the matrix when there are any.
-    for row in range(n_vars):
-        if diagonal[row] < 0:
-            diagonal[row] = nxt
-            nxt += 1
-    return replace(
-        compressed,
-        packed=tuple(int(s) for s in table),
-        packed_diagonal=tuple(int(s) for s in diagonal),
-    )
 
 
 def dense_jacobian(n_vars: int) -> CompressedJacobian:
@@ -281,7 +199,7 @@ def colour_sparsity(pattern: tuple[tuple[int, ...], ...]) -> CompressedJacobian:
 
     colour = tuple(int(best.get(c, 0)) for c in range(n_vars))
     compressed = CompressedJacobian(
-        n_vars=n_vars, n_colours=max(colour) + 1, colour=colour, pattern=pattern
+        n_vars=n_vars, n_colours=max(colour) + 1, colour=colour
     )
     _check_orthogonal(pattern, compressed)
     return compressed
