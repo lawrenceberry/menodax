@@ -193,11 +193,11 @@ with [numba-enzyme][ne], as it stands and with no adapter around it: a
 callback of the documented shape already reaches Enzyme as a function of flat
 scalars returning a struct, because numba-cuda-mlir flattens a tuple argument
 into one scalar parameter per element and lowers a tuple return to a struct
-returned by value. The kernel uses `jvp` — a directional derivative — rather
-than `jacfwd_column`, because a seed need not be a unit vector: a whole colour
-group goes in at once and the sparsity pattern says which output component
-belongs to which column (see "Sparsity, colouring, and custom linear solvers").
-Seeding the time argument instead of the state gives the whole `df/dt`, so
+returned by value. The kernel uses `jvp` — a directional derivative — because a
+seed need not be a unit vector: a whole colour group goes in at once and the
+sparsity pattern says which output component belongs to which column (see
+"Sparsity, colouring, and custom linear solvers"). Seeding the time argument
+instead of the state gives the whole `df/dt`, so
 `n_colours + 1` sweeps supply both matrices the kernel needs — `n_vars + 1` when
 there is no pattern to exploit. numba-enzyme also exposes `jacfwd`, which fills
 the whole matrix; that would put `n_vars ** 2` doubles in per-thread local
@@ -211,7 +211,8 @@ arithmetic and a colour sweep collapses to its own group's columns. The same
 seed read through a loop variable arrives in registers and cannot fold, and
 that version of this kernel sat at the 168-register cap with a 13 KB spill
 frame and cost 114 ms of DISCO-EB's 128 ms regression against a hand-written
-Jacobian (see numba-enzyme's `test_a_compile_time_jvp_direction_folds`).
+Jacobian (see numba-enzyme's
+`test_a_compile_time_jvp_direction_folds_and_is_faster`).
 `_make_literal_seed_jacobian` therefore generates the writer with the colour
 loop unrolled: one `jvp` call per `SEED_BATCH` colours, each seed row a
 literal index into the constant-memory table, and one literal store per entry

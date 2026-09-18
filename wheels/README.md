@@ -99,14 +99,12 @@ The fork carries changes that are not upstream:
   the way numba-cuda-mlir does, from `__qualname__` rather than `__name__`.
   They coincide only for module-level functions, so a nested or generated
   callback was previously looked up under a symbol the module never defined.
-- **`jacfwd` / `jacfwd_column`** — forward-mode Jacobian of a tuple-returning
-  primal. `jvp` differentiates a scalar-output primal, so a sweep yields a
-  single Jacobian entry; a sweep of a multi-output one yields a whole column.
-  `jacfwd` fills the whole matrix, one sweep per column; `jacfwd_column` fills
-  a single column chosen by a run-time index. modax uses neither: the whole
-  matrix would have to live in per-thread local memory, and a unit column is
-  a needlessly narrow seed once the sparsity pattern lets a whole colour group
-  go in at once. See `_make_kernel` in `solvers/rodas5P.py`.
+- **`jacfwd`** — forward-mode Jacobian of a tuple-returning primal. `jvp`
+  differentiates a scalar-output primal, so a sweep yields a single Jacobian
+  entry; a sweep of a multi-output one yields a whole column, and `jacfwd`
+  fills the whole matrix one sweep per column. modax does not use it: the
+  matrix would have to live in per-thread local memory. See `_make_kernel` in
+  `solvers/rodas5P.py`.
 - **`jvp` for tuple-returning primals** — `jvp` used to be scalar-output only,
   so a directional derivative of a vector field had to be assembled from
   `n_vars + 1` unit columns. It now also takes the array call shape,
@@ -131,10 +129,19 @@ The fork carries changes that are not upstream:
   Enzyme pass; a *reverse* endpoint over a forward level does not, because
   Enzyme preprocesses a callee before resolving a marker inside it, so those
   builds run Enzyme once per stage, feeding each output into the next link.
-- **reverse-mode multi-output APIs** — `vjp`, `jacrev` and `jacrev_row`, the
-  reverse counterparts of `jvp`/`jacfwd`/`jacfwd_column`. modax does not use
-  them; see "Derived Jacobians" in `AGENTS.md` for why the solver is
-  forward-mode.
+- **reverse-mode multi-output APIs** — `vjp` and `jacrev`, the reverse
+  counterparts of `jvp` and `jacfwd`. modax does not use them; see "Derived
+  Jacobians" in `AGENTS.md` for why the solver is forward-mode.
+- **a compile-time direction folds, and the single-column and single-row
+  endpoints are gone with it** — the fork briefly carried `jacfwd_column` and
+  `jacrev_row`, which took a run-time index and built the unit seed inside the
+  derivative. They were removed: the derivative links as LTO IR, so nvJitLink
+  inlines it before constant propagation, and a unit direction written out at
+  the call site folds to exactly the column that index would have selected, at
+  the same cost. A unit seed through `jvp` is therefore the column and a unit
+  cotangent through `vjp` is the row. This is the same folding the kernel's
+  colour seeds rely on; numba-enzyme's
+  `test_a_compile_time_jvp_direction_folds_and_is_faster` is the guard.
 - **`CUDADifferentiable.externals`** — the `cuda.declare_device` handle behind
   each tuple implementation, reached through `differentiate_cuda`.
 - **optional `signature`** — CUDA derivatives now specialise lazily at each
