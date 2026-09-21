@@ -33,7 +33,7 @@ def test_tsit5_shared_matches_global():
     from reference.systems.python import vdp
 
     n_osc = 4  # dim = 8: fits the shared-memory backend
-    ode_fn, _, _ = vdp.make_system(n_osc, mu=1.0)
+    ode_fn, _ = vdp.make_system(n_osc, mu=1.0)
     y0, params = vdp.make_scenario(n_osc, 256, divergence=1.0)
     y0 = jnp.asarray(np.ascontiguousarray(y0))
     params = jnp.asarray(np.ascontiguousarray(params))
@@ -57,7 +57,7 @@ def test_default_first_step_matches_explicit(solve_fn):
     from reference.systems.python import vdp
 
     n_osc = 1
-    ode_fn, _, _ = vdp.make_system(n_osc, mu=1.0)
+    ode_fn, _ = vdp.make_system(n_osc, mu=1.0)
     y0, params = vdp.make_scenario(n_osc, 8, divergence=1.0)
     y0 = jnp.asarray(np.ascontiguousarray(y0))
     params = jnp.asarray(np.ascontiguousarray(params))

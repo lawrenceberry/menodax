@@ -58,26 +58,6 @@ def make_tuple_callback(name: str, values: Sequence[Expr]):
     )
 
 
-def make_matrix_callback(name: str, rows: Sequence[Sequence[Expr]]):
-    return _compile_callback(
-        name,
-        ast.Tuple(
-            elts=[
-                ast.Tuple(
-                    elts=[_float_expr(value) for value in row],
-                    ctx=ast.Load(),
-                )
-                for row in rows
-            ],
-            ctx=ast.Load(),
-        ),
-    )
-
-
-def zero_matrix(n_rows: int, n_cols: int) -> list[list[Expr]]:
-    return [[const(0.0) for _ in range(n_cols)] for _ in range(n_rows)]
-
-
 def _compile_callback(name: str, return_value: Expr):
     module = ast.Module(
         body=[

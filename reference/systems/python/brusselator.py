@@ -99,15 +99,12 @@ import numpy as np
 from reference.systems.python._tuple_codegen import (
     add,
     const,
-    make_matrix_callback,
     make_tuple_callback,
     mul,
-    neg,
     p,
     square,
     sub,
     y,
-    zero_matrix,
 )
 
 N_GRID = 32
@@ -143,7 +140,7 @@ def make_system(
     alpha: float = ALPHA,
     length: float = L,
 ):
-    """Return ``(ode_fn, y0, jac_fn)`` closed over ``n_grid``.
+    """Return ``(ode_fn, y0)`` closed over ``n_grid``.
 
     ``p[0]`` is a reaction-rate scale that multiplies ``a`` and ``b``; it acts
     only on the reaction terms. ``divergent`` scenarios perturb it.
@@ -153,8 +150,6 @@ def make_system(
     y0 = jnp.asarray(_equilibrium(n_grid, a, b), dtype=jnp.float64)
 
     ode_values = []
-    n_vars = 2 * n_grid
-    jac_rows = zero_matrix(n_vars, n_vars)
     for g in range(n_grid):
         left = (g - 1) % n_grid
         right = (g + 1) % n_grid
@@ -182,36 +177,12 @@ def make_system(
         )
         ode_values.extend([add(exp_u, imp_u), add(exp_v, imp_v)])
 
-        for row, self_col, left_col, right_col in (
-            (u, u, u_left, u_right),
-            (v, v, v_left, v_right),
-        ):
-            coeffs = {self_col: [const(-2.0 * diff_coeff)]}
-            coeffs.setdefault(left_col, []).append(const(diff_coeff))
-            coeffs.setdefault(right_col, []).append(const(diff_coeff))
-            for col, terms in coeffs.items():
-                jac_rows[row][col] = add(*terms)
-
-        jac_rows[u][u] = add(
-            jac_rows[u][u],
-            mul(const(2.0), u_y, v_y),
-            neg(add(mul(p(0), const(b)), const(1.0))),
-        )
-        jac_rows[u][v] = add(jac_rows[u][v], square(u_y))
-        jac_rows[v][u] = add(
-            jac_rows[v][u],
-            mul(p(0), const(b)),
-            mul(const(-2.0), u_y, v_y),
-        )
-        jac_rows[v][v] = sub(jac_rows[v][v], square(u_y))
-
     ode_fn = make_tuple_callback("ode_fn", ode_values)
-    jac_fn = make_matrix_callback("jac_fn", jac_rows)
 
-    return ode_fn, y0, jac_fn
+    return ode_fn, y0
 
 
-ode_fn, _, jac_fn = make_system(N_GRID)
+ode_fn, _ = make_system(N_GRID)
 
 
 def make_params(size: int, seed: int = 42) -> np.ndarray:

@@ -27,10 +27,6 @@ class SystemCase:
     t_span: np.ndarray
     params: np.ndarray
     ode_fn: Callable
-    # No solver consumes this any more -- rodas5P derives its Jacobian from
-    # ode_fn with Enzyme. It stays as the reference that
-    # tests/test_enzyme_jacobian.py checks that derivation against.
-    jac_fn: Callable
     system_config: dict
     kwargs: dict
     linear_implicit: bool
@@ -57,7 +53,6 @@ def _bateman_case():
         t_span=t_span,
         params=params,
         ode_fn=system["ode_fn"],
-        jac_fn=system["jac_fn"],
         system_config={"n_vars": 4, "stiffness": 1e2},
         kwargs={"first_step": 1e-4, "rtol": 1e-5, "atol": 1e-7},
         linear_implicit=True,
@@ -67,7 +62,7 @@ def _bateman_case():
 
 
 def _brusselator_case():
-    ode, _, jac = brusselator.make_system(4)
+    ode, _ = brusselator.make_system(4)
     y0, params = brusselator.make_scenario(4, ENSEMBLE_SIZE, divergence=0.0)
     t_span = np.asarray(brusselator.TIMES[:3], dtype=np.float64)
     return SystemCase(
@@ -76,7 +71,6 @@ def _brusselator_case():
         t_span=t_span,
         params=np.asarray(params, dtype=np.float64),
         ode_fn=ode,
-        jac_fn=jac,
         system_config={"n_grid": 4},
         kwargs={"first_step": 1e-3, "rtol": 1e-5, "atol": 1e-7},
         linear_implicit=True,
@@ -101,7 +95,6 @@ def _heat_case():
         t_span=t_span,
         params=params,
         ode_fn=system["ode_fn"],
-        jac_fn=system["jac_fn"],
         system_config={"n_vars": 4},
         kwargs={"first_step": 1e-4, "rtol": 1e-5, "atol": 1e-7},
         linear_implicit=True,
@@ -126,7 +119,6 @@ def _kaps_case():
         t_span=t_span,
         params=params,
         ode_fn=system["ode_fn"],
-        jac_fn=system["jac_fn"],
         system_config={"n_pairs": 2, "epsilon_min": 1e-2},
         kwargs={"first_step": 1e-3, "rtol": 1e-5, "atol": 1e-7},
         linear_implicit=False,
@@ -144,7 +136,6 @@ def _lorenz_case():
         t_span=t_span,
         params=np.asarray(params, dtype=np.float64),
         ode_fn=lorenz.ode_fn,
-        jac_fn=lorenz.jac_fn,
         system_config={},
         kwargs={"first_step": 1e-4, "rtol": 1e-5, "atol": 1e-7},
         linear_implicit=True,
@@ -162,7 +153,6 @@ def _robertson_case():
         t_span=t_span,
         params=np.asarray(params, dtype=np.float64),
         ode_fn=robertson.ode_fn,
-        jac_fn=robertson.jac_fn,
         system_config={},
         kwargs={"first_step": 1e-8, "rtol": 1e-5, "atol": 1e-7, "max_steps": 10000},
         linear_implicit=True,
@@ -174,7 +164,7 @@ def _robertson_case():
 
 
 def _vdp_case():
-    ode, _, jac = vdp.make_system(2, mu=1.0)
+    ode, _ = vdp.make_system(2, mu=1.0)
     y0, params = vdp.make_scenario(2, ENSEMBLE_SIZE, divergence=0.0)
     t_span = np.asarray(vdp.TIMES[:3], dtype=np.float64)
     return SystemCase(
@@ -183,7 +173,6 @@ def _vdp_case():
         t_span=t_span,
         params=np.asarray(params, dtype=np.float64),
         ode_fn=ode,
-        jac_fn=jac,
         system_config={"n_osc": 2},
         kwargs={"first_step": 1e-3, "rtol": 1e-5, "atol": 1e-7},
         linear_implicit=True,

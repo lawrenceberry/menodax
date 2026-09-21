@@ -54,7 +54,7 @@ _SOLVER_KWARGS = {"first_step": 1e-4, "rtol": 1e-6, "atol": 1e-8}
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _CACHE_PATH = _SCRIPT_DIR / "results.json"
 
-_ODE_FN, _, _ = vdp.make_system(_N_OSC, mu=_MU_NONSTIFF)
+_ODE_FN, _ = vdp.make_system(_N_OSC, mu=_MU_NONSTIFF)
 
 _CSV_FIELDS = (
     "gpu",

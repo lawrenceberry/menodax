@@ -43,17 +43,6 @@ def ode_fn(y, t, p):
     )
 
 
-def jac_fn(y, t, p):
-    sigma = 10.0
-    beta = 8.0 / 3.0
-    rho = p[0]
-    return (
-        (-sigma, sigma, 0.0),
-        (rho - y[2], -1.0, -y[0]),
-        (y[1], y[0], -beta),
-    )
-
-
 def make_params(size: int, seed: int = 42) -> jnp.ndarray:
     """ρ values centred at 0.5 with ±5% uniform perturbation (all chaotic)."""
     rng = np.random.default_rng(seed)

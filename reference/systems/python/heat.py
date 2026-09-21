@@ -29,7 +29,6 @@ import numpy as np
 from reference.systems.python._tuple_codegen import (
     add,
     const,
-    make_matrix_callback,
     make_tuple_callback,
     mul,
     p,
@@ -60,28 +59,16 @@ def make_system(n_vars):
         values.append(mul(p(0), add(*terms)))
 
     ode_fn = make_tuple_callback("ode_fn", values)
-    jac_fn = make_matrix_callback(
-        "jac_fn",
-        [
-            [
-                mul(p(0), const(M_np[row, col])) if M_np[row, col] else const(0.0)
-                for col in range(n_vars)
-            ]
-            for row in range(n_vars)
-        ],
-    )
 
     return {
         "n_vars": n_vars,
         "ode_fn": ode_fn,
-        "jac_fn": jac_fn,
         "y0": y0,
     }
 
 
 _DEFAULT = make_system(4)
 ode_fn = _DEFAULT["ode_fn"]
-jac_fn = _DEFAULT["jac_fn"]
 
 
 def make_params(size, seed=42):

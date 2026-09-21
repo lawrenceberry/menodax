@@ -286,10 +286,10 @@ def make_cuda_out_vector_writer(fn):
     """A vector writer for a callback that fills an out-array itself.
 
     The tuple-returning form the other writers expect exists so Enzyme can
-    differentiate the callback; a caller supplying its own ``jac_fn`` has taken
-    Enzyme out of the picture, and can write the right-hand side straight into
-    the output instead -- which a large state makes far cheaper than returning
-    a tuple of that many scalars.
+    differentiate the callback; the primal stage evaluations need no derivative,
+    so a caller supplying an ``array_rhs`` can write the right-hand side
+    straight into the output instead -- which a large state makes far cheaper
+    than returning a tuple of that many scalars.
     """
     fn_device = as_cuda_device(fn)
 

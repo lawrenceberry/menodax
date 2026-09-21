@@ -21,7 +21,6 @@ import numpy as np
 from reference.systems.python._tuple_codegen import (
     add,
     const,
-    make_matrix_callback,
     make_tuple_callback,
     mul,
     neg,
@@ -29,7 +28,6 @@ from reference.systems.python._tuple_codegen import (
     square,
     sub,
     y,
-    zero_matrix,
 )
 
 TIMES = jnp.array((0.0, 0.5, 1.0, 2.0), dtype=jnp.float64)
@@ -45,7 +43,6 @@ def make_system(n_pairs, epsilon_min):
     y0 = jnp.array([1.0, 1.0] * n_pairs, dtype=jnp.float64)
 
     ode_values = []
-    jac_rows = zero_matrix(n_vars, n_vars)
     for pair, eps in enumerate(np.asarray(epsilon)):
         base = 2 * pair
         inv_eps = 1.0 / float(eps)
@@ -64,30 +61,20 @@ def make_system(n_pairs, epsilon_min):
                 mul(p(0), sub(sub(y_base, y_next), y_next_sq)),
             ]
         )
-        jac_rows[base][base] = mul(p(0), neg(const(inv_eps + 2.0)))
-        jac_rows[base][base + 1] = mul(p(0), const(2.0 * inv_eps), y_next)
-        jac_rows[base + 1][base] = p(0)
-        jac_rows[base + 1][base + 1] = mul(
-            p(0),
-            add(const(-1.0), mul(const(-2.0), y_next)),
-        )
 
     ode_fn = make_tuple_callback("ode_fn", ode_values)
-    jac_fn = make_matrix_callback("jac_fn", jac_rows)
 
     return {
         "n_pairs": n_pairs,
         "epsilon_min": epsilon_min,
         "n_vars": n_vars,
         "ode_fn": ode_fn,
-        "jac_fn": jac_fn,
         "y0": y0,
     }
 
 
 _DEFAULT = make_system(2, 1e-2)
 ode_fn = _DEFAULT["ode_fn"]
-jac_fn = _DEFAULT["jac_fn"]
 
 
 def make_params(size, seed=42):

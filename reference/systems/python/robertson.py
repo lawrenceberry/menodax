@@ -22,14 +22,6 @@ def ode_fn(y, t, p):
     )
 
 
-def jac_fn(y, t, p):
-    return (
-        (-p[0], p[1] * y[2], p[1] * y[1]),
-        (p[0], -p[1] * y[2] - 2.0 * p[2] * y[1], -p[1] * y[1]),
-        (0.0, 2.0 * p[2] * y[1], 0.0),
-    )
-
-
 def make_params(size: int, seed: int = 42) -> jnp.ndarray:
     """Return Robertson rate constants with +/-10% uniform perturbation."""
     rng = np.random.default_rng(seed)
@@ -80,9 +72,7 @@ def make_initial_conditions(
     rng = np.random.default_rng(seed)
     alpha = ALPHA * rng.uniform(0.0, 1.0, size)
     eps_blend = rng.uniform(0.0, min(divergence / 4.0, 1.0), size)
-    eps = 10.0 ** (
-        (1.0 - eps_blend) * np.log10(EPS) + eps_blend * np.log10(1e-8)
-    )
+    eps = 10.0 ** ((1.0 - eps_blend) * np.log10(EPS) + eps_blend * np.log10(1e-8))
     y0 = np.column_stack(
         [
             (1 - eps) * alpha,

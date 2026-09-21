@@ -1,10 +1,12 @@
-"""The Enzyme-derived Jacobian must match the analytic one, system by system.
+"""The Enzyme-derived Jacobian must match JAX's own, system by system.
 
-``rodas5P`` no longer takes a ``jac_fn``: it forward-differentiates the
-right-hand side with Enzyme instead. The reference systems still carry
-hand-written Jacobians, which makes them the natural check on that derivation —
-and on the ``df/dt`` the solver takes from the same sweeps, which no reference
-system supplies but which is zero for all of them, every one being autonomous.
+``rodas5P`` takes no Jacobian: it forward-differentiates the right-hand side
+with Enzyme instead. The reference systems no longer carry hand-written
+Jacobians either, so the check on that derivation is JAX's forward-mode AD of
+the very same ``ode_fn`` -- an independent differentiation pipeline, even
+though it reads the same equations. It also covers the ``df/dt`` the solver
+takes from the same sweeps, which is zero for every reference system, all of
+them being autonomous.
 
 The derivative is built here exactly as ``rodas5P._make_kernel`` builds it --
 one directional derivative, seeded with a unit column at a time rather than
@@ -13,6 +15,8 @@ well as the values.
 
 """
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -92,16 +96,23 @@ def evaluate_derivatives(ode_fn, y, t, params):
     return d_jacobian.copy_to_host(), d_time_jacobian.copy_to_host()
 
 
+def jax_jacobian(ode_fn, y, t, params):
+    """The reference ``df/dy``, from JAX's forward-mode AD of the same ``ode_fn``."""
+
+    def rhs(y_i, p_i):
+        return jnp.stack(jnp.broadcast_arrays(*ode_fn(y_i, t, p_i)))
+
+    return np.asarray(jax.vmap(jax.jacfwd(rhs))(jnp.asarray(y), jnp.asarray(params)))
+
+
 @parametrize_system_cases
-def test_enzyme_jacobian_matches_analytic(case):
+def test_enzyme_jacobian_matches_jax(case):
     y = np.asarray(case.y0, dtype=np.float64)
     params = np.asarray(case.params, dtype=np.float64)
     t = float(case.t_span[0])
 
     jacobian, time_jacobian = evaluate_derivatives(case.ode_fn, y, t, params)
-    expected = np.asarray(
-        [np.asarray(case.jac_fn(y[i], t, params[i])) for i in range(y.shape[0])]
-    )
+    expected = jax_jacobian(case.ode_fn, y, t, params)
 
     np.testing.assert_allclose(jacobian, expected, rtol=1e-12, atol=1e-12)
     # Every reference system is autonomous, so df/dt must come back exactly 0.

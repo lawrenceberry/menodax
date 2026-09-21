@@ -423,10 +423,11 @@ touching the code.
 ### Reference and benchmarks
 
 - `reference/systems/python/` — test systems (Lorenz, VdP, Robertson,
-  Brusselator, Bateman, Kaps, heat), each exposing `ode_fn`/`jac_fn` in
-  numba-compatible tuple form plus `make_scenario` for ensembles. The solvers
-  no longer consume `jac_fn`; it is what `tests/test_enzyme_jacobian.py` checks
-  the Enzyme-derived Jacobian against.
+  Brusselator, Bateman, Kaps, heat), each exposing `ode_fn` in
+  numba-compatible tuple form plus `make_scenario` for ensembles. Nothing
+  consumes a hand-written Jacobian any more, so the systems no longer carry
+  one; `tests/test_enzyme_jacobian.py` checks the Enzyme-derived Jacobian
+  against JAX's forward-mode AD of the same `ode_fn`.
   `_tuple_codegen.py` generates these callbacks for parameterised dimensions.
 - `reference/solvers/python/` — Diffrax and Julia (DiffEqGPU) baselines.
 - `scripts/` — scaling, dimensionality and divergence benchmarks. Each caches

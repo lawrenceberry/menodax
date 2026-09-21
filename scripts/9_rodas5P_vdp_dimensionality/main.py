@@ -152,7 +152,7 @@ def time_case(case: Case, dim: int, *, divergence: float) -> float:
         )
 
     if case.mode == "custom":
-        ode_fn_nb, _, _ = vdp.make_system(n_osc)
+        ode_fn_nb, _ = vdp.make_system(n_osc)
 
         def run_custom():
             extra = (
@@ -172,7 +172,7 @@ def time_case(case: Case, dim: int, *, divergence: float) -> float:
         return time_blocked_ms(run_custom, _N_RUNS)
 
     assert case.solve_fn is not None
-    ode_fn, _, _ = vdp.make_system(n_osc)
+    ode_fn, _ = vdp.make_system(n_osc)
     y0_j = jnp.asarray(y0_batch)
     p_j = jnp.asarray(params)
 
