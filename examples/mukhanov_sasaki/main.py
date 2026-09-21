@@ -57,7 +57,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 import time
 from pathlib import Path
@@ -68,6 +67,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from examples.dual_backend import Forms, build_fn, build_rhs
 from solvers.tsit5 import solve as tsit5_solve
 
 jax.config.update("jax_enable_x64", True)
@@ -108,41 +108,58 @@ def quadratic_mass_from_slow_roll(
 MASS = quadratic_mass_from_slow_roll()
 
 
-def potential(phi, mass):
-    """Evaluate the quadratic inflaton potential in reduced Planck units."""
-    return 0.5 * mass**2 * phi**2
+# The background solve needs its right-hand side in two forms: ``tsit5``
+# compiles one with ``numba_cuda_mlir``, and the Diffrax reference backend
+# traces the other.  Both are built from one body by
+# ``examples/dual_backend.py``; ``potential`` goes the same way because the
+# device callback and the NumPy table building below both call it.
 
 
-def dpotential_dphi(phi, mass):
-    """Evaluate dV/dphi for the quadratic inflaton potential."""
-    return mass**2 * phi
+def _make_potential():
+    def potential(phi, mass):
+        """Evaluate the quadratic inflaton potential in reduced Planck units."""
+        return 0.5 * mass**2 * phi**2
+
+    return potential
 
 
-def background_ode(y, n_efolds, params):
-    """Return dphi/dN and d2phi/dN^2 for the homogeneous inflaton background."""
-    del n_efolds
-    mass = params[0]
-    phi = y[0]
-    dphi_dn = y[1]
-    epsilon = 0.5 * dphi_dn**2
-    h_sq = potential(phi, mass) / (3.0 - epsilon)
-    d2phi_dn2 = -(3.0 - epsilon) * dphi_dn - dpotential_dphi(phi, mass) / h_sq
-    return jnp.array([dphi_dn, d2phi_dn2])
+def _make_dpotential_dphi():
+    def dpotential_dphi(phi, mass):
+        """Evaluate dV/dphi for the quadratic inflaton potential."""
+        return mass**2 * phi
+
+    return dpotential_dphi
 
 
-def background_ode_device(y, n_efolds, params):
-    """Device form of :func:`background_ode` for the modax kernel solver.
+POTENTIAL = build_fn(_make_potential)
+DPOTENTIAL_DPHI = build_fn(_make_dpotential_dphi)
+potential = POTENTIAL.jax
+dpotential_dphi = DPOTENTIAL_DPHI.jax
 
-    ``tsit5`` compiles its right-hand side with ``numba_cuda_mlir``, so this
-    returns a fixed-size tuple of scalars rather than a ``jnp`` array.
-    """
-    mass = params[0]
-    phi = y[0]
-    dphi_dn = y[1]
-    epsilon = 0.5 * dphi_dn * dphi_dn
-    h_sq = 0.5 * mass * mass * phi * phi / (3.0 - epsilon)
-    d2phi_dn2 = -(3.0 - epsilon) * dphi_dn - mass * mass * phi / h_sq
-    return (dphi_dn, d2phi_dn2)
+
+def _make_background_ode(*, potential, dpotential_dphi):
+    def background_ode(y, n_efolds, params):
+        """Return dphi/dN and d2phi/dN^2 for the homogeneous inflaton background.
+
+        Autonomous, so ``n_efolds`` goes unused -- and unmentioned: numba
+        rejects a ``del`` of an argument in a device function.
+        """
+        mass = params[0]
+        phi = y[0]
+        dphi_dn = y[1]
+        epsilon = 0.5 * dphi_dn**2
+        h_sq = potential(phi, mass) / (3.0 - epsilon)
+        d2phi_dn2 = -(3.0 - epsilon) * dphi_dn - dpotential_dphi(phi, mass) / h_sq
+        return (dphi_dn, d2phi_dn2)
+
+    return background_ode
+
+
+BACKGROUND_ODE = build_rhs(
+    _make_background_ode, potential=POTENTIAL, dpotential_dphi=DPOTENTIAL_DPHI
+)
+background_ode = BACKGROUND_ODE.jax
+background_ode_device = BACKGROUND_ODE.device
 
 
 def solve_background():
@@ -237,103 +254,35 @@ def prepare_mode_problem(tables, n_modes=N_MODES):
     return physical_k, code_k, y0, params
 
 
-class ModeODE:
-    """Picklable callable for the Mukhanov-Sasaki RHS.
+def _make_mode_ode(*, exp, maximum, minimum, index_of, table, grid):
+    """The Mukhanov-Sasaki right-hand side over a uniform background grid.
 
-    Holds the background interpolation tables as instance state so that the
-    callable can be sent to ``multiprocessing`` workers via stdlib pickle.  A
-    closure that captured the same arrays would not be picklable.
+    ``jnp.interp`` has no device equivalent, so the three background lookups
+    are done by hand.  ``build_background_tables`` keeps the uniform
+    ``np.linspace`` grid that ``solve_background`` produced (it only trims a
+    trailing slice), so the bracketing index is arithmetic rather than a
+    search, and clamping at both ends reproduces ``np.interp``'s behaviour
+    outside the table.
     """
+    n_first, dn, last = grid
 
-    def __init__(self, tables):
-        self.n_table = jnp.asarray(tables["n"], dtype=jnp.float64)
-        self.epsilon_table = jnp.asarray(tables["epsilon"], dtype=jnp.float64)
-        self.log_a_h_table = jnp.asarray(tables["log_a_h"], dtype=jnp.float64)
-        self.q_table = jnp.asarray(tables["q"], dtype=jnp.float64)
-
-    def __call__(self, y, s, params):
-        code_k, n_start, n_stop = params
-        delta_n = n_stop - n_start
-        n_now = n_start + s * delta_n
-        epsilon = jnp.interp(n_now, self.n_table, self.epsilon_table)
-        log_a_h = jnp.interp(n_now, self.n_table, self.log_a_h_table)
-        q = jnp.interp(n_now, self.n_table, self.q_table)
-        k_over_a_h = code_k * jnp.exp(-log_a_h)
-
-        v_re, v_im, dv_re, dv_im = y
-        omega_sq = k_over_a_h**2 - q
-        d2v_re = -(1.0 - epsilon) * dv_re - omega_sq * v_re
-        d2v_im = -(1.0 - epsilon) * dv_im - omega_sq * v_im
-        return delta_n * jnp.array([dv_re, dv_im, d2v_re, d2v_im])
-
-
-def make_mode_ode(tables):
-    """Create the Mukhanov-Sasaki RHS using background interpolation tables."""
-    return ModeODE(tables)
-
-
-def make_mode_ode_device(tables):
-    """Build the numba-cuda Mukhanov-Sasaki RHS for the modax kernel solver.
-
-    ``tsit5`` compiles the right-hand side with ``numba_cuda_mlir``, where
-    ``jnp.interp`` is unavailable, so the three background lookups are done by
-    hand.  ``build_background_tables`` keeps the uniform ``np.linspace`` grid
-    that ``solve_background`` produced (it only trims a trailing slice), so the
-    bracketing index is arithmetic rather than a search, and clamping at both
-    ends reproduces ``jnp.interp``'s behaviour outside the table.
-
-    The tables are closed over, which numba lowers into CUDA *constant* memory
-    -- a hard 64 KiB per module.  Two details keep the footprint at one copy of
-    the data: the three columns are packed into a single row-major ``(n, 3)``
-    array, and it is bound to a local before indexing.  Indexing a closed-over
-    array directly emits one constant copy per reference site, which for three
-    separate tables read twice each came to ~135 KiB and would not load.
-    Row-major packing also puts the three values for a given ``n`` adjacent,
-    so one bracket costs two cache lines rather than six.
-    """
-    n_table = np.ascontiguousarray(tables["n"], dtype=np.float64)
-    spacing = np.diff(n_table)
-    if not np.allclose(spacing, spacing[0], rtol=1e-10, atol=0.0):
-        raise ValueError("device mode RHS requires a uniformly spaced N grid")
-
-    table = np.ascontiguousarray(
-        np.stack(
-            [
-                np.asarray(tables["epsilon"], dtype=np.float64),
-                np.asarray(tables["log_a_h"], dtype=np.float64),
-                np.asarray(tables["q"], dtype=np.float64),
-            ]
-        ).T
-    )
-
-    n_first = float(n_table[0])
-    dn = float(spacing[0])
-    last = n_table.size - 1
-
-    def mode_ode_device(y, s, params):
-        tab = table  # bind once: see the constant-memory note above
+    def mode_ode(y, s, params):
+        tab = table  # bind once: see the constant-memory note in make_mode_ode
         code_k = params[0]
         n_start = params[1]
         n_stop = params[2]
         delta_n = n_stop - n_start
         n_now = n_start + s * delta_n
 
-        pos = (n_now - n_first) / dn
-        if pos <= 0.0:
-            i = 0
-            frac = 0.0
-        elif pos >= last:
-            i = last - 1
-            frac = 1.0
-        else:
-            i = int(pos)
-            frac = pos - i
+        pos = minimum(maximum((n_now - n_first) / dn, 0.0), float(last))
+        i = minimum(index_of(pos), last - 1)
+        frac = pos - i
 
         epsilon = tab[i, 0] + frac * (tab[i + 1, 0] - tab[i, 0])
         log_a_h = tab[i, 1] + frac * (tab[i + 1, 1] - tab[i, 1])
         q = tab[i, 2] + frac * (tab[i + 1, 2] - tab[i, 2])
 
-        k_over_a_h = code_k * math.exp(-log_a_h)
+        k_over_a_h = code_k * exp(-log_a_h)
         omega_sq = k_over_a_h * k_over_a_h - q
 
         v_re = y[0]
@@ -349,7 +298,43 @@ def make_mode_ode_device(tables):
             delta_n * d2v_im,
         )
 
-    return mode_ode_device
+    return mode_ode
+
+
+def make_mode_ode(tables):
+    """Build the Mukhanov-Sasaki RHS over background interpolation tables.
+
+    The tables are closed over, which numba lowers into CUDA *constant* memory
+    -- a hard 64 KiB per module.  Two details keep the footprint at one copy of
+    the data: the three columns are packed into a single row-major ``(n, 3)``
+    array, and it is bound to a local before indexing.  Indexing a closed-over
+    array directly emits one constant copy per reference site, which for three
+    separate tables read twice each came to ~135 KiB and would not load.
+    Row-major packing also puts the three values for a given ``n`` adjacent,
+    so one bracket costs two cache lines rather than six.
+    """
+    n_table = np.ascontiguousarray(tables["n"], dtype=np.float64)
+    spacing = np.diff(n_table)
+    if not np.allclose(spacing, spacing[0], rtol=1e-10, atol=0.0):
+        raise ValueError("the mode RHS requires a uniformly spaced N grid")
+
+    table = np.ascontiguousarray(
+        np.stack(
+            [
+                np.asarray(tables["epsilon"], dtype=np.float64),
+                np.asarray(tables["log_a_h"], dtype=np.float64),
+                np.asarray(tables["q"], dtype=np.float64),
+            ]
+        ).T
+    )
+    grid = (float(n_table[0]), float(spacing[0]), n_table.size - 1)
+    return build_rhs(
+        _make_mode_ode,
+        # The traced form indexes a device array; the device form closes over
+        # the NumPy one, which is what lands in constant memory.
+        table=Forms(table, jnp.asarray(table), table),
+        grid=grid,
+    )
 
 
 def make_solver(backend):
@@ -395,10 +380,9 @@ def solve_modes(tables, backend="modax", n_modes=N_MODES):
     physical_k, code_k, y0, params = prepare_mode_problem(tables, n_modes)
     solve_fn = make_solver(backend)
     # The modax kernel solver compiles its RHS with numba-cuda; the reference
-    # backends trace the jnp form of the same equations.
-    ode_fn = (
-        make_mode_ode_device(tables) if backend == "modax" else make_mode_ode(tables)
-    )
+    # backend traces the jnp form built from the same body.
+    mode_ode = make_mode_ode(tables)
+    ode_fn = mode_ode.device if backend == "modax" else mode_ode.jax
     solution = solve_fn(
         ode_fn,
         jnp.asarray(y0, dtype=jnp.float64),
@@ -493,7 +477,6 @@ def run_benchmark(n_modes, backends, repeats):
     # The modax kernel solver compiles its RHS with numba-cuda; the reference
     # backends trace the jnp form of the same equations.
     mode_ode = make_mode_ode(tables)
-    mode_ode_device = make_mode_ode_device(tables)
     y0 = jnp.asarray(y0, dtype=jnp.float64)
     params = jnp.asarray(params, dtype=jnp.float64)
     s_span = jnp.array([0.0, 1.0], dtype=jnp.float64)
@@ -502,7 +485,7 @@ def run_benchmark(n_modes, backends, repeats):
     print("-" * 56)
     for backend in backends:
         solve_fn = make_solver(backend)
-        f = mode_ode_device if backend == "modax" else mode_ode
+        f = mode_ode.device if backend == "modax" else mode_ode.jax
         run = lambda sf=solve_fn, fn=f: sf(fn, y0, s_span, params)
         try:
             secs, sol = time_solve(run, repeats)

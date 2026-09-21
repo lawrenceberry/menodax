@@ -244,8 +244,21 @@ Callbacks are compiled with `numba_cuda_mlir`, which constrains them:
   work or pre-decorate the helper with `@cuda.jit(device=True)`.
 - Closed-over arrays land in CUDA **constant memory** (64 KiB per module), and
   numba emits one copy *per reference site*. Pack related tables into a single
-  array and bind it to a local before indexing — see `make_mode_ode_device` in
+  array and bind it to a local before indexing — see `make_mode_ode` in
   `examples/mukhanov_sasaki/main.py`.
+
+A callback that also has to run under `jax` — every example here has a Diffrax
+baseline to compare against — is written **once** and built twice, by
+`examples/dual_backend.py`: the body is a factory over the handful of names
+the two backends spell differently (`math.exp`/`jnp.exp`, `max`/`jnp.maximum`,
+…), and `build_rhs` returns it as `.device` (the tuple form), `.jax` (arrays)
+and `.host` (the device arithmetic in plain Python, which is how
+`tests/test_examples.py` compares the two without a GPU). What such a body
+must avoid is an `if` on a value that varies, since a traced one cannot be
+branched on at all: `maximum`/`minimum`, or a branchless
+`a + (b - a) * (x > c)`, serve both. A helper it shares with the rest of the
+module goes through `build_fn`, whose `.device` member is a
+`cuda.jit(device=True)` function — Enzyme inlines straight through it.
 
 ### Derived Jacobians
 

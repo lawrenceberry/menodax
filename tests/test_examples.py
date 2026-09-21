@@ -1,15 +1,20 @@
 """Checks on the CUDA-device callbacks the examples hand to the numba solvers.
 
-Each example carries two forms of the same equations: a ``jnp`` one traced by
-the Diffrax reference backend, and a ``math``/tuple one that
-``numba_cuda_mlir`` compiles for the modax kernel solver.  Nothing forces the
-two to agree, so these tests pin it down:
+Each example needs its equations in two forms: a ``jnp`` one traced by the
+Diffrax reference backend, and a ``math``/tuple one that ``numba_cuda_mlir``
+compiles for the modax kernel solver.  Both are built from one body through
+``examples/dual_backend.py``, which leaves the backend shim -- which ``math``
+name stands in for which ``jnp`` one, and the branchless selects -- as the
+part that can still be wrong.  These tests pin that down:
 
 * every device callback compiles to PTX -- ``cuda.compile_ptx`` runs the full
   numba typing and lowering pipeline without needing a GPU, so this catches the
   common failures (calling a plain Python helper, returning an array instead of
   a tuple) on any machine;
-* the device RHS matches the ``jnp`` RHS;
+* the device arithmetic matches the ``jnp`` form.  The device callback itself
+  calls CUDA device functions and so only runs on a GPU, hence the ``.host``
+  member: the same body over the same ``math`` ops, with those helpers left as
+  plain Python;
 * for the implicit examples, the Jacobian and time derivative Enzyme takes off
   the device RHS match ``jax.jacobian`` of the ``jnp`` one.  That needs a GPU,
   unlike the rest of this module, so those two tests skip without one;
@@ -123,7 +128,7 @@ def test_bbn_device_callbacks_compile(bbn):
 def test_bbn_device_rhs_matches_jnp(bbn):
     for y, x, p in _bbn_samples():
         ref = np.asarray(bbn.bbn_ode(jnp.asarray(y), x, jnp.asarray(p)))
-        assert _max_rel_error(bbn.bbn_ode_device(y, x, p), ref) < 1e-12
+        assert _max_rel_error(bbn.BBN_ODE.host(y, x, p), ref) < 1e-12
 
 
 @requires_gpu
@@ -184,7 +189,7 @@ def test_igm_device_callbacks_compile(igm):
 def test_igm_device_rhs_matches_jnp(igm):
     for y, u, p in _igm_samples(igm):
         ref = np.asarray(igm.igm_ode(jnp.asarray(y), u, jnp.asarray(p)))
-        assert _max_rel_error(igm.igm_ode_device(y, u, p), ref) < 1e-12
+        assert _max_rel_error(igm.IGM_ODE.host(y, u, p), ref) < 1e-12
 
 
 @requires_gpu
@@ -254,7 +259,7 @@ def test_mukhanov_background_device_rhs_matches_jnp(mukhanov):
         ref = np.asarray(
             mukhanov.background_ode(jnp.asarray(y), 0.0, jnp.asarray(params))
         )
-        got = mukhanov.background_ode_device(y, 0.0, params)
+        got = mukhanov.BACKGROUND_ODE.host(y, 0.0, params)
         assert _max_rel_error(got, ref) < 1e-12
 
 
@@ -262,38 +267,36 @@ def test_mukhanov_mode_rhs_fits_in_constant_memory(mukhanov, mukhanov_tables):
     """The closed-over background tables must fit CUDA constant memory.
 
     Indexing a closed-over array emits one constant copy per reference site, so
-    the packed single-array layout in ``make_mode_ode_device`` is load-bearing:
+    the packed single-array layout in ``make_mode_ode`` is load-bearing:
     three separate tables read twice each came to ~135 KiB and would not load.
     """
-    _, const_bytes = _compile_device(mukhanov.make_mode_ode_device(mukhanov_tables))
+    _, const_bytes = _compile_device(mukhanov.make_mode_ode(mukhanov_tables).device)
     assert 0 < const_bytes < _CONST_LIMIT_BYTES
 
 
 def test_mukhanov_mode_device_rhs_matches_jnp(mukhanov, mukhanov_tables):
-    jax_ode = mukhanov.make_mode_ode(mukhanov_tables)
-    device_ode = mukhanov.make_mode_ode_device(mukhanov_tables)
+    mode_ode = mukhanov.make_mode_ode(mukhanov_tables)
     _, _, y0, params = mukhanov.prepare_mode_problem(mukhanov_tables)
 
     rng = np.random.default_rng(0)
     for i in range(y0.shape[0]):
         for s in np.linspace(0.0, 1.0, 8):
             y = y0[i] * rng.uniform(0.5, 2.0, size=4)
-            ref = np.asarray(jax_ode(jnp.asarray(y), s, jnp.asarray(params[i])))
-            got = device_ode(y, s, params[i])
-            # The arithmetic index differs from jnp.interp's searchsorted by a
-            # rounding step when n_now lands next to a knot, so compare against
-            # the vector scale rather than per component.
+            ref = np.asarray(mode_ode.jax(jnp.asarray(y), s, jnp.asarray(params[i])))
+            got = mode_ode.host(y, s, params[i])
+            # One bracketing index, one table: the two forms differ only in
+            # how their maths functions round, so compare against the vector
+            # scale rather than per component.
             assert _max_scaled_error(got, ref) < 1e-12
 
 
 def test_mukhanov_mode_device_rhs_clamps_outside_the_table(mukhanov, mukhanov_tables):
     """Outside the table both forms clamp to the end values, as np.interp does."""
-    jax_ode = mukhanov.make_mode_ode(mukhanov_tables)
-    device_ode = mukhanov.make_mode_ode_device(mukhanov_tables)
+    mode_ode = mukhanov.make_mode_ode(mukhanov_tables)
     _, _, y0, params = mukhanov.prepare_mode_problem(mukhanov_tables)
 
     y = y0[0]
     for s in (-0.5, 1.5):
-        ref = np.asarray(jax_ode(jnp.asarray(y), s, jnp.asarray(params[0])))
-        got = device_ode(y, s, params[0])
+        ref = np.asarray(mode_ode.jax(jnp.asarray(y), s, jnp.asarray(params[0])))
+        got = mode_ode.host(y, s, params[0])
         assert _max_scaled_error(got, ref) < 1e-12

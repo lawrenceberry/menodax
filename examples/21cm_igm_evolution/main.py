@@ -38,6 +38,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from examples.dual_backend import build_fn, build_rhs
 from solvers.rodas5P import solve as rodas5P_solve
 
 jax.config.update("jax_enable_x64", True)
@@ -72,23 +73,90 @@ SOLVER_FIRST_STEP = 2.0e-3
 SOLVER_MAX_STEPS = 4096
 
 
-def redshift_from_u(u):
-    """Map integration coordinate u to redshift."""
-    return (1.0 + Z_INITIAL) * jnp.exp(-u) - 1.0
+# ---------------------------------------------------------------------------
+# Background, sources and the right-hand side
+# ---------------------------------------------------------------------------
+#
+# The solvers want these in two forms: ``rodas5P`` compiles its right-hand
+# side with ``numba_cuda_mlir`` and differentiates it with Enzyme, while the
+# Diffrax reference backend traces ``jnp`` arrays.  Everything the right-hand
+# side shares with the observables below is therefore written once, as a
+# factory over the names the two backends spell differently, and built in both
+# forms by ``examples/dual_backend.py``: ``.device`` is a CUDA device
+# function, ``.jax`` the traced one that also works elementwise over whole
+# history arrays, and ``.host`` the device arithmetic in plain Python, which
+# is what ``tests/test_examples.py`` compares against ``.jax`` with no GPU.
+
+_LOG_TK_MIN = math.log(0.5)
+_LOG_TK_MAX = math.log(5.0e4)
+
+
+def _make_redshift_from_u(*, exp):
+    def redshift_from_u(u):
+        """Map integration coordinate u to redshift."""
+        return (1.0 + Z_INITIAL) * exp(-u) - 1.0
+
+    return redshift_from_u
+
+
+def _make_hubble_s(*, sqrt):
+    def hubble_s(z):
+        """Flat-LambdaCDM Hubble rate in s^-1."""
+        return H0_S * sqrt(OMEGA_M * (1.0 + z) ** 3 + OMEGA_L)
+
+    return hubble_s
+
+
+def _make_cmb_temperature():
+    def cmb_temperature(z):
+        return T_CMB0 * (1.0 + z)
+
+    return cmb_temperature
+
+
+def _make_sigmoid_from_logit(*, exp, maximum, minimum):
+    def sigmoid_from_logit(x):
+        # Clamped before the exponential: +/-40 is already 0 or 1 to machine
+        # precision, and beyond it the device form would overflow.
+        return 1.0 / (1.0 + exp(-minimum(maximum(x, -40.0), 40.0)))
+
+    return sigmoid_from_logit
+
+
+def _make_source_history(*, exp):
+    def source_history(z, params):
+        """Smooth dimensionless star-formation history surrogate.
+
+        Higher star-formation efficiency raises the amplitude.  Higher virial
+        temperature delays the source turn-on by requiring rarer, more massive
+        haloes before star formation begins.
+        """
+        f_star = 10.0 ** params[0]
+        turn_on_z = 31.0 - 7.0 * (params[2] - 4.0)
+        turn_on = 1.0 / (1.0 + exp(-(turn_on_z - z) / 2.0))
+        low_z_decline = 1.0 / (1.0 + exp(-(z - 5.8) / 0.7))
+        growth = ((1.0 + z) / 20.0) ** -1.7
+        return 10.0 * f_star * turn_on * low_z_decline * growth
+
+    return source_history
+
+
+REDSHIFT_FROM_U = build_fn(_make_redshift_from_u)
+HUBBLE_S = build_fn(_make_hubble_s)
+CMB_TEMPERATURE = build_fn(_make_cmb_temperature)
+SIGMOID_FROM_LOGIT = build_fn(_make_sigmoid_from_logit)
+SOURCE_HISTORY = build_fn(_make_source_history)
+
+redshift_from_u = REDSHIFT_FROM_U.jax
+hubble_s = HUBBLE_S.jax
+cmb_temperature = CMB_TEMPERATURE.jax
+sigmoid_from_logit = SIGMOID_FROM_LOGIT.jax
+source_history = SOURCE_HISTORY.jax
 
 
 def u_from_redshift(z):
     """Map redshift to integration coordinate u."""
     return jnp.log((1.0 + Z_INITIAL) / (1.0 + z))
-
-
-def hubble_s(z):
-    """Flat-LambdaCDM Hubble rate in s^-1."""
-    return H0_S * jnp.sqrt(OMEGA_M * (1.0 + z) ** 3 + OMEGA_L)
-
-
-def cmb_temperature(z):
-    return T_CMB0 * (1.0 + z)
 
 
 def _clip_unit_interval(x):
@@ -98,26 +166,6 @@ def _clip_unit_interval(x):
 def logit(x):
     x = _clip_unit_interval(x)
     return jnp.log(x / (1.0 - x))
-
-
-def sigmoid_from_logit(x):
-    return jax.nn.sigmoid(jnp.clip(x, -40.0, 40.0))
-
-
-def source_history(z, params):
-    """Smooth dimensionless star-formation history surrogate.
-
-    Higher star-formation efficiency raises the amplitude.  Higher virial
-    temperature delays the source turn-on by requiring rarer, more massive
-    haloes before star formation begins.
-    """
-    log10_f_star, _, log10_tvir = params
-    f_star = 10.0**log10_f_star
-    turn_on_z = 31.0 - 7.0 * (log10_tvir - 4.0)
-    turn_on = jax.nn.sigmoid((turn_on_z - z) / 2.0)
-    low_z_decline = jax.nn.sigmoid((z - 5.8) / 0.7)
-    growth = ((1.0 + z) / 20.0) ** -1.7
-    return 10.0 * f_star * turn_on * low_z_decline * growth
 
 
 def couplings(z, T_k, params):
@@ -146,110 +194,75 @@ def brightness_temperature_mk(z, T_k, Q, params):
     return 27.0 * x_hi * baryon * cosmo * (1.0 - cmb_temperature(z) / T_s)
 
 
-def igm_ode(y, u, params):
-    """Thermal and ionization-history surrogate in d/du form."""
-    z = redshift_from_u(u)
-    H = hubble_s(z)
-    T_gamma = cmb_temperature(z)
-
-    log_Tk, logit_xe, logit_Q = y
-    T_k = jnp.exp(jnp.clip(log_Tk, jnp.log(0.5), jnp.log(5.0e4)))
-    x_e = sigmoid_from_logit(logit_xe)
-    Q = sigmoid_from_logit(logit_Q)
-
-    log10_f_star, log10_f_X, _ = params
-    f_X = 10.0**log10_f_X
-    source = source_history(z, params)
-
-    compton_rate = 8.0e-20 * (1.0 + z) ** 4 * x_e / (1.0 + X_HE + x_e)
-    xray_heating = 3.5e-16 * f_X * source
-    lya_heating = 1.2e-17 * (10.0**log10_f_star / 0.01) * source
-
-    dTdt = -2.0 * H * T_k + compton_rate * (T_gamma - T_k) + xray_heating + lya_heating
-
-    n_h = N_H0_CM3 * (1.0 + z) ** 3
-    alpha_b = 2.6e-13 * (jnp.maximum(T_k, 10.0) / 1.0e4) ** -0.7
-    xray_ionization = 1.8e-17 * f_X * source * (1.0 - x_e)
-    dxedt = -alpha_b * n_h * x_e**2 + xray_ionization
-
-    ionizing_source = 1.1e-16 * source * (10.0**log10_f_star / 0.01) * (1.0 - Q)
-    recombinations = 2.0e-17 * ((1.0 + z) / 8.0) ** 3 * Q**2
-    dQdt = ionizing_source - recombinations
-
-    dlogT_du = dTdt / (H * T_k)
-    dlogit_xe_du = dxedt / (H * jnp.maximum(x_e * (1.0 - x_e), LOGIT_EPS))
-    dlogit_Q_du = dQdt / (H * jnp.maximum(Q * (1.0 - Q), LOGIT_EPS))
-    return jnp.array([dlogT_du, dlogit_xe_du, dlogit_Q_du])
+# The state enters only through the decoded (T_k, x_e, Q), and the background
+# terms only through z = (1+Z_INITIAL) exp(-u) - 1, so dz/du = -(1+z) and every
+# (1+z)^n factor contributes -n times itself per unit u.  The clip and maximum
+# guards have zero derivative outside their active range, which matters because
+# the solver differentiates this callback with Enzyme for the Jacobian and
+# df/du rather than being handed them.
 
 
-# ---------------------------------------------------------------------------
-# CUDA-device callbacks for the modax kernel solver
-# ---------------------------------------------------------------------------
-#
-# ``rodas5P`` compiles its right-hand side with ``numba_cuda_mlir``, so the
-# block below mirrors ``igm_ode`` using ``math`` scalars and fixed-size tuples
-# instead of ``jnp`` arrays.  The clip and maximum guards are reproduced
-# exactly, including their zero derivatives outside the active range, which
-# matters because the solver differentiates this callback with Enzyme to get
-# the Jacobian and ``df/du`` rather than being handed them.
-# ``tests/test_examples.py`` checks it against ``igm_ode`` so the duplication
-# cannot drift silently.
-#
-# Background terms depend on u only through z = (1+Z_INITIAL) exp(-u) - 1, so
-# dz/du = -(1+z) and every (1+z)^n factor contributes -n times itself per unit
-# u.  The state enters only through the decoded (T_k, x_e, Q).
+def _make_igm_ode(
+    *,
+    exp,
+    maximum,
+    minimum,
+    redshift_from_u,
+    hubble_s,
+    cmb_temperature,
+    sigmoid_from_logit,
+    source_history,
+):
+    def igm_ode(y, u, params):
+        """Thermal and ionization-history surrogate in d/du form."""
+        z = redshift_from_u(u)
+        opz = 1.0 + z
+        H = hubble_s(z)
+        T_gamma = cmb_temperature(z)
 
-_LOG_TK_MIN = math.log(0.5)
-_LOG_TK_MAX = math.log(5.0e4)
+        T_k = exp(minimum(maximum(y[0], _LOG_TK_MIN), _LOG_TK_MAX))
+        x_e = sigmoid_from_logit(y[1])
+        Q = sigmoid_from_logit(y[2])
+
+        f_star = 10.0 ** params[0]
+        f_X = 10.0 ** params[1]
+        source = source_history(z, params)
+
+        compton_rate = 8.0e-20 * opz**4 * x_e / (1.0 + X_HE + x_e)
+        xray_heating = 3.5e-16 * f_X * source
+        lya_heating = 1.2e-17 * (f_star / 0.01) * source
+        dTdt = (
+            -2.0 * H * T_k + compton_rate * (T_gamma - T_k) + xray_heating + lya_heating
+        )
+
+        n_h = N_H0_CM3 * opz**3
+        alpha_b = 2.6e-13 * (maximum(T_k, 10.0) / 1.0e4) ** -0.7
+        xray_ionization = 1.8e-17 * f_X * source * (1.0 - x_e)
+        dxedt = -alpha_b * n_h * x_e**2 + xray_ionization
+
+        ionizing_source = 1.1e-16 * source * (f_star / 0.01) * (1.0 - Q)
+        recombinations = 2.0e-17 * (opz / 8.0) ** 3 * Q**2
+        dQdt = ionizing_source - recombinations
+
+        return (
+            dTdt / (H * T_k),
+            dxedt / (H * maximum(x_e * (1.0 - x_e), LOGIT_EPS)),
+            dQdt / (H * maximum(Q * (1.0 - Q), LOGIT_EPS)),
+        )
+
+    return igm_ode
 
 
-def igm_ode_device(y, u, p):
-    """Device RHS: same equations as :func:`igm_ode`, as a 3-tuple."""
-    log10_f_star = p[0]
-    log10_f_X = p[1]
-    log10_tvir = p[2]
-
-    z = (1.0 + Z_INITIAL) * math.exp(-u) - 1.0
-    opz = 1.0 + z
-    H = H0_S * math.sqrt(OMEGA_M * opz**3 + OMEGA_L)
-    T_gamma = T_CMB0 * opz
-
-    f_star = 10.0**log10_f_star
-    f_X = 10.0**log10_f_X
-    turn_on_z = 31.0 - 7.0 * (log10_tvir - 4.0)
-    turn_on = 1.0 / (1.0 + math.exp(-(turn_on_z - z) / 2.0))
-    decline = 1.0 / (1.0 + math.exp(-(z - 5.8) / 0.7))
-    growth = (opz / 20.0) ** -1.7
-    source = 10.0 * f_star * turn_on * decline * growth
-
-    log_Tk = y[0]
-    clipped = min(max(log_Tk, _LOG_TK_MIN), _LOG_TK_MAX)
-    T_k = math.exp(clipped)
-    x_e = 1.0 / (1.0 + math.exp(-min(max(y[1], -40.0), 40.0)))
-    Q = 1.0 / (1.0 + math.exp(-min(max(y[2], -40.0), 40.0)))
-
-    compton_rate = 8.0e-20 * opz**4 * x_e / (1.0 + X_HE + x_e)
-    dTdt = (
-        -2.0 * H * T_k
-        + compton_rate * (T_gamma - T_k)
-        + 3.5e-16 * f_X * source
-        + 1.2e-17 * (f_star / 0.01) * source
-    )
-
-    n_h = N_H0_CM3 * opz**3
-    alpha_b = 2.6e-13 * (max(T_k, 10.0) / 1.0e4) ** -0.7
-    dxedt = -alpha_b * n_h * x_e * x_e + 1.8e-17 * f_X * source * (1.0 - x_e)
-
-    dQdt = (
-        1.1e-16 * source * (f_star / 0.01) * (1.0 - Q)
-        - 2.0e-17 * (opz / 8.0) ** 3 * Q * Q
-    )
-
-    return (
-        dTdt / (H * T_k),
-        dxedt / (H * max(x_e * (1.0 - x_e), LOGIT_EPS)),
-        dQdt / (H * max(Q * (1.0 - Q), LOGIT_EPS)),
-    )
+IGM_ODE = build_rhs(
+    _make_igm_ode,
+    redshift_from_u=REDSHIFT_FROM_U,
+    hubble_s=HUBBLE_S,
+    cmb_temperature=CMB_TEMPERATURE,
+    sigmoid_from_logit=SIGMOID_FROM_LOGIT,
+    source_history=SOURCE_HISTORY,
+)
+igm_ode = IGM_ODE.jax  # d/du as a jnp array, for the Diffrax backend
+igm_ode_device = IGM_ODE.device  # the same as a 3-tuple, for the modax kernel
 
 
 def sample_parameters(key, n_samples=N_SAMPLES):

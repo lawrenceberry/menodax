@@ -52,6 +52,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from examples.dual_backend import build_fn, build_rhs
 from solvers.rodas5P import solve as rodas5P_solve
 
 jax.config.update("jax_enable_x64", True)
@@ -63,6 +64,7 @@ jax.config.update("jax_enable_x64", True)
 Q = 1.293  # MeV, n-p mass difference
 B_D = 2.225  # MeV, deuterium binding energy
 M_N = 938.272  # MeV, nucleon mass
+M_E = 0.511  # MeV, electron mass (where g_star steps)
 M_PL = 1.2209e22  # MeV, unreduced Planck mass
 ZETA3 = 1.2020569  # Riemann zeta(3)
 N_EFF_SM = 3.044  # Standard-model N_eff
@@ -80,36 +82,74 @@ SIGMA_DD = 3.4e-5  # MeV^-2, effective <sigma*v>_{DD->4He}
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
+#
+# The solvers want the network in two forms: ``rodas5P`` compiles its
+# right-hand side with ``numba_cuda_mlir`` and differentiates it with Enzyme,
+# while the Diffrax reference backend traces ``jnp`` arrays.  Each piece below
+# is therefore written once, as a factory over the names the two spell
+# differently, and built in both forms by ``examples/dual_backend.py``.  The
+# ``.device`` member of each is a CUDA device function; ``.jax`` is the traced
+# one; ``.host`` is the device arithmetic in plain Python, which is what
+# ``tests/test_examples.py`` compares against ``.jax`` without needing a GPU.
 
 
-def g_star(T, N_eff):
-    """Effective relativistic dof; step through e+e- annihilation at m_e=0.511 MeV."""
-    M_E = 0.511  # MeV
-    g_sm = jnp.where(T > M_E, 10.75, 3.91)
-    return g_sm + (7.0 / 4.0) * (N_eff - N_EFF_SM)
+def _make_g_star():
+    def g_star(T, N_eff):
+        """Effective relativistic dof; step through e+e- annihilation at m_e."""
+        # Branchless step: the comparison is a 0/1 factor, which a traced
+        # value and a device scalar both multiply by.  ``jnp.where`` would not
+        # compile on the device and ``if`` would not trace.
+        g_sm = 3.91 + (10.75 - 3.91) * (T > M_E)
+        return g_sm + (7.0 / 4.0) * (N_eff - N_EFF_SM)
+
+    return g_star
 
 
-def hubble(x, N_eff):
-    """H(T) in MeV with T = Q/x (Friedmann, radiation domination)."""
-    T = Q / x
-    g = g_star(T, N_eff)
-    return jnp.sqrt(4.0 * jnp.pi**3 * g / 45.0) * T**2 / M_PL
+def _make_hubble(*, sqrt, g_star):
+    def hubble(x, N_eff):
+        """H(T) in MeV with T = Q/x (Friedmann, radiation domination)."""
+        T = Q / x
+        return sqrt(4.0 * math.pi**3 * g_star(T, N_eff) / 45.0) * T**2 / M_PL
+
+    return hubble
 
 
-def n_photon(T):
-    """Photon number density in MeV^3: (2*zeta3/pi^2) T^3."""
-    return 2.0 * ZETA3 / jnp.pi**2 * T**3
+def _make_n_photon():
+    def n_photon(T):
+        """Photon number density in MeV^3: (2*zeta3/pi^2) T^3."""
+        return 2.0 * ZETA3 / math.pi**2 * T**3
+
+    return n_photon
 
 
-def weak_rate_np(x):
-    """Total n->p rate [MeV]: Bernstein polynomial + free neutron decay."""
-    return (255.0 / TAU_N_MEV) * (12.0 + 6.0 * x + x**2) / x**5 + 1.0 / TAU_N_MEV
+def _make_weak_rate_np():
+    def weak_rate_np(x):
+        """Total n->p rate [MeV]: Bernstein polynomial + free neutron decay."""
+        return (255.0 / TAU_N_MEV) * (12.0 + 6.0 * x + x**2) / x**5 + 1.0 / TAU_N_MEV
+
+    return weak_rate_np
 
 
-def deuterium_eq_ratio(T, eta):
-    """K_D(T,eta) = Y_d^eq / (Y_n * Y_p): Saha equation for D formation."""
-    n_b = eta * n_photon(T)
-    return n_b * (3.0 / 4.0) * (4.0 * jnp.pi / (M_N * T)) ** 1.5 * jnp.exp(B_D / T)
+def _make_deuterium_eq_ratio(*, exp, n_photon):
+    def deuterium_eq_ratio(T, eta):
+        """K_D(T,eta) = Y_d^eq / (Y_n * Y_p): Saha equation for D formation."""
+        n_b = eta * n_photon(T)
+        return n_b * (3.0 / 4.0) * (4.0 * math.pi / (M_N * T)) ** 1.5 * exp(B_D / T)
+
+    return deuterium_eq_ratio
+
+
+G_STAR = build_fn(_make_g_star)
+N_PHOTON = build_fn(_make_n_photon)
+WEAK_RATE_NP = build_fn(_make_weak_rate_np)
+HUBBLE = build_fn(_make_hubble, g_star=G_STAR)
+DEUTERIUM_EQ_RATIO = build_fn(_make_deuterium_eq_ratio, n_photon=N_PHOTON)
+
+g_star = G_STAR.jax
+hubble = HUBBLE.jax
+n_photon = N_PHOTON.jax
+weak_rate_np = WEAK_RATE_NP.jax
+deuterium_eq_ratio = DEUTERIUM_EQ_RATIO.jax
 
 
 # ---------------------------------------------------------------------------
@@ -123,66 +163,42 @@ def deuterium_eq_ratio(T, eta):
 # Parameters: [log10(eta_10), N_eff] where eta_10 = eta * 1e10.
 
 
-def bbn_ode(y, x, params):
-    log_eta10, N_eff = params[0], params[1]
-    eta = 10.0 ** (log_eta10 - 10.0)
-    T = Q / x
+def _make_bbn_ode(*, exp, hubble, n_photon, weak_rate_np, deuterium_eq_ratio):
+    def bbn_ode(y, x, params):
+        log_eta10, N_eff = params[0], params[1]
+        eta = 10.0 ** (log_eta10 - 10.0)
+        T = Q / x
 
-    H = hubble(x, N_eff)
-    n_b = eta * n_photon(T)
+        H = hubble(x, N_eff)
+        n_b = eta * n_photon(T)
 
-    Gamma_np = weak_rate_np(x)
-    Gamma_pn = Gamma_np * jnp.exp(-x)  # detailed balance
+        Gamma_np = weak_rate_np(x)
+        Gamma_pn = Gamma_np * exp(-x)  # detailed balance
 
-    K_D = deuterium_eq_ratio(T, eta)
-    rate_np = n_b * SIGMA_NP * (y[0] * y[1] - y[2] / K_D)  # n+p<->D net rate
-    rate_dd = n_b * SIGMA_DD * y[2] ** 2  # D+D->4He rate
+        K_D = deuterium_eq_ratio(T, eta)
+        rate_np = n_b * SIGMA_NP * (y[0] * y[1] - y[2] / K_D)  # n+p<->D net rate
+        rate_dd = n_b * SIGMA_DD * y[2] ** 2  # D+D->4He rate
 
-    dYn = (Gamma_pn * y[1] - Gamma_np * y[0] - rate_np) / (H * x)
-    dYp = (Gamma_np * y[0] - Gamma_pn * y[1] - rate_np) / (H * x)
-    dYd = (rate_np - 2.0 * rate_dd) / (H * x)
-    dYHe = rate_dd / (H * x)
-    return jnp.array([dYn, dYp, dYd, dYHe])
+        denom = H * x
+        return (
+            (Gamma_pn * y[1] - Gamma_np * y[0] - rate_np) / denom,
+            (Gamma_np * y[0] - Gamma_pn * y[1] - rate_np) / denom,
+            (rate_np - 2.0 * rate_dd) / denom,
+            rate_dd / denom,
+        )
 
-
-# ---------------------------------------------------------------------------
-# CUDA-device callbacks for the modax kernel solver
-# ---------------------------------------------------------------------------
-#
-# ``rodas5P`` compiles its right-hand side with ``numba_cuda_mlir`` and
-# differentiates it with Enzyme for the Jacobian and ``df/dx``, so this mirrors
-# ``bbn_ode`` above using ``math`` scalars and fixed-size tuples instead of
-# ``jnp`` arrays.  ``tests/test_examples.py`` checks it against ``bbn_ode`` so
-# the duplication cannot drift silently.
+    return bbn_ode
 
 
-def bbn_ode_device(y, x, p):
-    """Device RHS: same equations as :func:`bbn_ode`, as a 4-tuple."""
-    log_eta10 = p[0]
-    N_eff = p[1]
-    eta = 10.0 ** (log_eta10 - 10.0)
-    T = Q / x
-
-    g_sm = 10.75 if T > 0.511 else 3.91
-    g = g_sm + (7.0 / 4.0) * (N_eff - N_EFF_SM)
-    H = math.sqrt(4.0 * math.pi**3 * g / 45.0) * T * T / M_PL
-
-    n_b = eta * (2.0 * ZETA3 / math.pi**2) * T**3
-
-    Gamma_np = (255.0 / TAU_N_MEV) * (12.0 + 6.0 * x + x * x) / x**5 + 1.0 / TAU_N_MEV
-    Gamma_pn = Gamma_np * math.exp(-x)
-
-    K_D = n_b * (3.0 / 4.0) * (4.0 * math.pi / (M_N * T)) ** 1.5 * math.exp(B_D / T)
-
-    rate_np = n_b * SIGMA_NP * (y[0] * y[1] - y[2] / K_D)
-    rate_dd = n_b * SIGMA_DD * y[2] * y[2]
-    denom = H * x
-    return (
-        (Gamma_pn * y[1] - Gamma_np * y[0] - rate_np) / denom,
-        (Gamma_np * y[0] - Gamma_pn * y[1] - rate_np) / denom,
-        (rate_np - 2.0 * rate_dd) / denom,
-        rate_dd / denom,
-    )
+BBN_ODE = build_rhs(
+    _make_bbn_ode,
+    hubble=HUBBLE,
+    n_photon=N_PHOTON,
+    weak_rate_np=WEAK_RATE_NP,
+    deuterium_eq_ratio=DEUTERIUM_EQ_RATIO,
+)
+bbn_ode = BBN_ODE.jax  # dY/dx as a jnp array, for the Diffrax backend
+bbn_ode_device = BBN_ODE.device  # the same as a 4-tuple, for the modax kernel
 
 
 # ---------------------------------------------------------------------------

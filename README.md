@@ -170,6 +170,10 @@ Calling conventions:
 - The callbacks are compiled with `numba_cuda_mlir`, so they take and return fixed-size
   tuples of scalars rather than arrays, and use `math` rather than `numpy`/`jax.numpy`.
   Plain Python functions are jitted automatically; pre-`cuda.jit`ed ones are used as-is.
+  A right-hand side that must also run under `jax` — to compare against a
+  Diffrax baseline, say — need not be written twice: `examples/dual_backend.py`
+  builds both forms from one body, parameterised over the names the two
+  backends spell differently.
 - **Rodas5P** (implicit) needs only `ode_fn`. Its Jacobian ∂f/∂y, and the ∂f/∂t
   a non-autonomous system needs to retain full order, are differentiated out of
   `ode_fn` with [numba-enzyme](https://github.com/Qruise-ai/numba-enzyme),
