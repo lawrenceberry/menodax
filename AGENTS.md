@@ -43,6 +43,15 @@ lowering pipeline without a device.
 | Tsit5    | Explicit RK (order 5)  | Non-stiff systems | `tsit5.py`    |
 | Rodas5P  | Rosenbrock-W (order 5) | Stiff systems     | `rodas5P.py`  |
 
+Rodas5P also takes a **save hook**: a device function
+`hook(save_idx, y, t, p_row, acc)` the kernel calls at every save time with the
+dense-output state, accumulating into a per-trajectory `(n, hook_size)` output
+row (`save_hook=`, `hook_size=`; `save_history=False` then keeps only the final
+state). It lets a consumer of the history -- a line-of-sight integral, derived
+per-save quantities -- run inside the launch instead of storing the history.
+A hooked solve is a plain ensemble launch: no `jax.vmap`, no differentiation.
+`tests/test_save_hook.py` pins it against the history.
+
 Shared support modules:
 
 - **`_numba_common.py`** — host-side helpers shared by both kernels: initial

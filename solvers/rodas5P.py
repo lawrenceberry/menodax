@@ -14,6 +14,7 @@ from solvers._codegen import compile_device_source
 from solvers._jax_common import make_custom_vmap_solver, normalize_y0_params
 from solvers._jax_numba_custom_call import make_launch
 from solvers._numba_common import (
+    HOOK_OUT_ARGTYPE,
     SOLVER_ARGTYPES,
     as_cuda_device,
     build_error_weights,
@@ -153,6 +154,13 @@ class KernelOptions:
     tf_index: int = -1
     max_registers: int | None = None
     array_rhs: object = None
+    # A save hook ``hook(save_idx, y, t, p_row, acc)`` the kernel calls at every
+    # save time with the dense-output state, accumulating into the trajectory's
+    # ``hook_size``-wide output row; ``save_history=False`` then keeps only the
+    # final state instead of the whole history.
+    save_hook: object = None
+    hook_size: int = 0
+    save_history: bool = True
 
 
 @functools.cache
@@ -313,6 +321,18 @@ def _make_kernel(ode_fn, n_vars: int, n_params: int, options: KernelOptions):
     """
     spec, sparsity, lu_precision = options.spec, options.sparsity, options.lu_precision
     tf_index, array_rhs = options.tf_index, options.array_rhs
+    # Both compile-time constants: numba prunes the hook call and the history
+    # writes it does not need, so a solve without a hook compiles as before.
+    HAS_HOOK = options.save_hook is not None
+    SAVE_HISTORY = bool(options.save_history)
+    hook_size = max(1, int(options.hook_size))
+    if HAS_HOOK:
+        save_hook = as_cuda_device(options.save_hook)
+    else:
+
+        @cuda.jit(device=True)
+        def save_hook(save_idx, y, t, p_row, acc):
+            return
     e1 = EXPONENT * (options.icoeff + options.pcoeff + options.dcoeff)
     e2 = -EXPONENT * (options.pcoeff + 2.0 * options.dcoeff)
     e3 = EXPONENT * options.dcoeff
@@ -663,6 +683,7 @@ def _make_kernel(ode_fn, n_vars: int, n_params: int, options: KernelOptions):
         accepted_out,
         rejected_out,
         loop_out,
+        hook_out,
     ):
         i = cuda.blockIdx.x * tpb + cuda.threadIdx.x
         # Nothing in a step is collective any more, so a thread past the end of
@@ -691,11 +712,16 @@ def _make_kernel(ode_fn, n_vars: int, n_params: int, options: KernelOptions):
         # that is not there and doubles the thread's local-memory footprint,
         # which is what bounds occupancy once the matrix is off the shared path.
         k_stages = cuda.local.array((8, size), lu_local_dtype)
+        # The dense-output state a save hook is handed; a single dummy slot
+        # when there is no hook, so the default kernel carries no extra local
+        # memory.
+        y_save = cuda.local.array(size if HAS_HOOK else 1, np.float64)
 
         for j in range(size):
-            val = y0[i, j]
-            y[j] = val
-            hist[i, 0, j] = val
+            y[j] = y0[i, j]
+        if SAVE_HISTORY:
+            for j in range(size):
+                hist[i, 0, j] = y[j]
 
         t = times[0]
         save_idx = 1
@@ -713,6 +739,11 @@ def _make_kernel(ode_fn, n_vars: int, n_params: int, options: KernelOptions):
             tf_local = params[i, tf_index]
 
         p_row = params[i]
+
+        if HAS_HOOK:
+            for j in range(hook_size):
+                hook_out[i, j] = 0.0
+            save_hook(0, y, times[0], p_row, hook_out[i])
 
         # Purely this thread's loop: it steps until its own trajectory is done
         # and then falls out, with no reference to what the rest of the block is
@@ -929,9 +960,15 @@ def _make_kernel(ode_fn, n_vars: int, n_params: int, options: KernelOptions):
                         # Rosenbrock continuous extension between y_old and
                         # y_new. y[j] is still y_old here; it is advanced
                         # after this loop.
-                        hist[i, save_idx, j] = theta1 * y[j] + theta * (
+                        val = theta1 * y[j] + theta * (
                             y_new_j + theta1 * (h1 + theta * (h2 + theta * h3))
                         )
+                        if SAVE_HISTORY:
+                            hist[i, save_idx, j] = val
+                        if HAS_HOOK:
+                            y_save[j] = val
+                    if HAS_HOOK:
+                        save_hook(save_idx, y_save, times[save_idx], p_row, hook_out[i])
                     save_idx += 1
                 for j in range(size):
                     y[j] = u[j] + k_stages[7, j]
@@ -943,9 +980,16 @@ def _make_kernel(ode_fn, n_vars: int, n_params: int, options: KernelOptions):
 
         # Save times past this trajectory's own end time hold its final state.
         while save_idx < n_save:
-            for j in range(size):
-                hist[i, save_idx, j] = y[j]
+            if SAVE_HISTORY:
+                for j in range(size):
+                    hist[i, save_idx, j] = y[j]
+            if HAS_HOOK:
+                save_hook(save_idx, y, times[save_idx], p_row, hook_out[i])
             save_idx += 1
+        if not SAVE_HISTORY:
+            # Without the history the one slot holds the final state.
+            for j in range(size):
+                hist[i, 0, j] = y[j]
         accepted_out[i] = accepted
         rejected_out[i] = rejected
         loop_out[i] = n_steps
@@ -961,7 +1005,7 @@ def _make_jax_launch(
     blocks = (n + trajectories_per_block - 1) // trajectories_per_block
     return make_launch(
         kernel,
-        SOLVER_ARGTYPES,
+        SOLVER_ARGTYPES + (HOOK_OUT_ARGTYPE,),
         grid=blocks,
         block=(trajectories_per_block, 1, 1),
     )
@@ -991,6 +1035,9 @@ def solve(
     tf_index=None,
     max_registers=None,
     array_rhs=None,
+    save_hook=None,
+    hook_size: int = 0,
+    save_history: bool = True,
 ):
     """JAX-callable Rodas5 custom-kernel solve.
 
@@ -1101,6 +1148,18 @@ def solve(
     a warp; nothing on chip bounds it, since every per-trajectory buffer is
     thread-local. ``max_registers`` caps the
     kernel's per-thread register count, trading spills against occupancy.
+
+    ``save_hook`` is a device function ``hook(save_idx, y, t, p_row, acc)`` the
+    kernel calls at every save time -- the initial state, each dense-output
+    save, and the frozen saves past a trajectory's own end time -- with the
+    state at that time, so a consumer of the history can be evaluated inside
+    the launch instead of after it. ``acc`` is the trajectory's row of the
+    ``(n, hook_size)`` output, zeroed at the start and persistent across saves,
+    so the hook can accumulate (a line-of-sight integral, say) or store derived
+    quantities per save. With ``save_history=False`` the history output shrinks
+    to the final state, shape ``(n, 1, n_vars)``. A solve with a hook returns
+    ``(hist, hook_out)`` (plus the stats when asked) and supports neither
+    ``jax.vmap`` nor differentiation.
     """
     n_vars = jnp.shape(y0)[-1]
     # Normalised here, not in the kernel builder, because that is cached on its
@@ -1120,6 +1179,9 @@ def solve(
         tf_index=-1 if tf_index is None else int(tf_index),
         max_registers=max_registers,
         array_rhs=array_rhs,
+        save_hook=save_hook,
+        hook_size=int(hook_size),
+        save_history=bool(save_history),
     )
     settings = dict(
         rtol=rtol,
@@ -1129,6 +1191,15 @@ def solve(
         return_stats=return_stats,
         error_weights=error_weights,
     )
+
+    if save_hook is not None:
+        if hook_size <= 0:
+            raise ValueError("a save_hook needs a positive hook_size")
+        # The hook's accumulator is a second output the vmap and JVP rules do
+        # not know, so a hooked solve is the plain ensemble launch.
+        return _solve_impl(ode_fn, y0, t_span, params, options=options, **settings)
+    if not save_history:
+        raise ValueError("save_history=False needs a save_hook to consume the saves")
 
     # The JVP rule wraps the vmap-aware solvers rather than the other way
     # round: custom_vmap's own JVP path instantiates symbolic zeros, which is
@@ -1190,7 +1261,7 @@ def _solve_impl(
     launch = _make_jax_launch(ode_fn, n, n_vars, n_params, options)
     # No global scratch: the kernel keeps the state, the ten stage vectors and
     # df/dt in registers and thread-local memory.
-    hist, accepted, rejected, loop_steps = ensemble_ffi_call(
+    hist, accepted, rejected, loop_steps, hook_out = ensemble_ffi_call(
         launch,
         (y0_arr, times, params_arr, weights_arr),
         (),
@@ -1201,7 +1272,10 @@ def _solve_impl(
         rtol=rtol,
         atol=atol,
         max_steps=max_steps,
+        n_save_hist=n_save if options.save_history else 1,
+        hook_size=max(1, options.hook_size),
     )
-    if not return_stats:
-        return hist
-    return hist, solver_stats(accepted, rejected, loop_steps)
+    result = (hist,) if options.save_hook is None else (hist, hook_out)
+    if return_stats:
+        result += (solver_stats(accepted, rejected, loop_steps),)
+    return result[0] if len(result) == 1 else result

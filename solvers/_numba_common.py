@@ -39,6 +39,8 @@ SOLVER_ARGTYPES = (
     _I32_1D,  # loop steps
 )
 SCRATCH_ARGTYPE = _F64_2D
+HOOK_OUT_ARGTYPE = _F64_2D
+"""Per-trajectory rows a save hook accumulates into (``(n, hook_size)``)."""
 SOLVER_INPUT_KINDS = (
     ABI_ARRAY,
     ABI_ARRAY,
@@ -92,20 +94,32 @@ def ensemble_ffi_call(
     rtol,
     atol,
     max_steps,
+    n_save_hist: int | None = None,
+    hook_size: int | None = None,
 ):
-    """Launch a solver kernel from JAX and return its four solution outputs.
+    """Launch a solver kernel from JAX and return its solution outputs.
 
     ``arrays`` are the array inputs (y0, times, params, error weights) in kernel
     order and ``scratch_specs`` describes the kernel's scratch arrays, which XLA
     allocates as extra outputs. Returns ``(hist, accepted, rejected, loop)``.
+
+    ``n_save_hist`` is the history's time extent when it differs from the number
+    of save times (a kernel that keeps only the final state passes 1), and
+    ``hook_size`` the width of the save hook's per-trajectory accumulator rows,
+    which the kernel takes as one more output right after the counters; the
+    call then returns ``(hist, accepted, rejected, loop, hook_out)``.
     """
     int_spec = jax.ShapeDtypeStruct((n,), jnp.int32)
+    n_hist = n_save if n_save_hist is None else n_save_hist
     output_specs = (
-        jax.ShapeDtypeStruct((n, n_save, n_vars), jnp.float64),
+        jax.ShapeDtypeStruct((n, n_hist, n_vars), jnp.float64),
         int_spec,
         int_spec,
         int_spec,
-    ) + tuple(scratch_specs)
+    )
+    if hook_size is not None:
+        output_specs += (jax.ShapeDtypeStruct((n, hook_size), jnp.float64),)
+    output_specs += tuple(scratch_specs)
     result = ffi_abi_call(
         launch,
         arrays,
@@ -114,7 +128,7 @@ def ensemble_ffi_call(
         scalar_f64_values=(dt0, rtol, atol),
         scalar_i32_values=(max_steps,),
     )
-    return result[:4]
+    return result[:4] if hook_size is None else result[:5]
 
 
 def solver_stats(accepted, rejected, loop_steps):
