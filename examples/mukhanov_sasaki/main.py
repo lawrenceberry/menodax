@@ -356,10 +356,8 @@ def make_solver(backend):
     """Return a uniform ``solve(ode_fn, y0, s_span, params)`` for a backend.
 
     The mode equation is non-stiff and oscillatory, so the science uses the
-    explicit modax Tsit5 solver.  Two reference backends integrate the
+    explicit modax Tsit5 solver.  One reference backend integrates the
     identical complex mode equation for a like-for-like timing comparison:
-      * "scipy"   -- serial CPU integration with scipy.solve_ivp (RK45), the
-                     no-GPU baseline.
       * "diffrax" -- GPU integration with plain Diffrax Tsit5 (jax.vmap), the
                      explicit analogue of the Kvaerno5 baseline used for the
                      stiff examples (Kvaerno5 is an implicit method and is a
@@ -388,19 +386,6 @@ def make_solver(backend):
             atol=MODE_ATOL,
             first_step=1.0e-5,
             max_steps=MODE_MAX_STEPS,
-        )
-    if backend == "scipy":
-        from reference.solvers.python.scipy_solve_ivp import solve as scipy_solve
-
-        return lambda f, y0, ts, p: scipy_solve(
-            f,
-            y0,
-            ts,
-            p,
-            method="RK45",
-            rtol=MODE_RTOL,
-            atol=MODE_ATOL,
-            first_step=1.0e-5,
         )
     raise ValueError(f"unknown backend: {backend}")
 
@@ -541,8 +526,8 @@ def main():
     parser.add_argument(
         "--backends",
         nargs="+",
-        default=["modax", "diffrax", "scipy"],
-        choices=["modax", "diffrax", "scipy"],
+        default=["modax", "diffrax"],
+        choices=["modax", "diffrax"],
     )
     parser.add_argument("--n", type=int, default=4096, help="number of k-modes")
     parser.add_argument("--repeats", type=int, default=3)

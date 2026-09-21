@@ -1,7 +1,7 @@
 """Checks on the CUDA-device callbacks the examples hand to the numba solvers.
 
 Each example carries two forms of the same equations: a ``jnp`` one traced by
-the Diffrax/scipy reference backends, and a ``math``/tuple one that
+the Diffrax reference backend, and a ``math``/tuple one that
 ``numba_cuda_mlir`` compiles for the modax kernel solver.  Nothing forces the
 two to agree, so these tests pin it down:
 

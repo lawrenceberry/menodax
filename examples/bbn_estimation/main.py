@@ -230,10 +230,8 @@ def predict_abundances(params):
 # ---------------------------------------------------------------------------
 #
 # The science of the example uses the GPU-batched modax Rodas5P solver.  For a
-# like-for-like timing comparison we also expose two reference backends with the
+# like-for-like timing comparison we also expose one reference backend with the
 # identical four-species stiff network:
-#   * "scipy"   -- serial CPU integration with scipy.solve_ivp (LSODA), the
-#                  no-GPU baseline used by codes such as the original ECHO21.
 #   * "diffrax" -- GPU integration with plain Diffrax Kvaerno5 (jax.vmap).
 # The "chi^2 grid" use case of the docstring batches N independent (eta, N_eff)
 # universes into a single ensemble solve.
@@ -268,21 +266,6 @@ def make_solver(backend):
             atol=SOLVER_ATOL,
             first_step=SOLVER_FIRST_STEP,
             max_steps=8192,
-        )
-    if backend == "scipy":
-        from reference.solvers.python.scipy_solve_ivp import solve as scipy_solve
-
-        # LSODA with an automatic initial step is what serial codes such as
-        # ECHO21 use; an imposed first_step of 0.1 destabilises it here.
-        return lambda f, y0, ts, p: scipy_solve(
-            f,
-            y0,
-            ts,
-            p,
-            method="LSODA",
-            rtol=SOLVER_RTOL,
-            atol=SOLVER_ATOL,
-            first_step=None,
         )
     raise ValueError(f"unknown backend: {backend}")
 
@@ -532,8 +515,8 @@ def main():
     parser.add_argument(
         "--backends",
         nargs="+",
-        default=["modax", "diffrax", "scipy"],
-        choices=["modax", "diffrax", "scipy"],
+        default=["modax", "diffrax"],
+        choices=["modax", "diffrax"],
     )
     parser.add_argument("--n", type=int, default=10_000, help="ensemble size")
     parser.add_argument("--repeats", type=int, default=3)

@@ -271,11 +271,9 @@ def initial_state():
 def make_solver(backend):
     """Return a uniform ``solve(ode_fn, y0, u_span, params)`` for a backend.
 
-    The science uses the GPU-batched modax Rodas5P solver.  Two reference
-    backends integrate the identical stiff 3-component IGM history for a
+    The science uses the GPU-batched modax Rodas5P solver.  One reference
+    backend integrates the identical stiff 3-component IGM history for a
     like-for-like timing comparison:
-      * "scipy"   -- serial CPU integration with scipy.solve_ivp (LSODA), the
-                     no-GPU baseline used by codes such as ECHO21.
       * "diffrax" -- GPU integration with plain Diffrax Kvaerno5 (jax.vmap).
     """
     if backend == "modax":
@@ -308,19 +306,6 @@ def make_solver(backend):
             atol=SOLVER_ATOL,
             first_step=SOLVER_FIRST_STEP,
             max_steps=SOLVER_MAX_STEPS,
-        )
-    if backend == "scipy":
-        from reference.solvers.python.scipy_solve_ivp import solve as scipy_solve
-
-        return lambda f, y0, ts, p: scipy_solve(
-            f,
-            y0,
-            ts,
-            p,
-            method="LSODA",
-            rtol=SOLVER_RTOL,
-            atol=SOLVER_ATOL,
-            first_step=None,
         )
     raise ValueError(f"unknown backend: {backend}")
 
@@ -490,8 +475,8 @@ def main():
     parser.add_argument(
         "--backends",
         nargs="+",
-        default=["modax", "diffrax", "scipy"],
-        choices=["modax", "diffrax", "scipy"],
+        default=["modax", "diffrax"],
+        choices=["modax", "diffrax"],
     )
     parser.add_argument("--n", type=int, default=2000, help="ensemble size")
     parser.add_argument("--repeats", type=int, default=3)
