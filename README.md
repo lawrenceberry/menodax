@@ -517,7 +517,7 @@ to commit. Build it first — see [wheels/README.md](wheels/README.md).
 Worked end-to-end problems live in `examples/` (each with its own README):
 
 - `bbn_estimation/` — toy Big Bang Nucleosynthesis network with nested-sampling
-  parameter estimation and a modax/Diffrax solver benchmark;
+  parameter estimation and a modax/Diffrax/scipy solver benchmark;
 - `21cm_igm_evolution/` — toy global 21cm IGM thermal/ionisation history;
 - `mukhanov_sasaki/` — Mukhanov–Sasaki mode evolution.
 

@@ -197,8 +197,17 @@ BBN_ODE = build_rhs(
     weak_rate_np=WEAK_RATE_NP,
     deuterium_eq_ratio=DEUTERIUM_EQ_RATIO,
 )
-bbn_ode = BBN_ODE.jax  # dY/dx as a jnp array, for the Diffrax backend
-bbn_ode_device = BBN_ODE.device  # the same as a 4-tuple, for the modax kernel
+bbn_ode_device = BBN_ODE.device  # dY/dx as a 4-tuple, for the modax kernel
+
+
+def bbn_ode(y, x, params):
+    """dY/dx as a jnp array, for the Diffrax and scipy backends.
+
+    A module-level ``def`` rather than ``BBN_ODE.jax`` itself, because the
+    scipy backend sends its right-hand side to worker processes and pickle
+    carries a function by name -- which a closure has not got.
+    """
+    return BBN_ODE.jax(y, x, params)
 
 
 # ---------------------------------------------------------------------------
@@ -246,8 +255,10 @@ def predict_abundances(params):
 # ---------------------------------------------------------------------------
 #
 # The science of the example uses the GPU-batched modax Rodas5P solver.  For a
-# like-for-like timing comparison we also expose one reference backend with the
+# like-for-like timing comparison we also expose two reference backends with the
 # identical four-species stiff network:
+#   * "scipy"   -- serial CPU integration with scipy.solve_ivp (LSODA), the
+#                  no-GPU baseline used by codes such as the original ECHO21.
 #   * "diffrax" -- GPU integration with plain Diffrax Kvaerno5 (jax.vmap).
 # The "chi^2 grid" use case of the docstring batches N independent (eta, N_eff)
 # universes into a single ensemble solve.
@@ -282,6 +293,21 @@ def make_solver(backend):
             atol=SOLVER_ATOL,
             first_step=SOLVER_FIRST_STEP,
             max_steps=8192,
+        )
+    if backend == "scipy":
+        from reference.solvers.python.scipy_solve_ivp import solve as scipy_solve
+
+        # LSODA with an automatic initial step is what serial codes such as
+        # ECHO21 use; an imposed first_step of 0.1 destabilises it here.
+        return lambda f, y0, ts, p: scipy_solve(
+            f,
+            y0,
+            ts,
+            p,
+            method="LSODA",
+            rtol=SOLVER_RTOL,
+            atol=SOLVER_ATOL,
+            first_step=None,
         )
     raise ValueError(f"unknown backend: {backend}")
 
@@ -531,8 +557,8 @@ def main():
     parser.add_argument(
         "--backends",
         nargs="+",
-        default=["modax", "diffrax"],
-        choices=["modax", "diffrax"],
+        default=["modax", "diffrax", "scipy"],
+        choices=["modax", "diffrax", "scipy"],
     )
     parser.add_argument("--n", type=int, default=10_000, help="ensemble size")
     parser.add_argument("--repeats", type=int, default=3)

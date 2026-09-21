@@ -442,7 +442,7 @@ touching the code.
   one; `tests/test_enzyme_jacobian.py` checks the Enzyme-derived Jacobian
   against JAX's forward-mode AD of the same `ode_fn`.
   `_tuple_codegen.py` generates these callbacks for parameterised dimensions.
-- `reference/solvers/python/` — Diffrax and Julia (DiffEqGPU) baselines.
+- `reference/solvers/python/` — Diffrax, scipy and Julia (DiffEqGPU) baselines.
 - `scripts/` — scaling, dimensionality and divergence benchmarks. Each caches
   timings in `results.json` and writes a per-GPU CSV and plot.
 - `examples/` — worked problems, each with its own README.

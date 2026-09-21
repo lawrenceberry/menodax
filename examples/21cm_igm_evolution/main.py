@@ -261,8 +261,17 @@ IGM_ODE = build_rhs(
     sigmoid_from_logit=SIGMOID_FROM_LOGIT,
     source_history=SOURCE_HISTORY,
 )
-igm_ode = IGM_ODE.jax  # d/du as a jnp array, for the Diffrax backend
-igm_ode_device = IGM_ODE.device  # the same as a 3-tuple, for the modax kernel
+igm_ode_device = IGM_ODE.device  # d/du as a 3-tuple, for the modax kernel
+
+
+def igm_ode(y, u, params):
+    """d/du as a jnp array, for the Diffrax and scipy backends.
+
+    A module-level ``def`` rather than ``IGM_ODE.jax`` itself, because the
+    scipy backend sends its right-hand side to worker processes and pickle
+    carries a function by name -- which a closure has not got.
+    """
+    return IGM_ODE.jax(y, u, params)
 
 
 def sample_parameters(key, n_samples=N_SAMPLES):
@@ -284,9 +293,11 @@ def initial_state():
 def make_solver(backend):
     """Return a uniform ``solve(ode_fn, y0, u_span, params)`` for a backend.
 
-    The science uses the GPU-batched modax Rodas5P solver.  One reference
-    backend integrates the identical stiff 3-component IGM history for a
+    The science uses the GPU-batched modax Rodas5P solver.  Two reference
+    backends integrate the identical stiff 3-component IGM history for a
     like-for-like timing comparison:
+      * "scipy"   -- serial CPU integration with scipy.solve_ivp (LSODA), the
+                     no-GPU baseline used by codes such as ECHO21.
       * "diffrax" -- GPU integration with plain Diffrax Kvaerno5 (jax.vmap).
     """
     if backend == "modax":
@@ -319,6 +330,19 @@ def make_solver(backend):
             atol=SOLVER_ATOL,
             first_step=SOLVER_FIRST_STEP,
             max_steps=SOLVER_MAX_STEPS,
+        )
+    if backend == "scipy":
+        from reference.solvers.python.scipy_solve_ivp import solve as scipy_solve
+
+        return lambda f, y0, ts, p: scipy_solve(
+            f,
+            y0,
+            ts,
+            p,
+            method="LSODA",
+            rtol=SOLVER_RTOL,
+            atol=SOLVER_ATOL,
+            first_step=None,
         )
     raise ValueError(f"unknown backend: {backend}")
 
@@ -488,8 +512,8 @@ def main():
     parser.add_argument(
         "--backends",
         nargs="+",
-        default=["modax", "diffrax"],
-        choices=["modax", "diffrax"],
+        default=["modax", "diffrax", "scipy"],
+        choices=["modax", "diffrax", "scipy"],
     )
     parser.add_argument("--n", type=int, default=2000, help="ensemble size")
     parser.add_argument("--repeats", type=int, default=3)

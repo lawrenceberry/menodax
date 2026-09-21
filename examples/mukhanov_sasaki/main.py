@@ -337,12 +337,39 @@ def make_mode_ode(tables):
     )
 
 
+class ModeODE:
+    """Picklable traced mode RHS, for the scipy backend's worker processes.
+
+    ``make_mode_ode(...).jax`` is a closure, and stdlib pickle carries a
+    function by name; ``multiprocessing`` therefore cannot send it to a
+    worker.  This carries the background tables instead -- plain arrays --
+    and rebuilds the closure on the other side.
+    """
+
+    _TABLES = ("n", "epsilon", "log_a_h", "q")
+
+    def __init__(self, tables):
+        self.tables = {key: np.asarray(tables[key]) for key in self._TABLES}
+        self._rhs = make_mode_ode(self.tables).jax
+
+    def __call__(self, y, s, params):
+        return self._rhs(y, s, params)
+
+    def __getstate__(self):
+        return self.tables
+
+    def __setstate__(self, tables):
+        self.__init__(tables)
+
+
 def make_solver(backend):
     """Return a uniform ``solve(ode_fn, y0, s_span, params)`` for a backend.
 
     The mode equation is non-stiff and oscillatory, so the science uses the
-    explicit modax Tsit5 solver.  One reference backend integrates the
+    explicit modax Tsit5 solver.  Two reference backends integrate the
     identical complex mode equation for a like-for-like timing comparison:
+      * "scipy"   -- serial CPU integration with scipy.solve_ivp (RK45), the
+                     no-GPU baseline.
       * "diffrax" -- GPU integration with plain Diffrax Tsit5 (jax.vmap), the
                      explicit analogue of the Kvaerno5 baseline used for the
                      stiff examples (Kvaerno5 is an implicit method and is a
@@ -372,6 +399,19 @@ def make_solver(backend):
             first_step=1.0e-5,
             max_steps=MODE_MAX_STEPS,
         )
+    if backend == "scipy":
+        from reference.solvers.python.scipy_solve_ivp import solve as scipy_solve
+
+        return lambda f, y0, ts, p: scipy_solve(
+            f,
+            y0,
+            ts,
+            p,
+            method="RK45",
+            rtol=MODE_RTOL,
+            atol=MODE_ATOL,
+            first_step=1.0e-5,
+        )
     raise ValueError(f"unknown backend: {backend}")
 
 
@@ -381,8 +421,7 @@ def solve_modes(tables, backend="modax", n_modes=N_MODES):
     solve_fn = make_solver(backend)
     # The modax kernel solver compiles its RHS with numba-cuda; the reference
     # backend traces the jnp form built from the same body.
-    mode_ode = make_mode_ode(tables)
-    ode_fn = mode_ode.device if backend == "modax" else mode_ode.jax
+    ode_fn = make_mode_ode(tables).device if backend == "modax" else ModeODE(tables)
     solution = solve_fn(
         ode_fn,
         jnp.asarray(y0, dtype=jnp.float64),
@@ -476,7 +515,8 @@ def run_benchmark(n_modes, backends, repeats):
     physical_k, code_k, y0, params = prepare_mode_problem(tables, n_modes)
     # The modax kernel solver compiles its RHS with numba-cuda; the reference
     # backends trace the jnp form of the same equations.
-    mode_ode = make_mode_ode(tables)
+    mode_ode_device = make_mode_ode(tables).device
+    mode_ode = ModeODE(tables)
     y0 = jnp.asarray(y0, dtype=jnp.float64)
     params = jnp.asarray(params, dtype=jnp.float64)
     s_span = jnp.array([0.0, 1.0], dtype=jnp.float64)
@@ -485,7 +525,7 @@ def run_benchmark(n_modes, backends, repeats):
     print("-" * 56)
     for backend in backends:
         solve_fn = make_solver(backend)
-        f = mode_ode.device if backend == "modax" else mode_ode.jax
+        f = mode_ode_device if backend == "modax" else mode_ode
         run = lambda sf=solve_fn, fn=f: sf(fn, y0, s_span, params)
         try:
             secs, sol = time_solve(run, repeats)
@@ -509,8 +549,8 @@ def main():
     parser.add_argument(
         "--backends",
         nargs="+",
-        default=["modax", "diffrax"],
-        choices=["modax", "diffrax"],
+        default=["modax", "diffrax", "scipy"],
+        choices=["modax", "diffrax", "scipy"],
     )
     parser.add_argument("--n", type=int, default=4096, help="number of k-modes")
     parser.add_argument("--repeats", type=int, default=3)

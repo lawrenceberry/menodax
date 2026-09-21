@@ -1,11 +1,11 @@
 """Checks on the CUDA-device callbacks the examples hand to the numba solvers.
 
 Each example needs its equations in two forms: a ``jnp`` one traced by the
-Diffrax reference backend, and a ``math``/tuple one that ``numba_cuda_mlir``
-compiles for the modax kernel solver.  Both are built from one body through
-``examples/dual_backend.py``, which leaves the backend shim -- which ``math``
-name stands in for which ``jnp`` one, and the branchless selects -- as the
-part that can still be wrong.  These tests pin that down:
+Diffrax and scipy reference backends, and a ``math``/tuple one that
+``numba_cuda_mlir`` compiles for the modax kernel solver.  Both are built from
+one body through ``examples/dual_backend.py``, which leaves the backend shim
+-- which ``math`` name stands in for which ``jnp`` one, and the branchless
+selects -- as the part that can still be wrong.  These tests pin that down:
 
 * every device callback compiles to PTX -- ``cuda.compile_ptx`` runs the full
   numba typing and lowering pipeline without needing a GPU, so this catches the
