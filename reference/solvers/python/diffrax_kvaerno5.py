@@ -4,7 +4,8 @@ import functools
 
 import diffrax
 import jax
-import jax.numpy as jnp
+
+from reference.solvers.python._diffrax_common import solve_ensemble
 
 
 @functools.partial(jax.jit, static_argnames=("ode_fn", "max_steps"))
@@ -36,36 +37,13 @@ def solve(
     -------
     array, shape [N, n_save, n_vars]
     """
-    y0_arr = jnp.asarray(y0, dtype=jnp.float64)
-    params_arr = jnp.asarray(params)
-    if y0_arr.ndim == 1:
-        y0_arr = jnp.broadcast_to(y0_arr, (params_arr.shape[0], y0_arr.shape[0]))
-    save_times = jnp.asarray(t_span, dtype=jnp.float64)
-    dt0 = jnp.float64(
-        first_step
-        if first_step is not None
-        else (save_times[-1] - save_times[0]) * 1e-6
+    return solve_ensemble(
+        ode_fn,
+        y0,
+        t_span,
+        params,
+        diffrax.Kvaerno5(),
+        diffrax.PIDController(rtol=rtol, atol=atol),
+        first_step=first_step,
+        max_steps=max_steps,
     )
-    t0 = save_times[0]
-    tf = save_times[-1]
-
-    def _solve_one(y0_single, p):
-        # ode_fn may return a tuple (unified RHS format); diffrax's ODETerm
-        # requires the vector field to match y0's array pytree structure.
-        term = diffrax.ODETerm(lambda t, y, args: jnp.asarray(ode_fn(y, t, p)))
-        solver = diffrax.Kvaerno5()
-        controller = diffrax.PIDController(rtol=rtol, atol=atol)
-        sol = diffrax.diffeqsolve(
-            term,
-            solver,
-            t0=t0,
-            t1=tf,
-            dt0=dt0,
-            y0=y0_single,
-            stepsize_controller=controller,
-            max_steps=max_steps,
-            saveat=diffrax.SaveAt(ts=save_times),
-        )
-        return sol.ys
-
-    return jax.vmap(_solve_one)(y0_arr, params_arr)

@@ -18,17 +18,7 @@ This allows precise validation at arbitrary stiffness without a reference solver
 import jax.numpy as jnp
 import numpy as np
 
-from reference.systems.python._tuple_codegen import (
-    add,
-    const,
-    make_tuple_callback,
-    mul,
-    neg,
-    p,
-    square,
-    sub,
-    y,
-)
+from reference.systems.python._tuple_codegen import make_tuple_callback
 
 TIMES = jnp.array((0.0, 0.5, 1.0, 2.0), dtype=jnp.float64)
 
@@ -42,27 +32,17 @@ def make_system(n_pairs, epsilon_min):
     )
     y0 = jnp.array([1.0, 1.0] * n_pairs, dtype=jnp.float64)
 
-    ode_values = []
+    components = []
     for pair, eps in enumerate(np.asarray(epsilon)):
         base = 2 * pair
         inv_eps = 1.0 / float(eps)
-        y_base = y(base)
-        y_next = y(base + 1)
-        y_next_sq = square(y_next)
-        ode_values.extend(
-            [
-                mul(
-                    p(0),
-                    add(
-                        mul(neg(const(inv_eps + 2.0)), y_base),
-                        mul(const(inv_eps), y_next_sq),
-                    ),
-                ),
-                mul(p(0), sub(sub(y_base, y_next), y_next_sq)),
-            ]
-        )
+        y1, y2 = f"y[{base}]", f"y[{base + 1}]"
+        components += [
+            f"p[0] * (-{inv_eps + 2.0!r} * {y1} + {inv_eps!r} * ({y2} * {y2}))",
+            f"p[0] * (({y1} - {y2}) - {y2} * {y2})",
+        ]
 
-    ode_fn = make_tuple_callback("ode_fn", ode_values)
+    ode_fn = make_tuple_callback("ode_fn", components)
 
     return {
         "n_pairs": n_pairs,

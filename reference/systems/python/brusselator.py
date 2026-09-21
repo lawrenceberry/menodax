@@ -96,16 +96,7 @@ trajectory that exercises both halves of the IMEX split.
 import jax.numpy as jnp
 import numpy as np
 
-from reference.systems.python._tuple_codegen import (
-    add,
-    const,
-    make_tuple_callback,
-    mul,
-    p,
-    square,
-    sub,
-    y,
-)
+from reference.systems.python._tuple_codegen import make_tuple_callback
 
 N_GRID = 32
 N_VARS = 2 * N_GRID
@@ -149,35 +140,27 @@ def make_system(
     diff_coeff = alpha / (dx * dx)
     y0 = jnp.asarray(_equilibrium(n_grid, a, b), dtype=jnp.float64)
 
-    ode_values = []
+    components = []
     for g in range(n_grid):
         left = (g - 1) % n_grid
         right = (g + 1) % n_grid
         u = 2 * g
         v = u + 1
-        u_left = 2 * left
-        u_right = 2 * right
-        v_left = u_left + 1
-        v_right = u_right + 1
-        u_y = y(u)
-        v_y = y(v)
-        u2v = mul(square(u_y), v_y)
-        exp_u = sub(
-            add(mul(p(0), const(a)), u2v),
-            mul(add(mul(p(0), const(b)), const(1.0)), u_y),
+        u2v = f"y[{u}] * y[{u}] * y[{v}]"
+        reaction_u = f"p[0] * {a!r} + {u2v} - (p[0] * {b!r} + 1.0) * y[{u}]"
+        reaction_v = f"p[0] * {b!r} * y[{u}] - {u2v}"
+        diffusion_u = (
+            f"{diff_coeff!r} * (y[{2 * left}] + -2.0 * y[{u}] + y[{2 * right}])"
         )
-        exp_v = sub(mul(p(0), const(b), u_y), u2v)
-        imp_u = mul(
-            const(diff_coeff),
-            add(y(u_left), mul(const(-2.0), u_y), y(u_right)),
+        diffusion_v = (
+            f"{diff_coeff!r} * (y[{2 * left + 1}] + -2.0 * y[{v}] + y[{2 * right + 1}])"
         )
-        imp_v = mul(
-            const(diff_coeff),
-            add(y(v_left), mul(const(-2.0), v_y), y(v_right)),
-        )
-        ode_values.extend([add(exp_u, imp_u), add(exp_v, imp_v)])
+        components += [
+            f"{reaction_u} + {diffusion_u}",
+            f"{reaction_v} + {diffusion_v}",
+        ]
 
-    ode_fn = make_tuple_callback("ode_fn", ode_values)
+    ode_fn = make_tuple_callback("ode_fn", components)
 
     return ode_fn, y0
 

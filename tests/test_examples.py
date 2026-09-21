@@ -17,17 +17,22 @@ selects -- as the part that can still be wrong.  These tests pin that down:
   plain Python;
 * for the implicit examples, the Jacobian and time derivative Enzyme takes off
   the device RHS match ``jax.jacobian`` of the ``jnp`` one.  That needs a GPU,
-  unlike the rest of this module, so those two tests skip without one;
+  unlike the rest of this module, so that test skips without one;
+* the ``jnp`` form pickles and comes back computing the same values, since the
+  scipy reference backend sends it to worker processes;
 * the Mukhanov-Sasaki background tables, which numba lowers into CUDA constant
   memory, stay inside the 64 KiB budget.
 """
 
 from __future__ import annotations
 
+import functools
 import importlib.util
+import pickle
 import re
 import sys
 from pathlib import Path
+from typing import Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -48,8 +53,13 @@ _DEVICE_SIG = (types.float64[:], types.float64, types.float64[:])
 _CONST_LIMIT_BYTES = 64 * 1024
 
 
+@functools.cache
 def _load_example(name: str):
-    """Import an ``examples/<name>/main.py`` that is not on the import path."""
+    """Import an ``examples/<name>/main.py`` that is not on the import path.
+
+    Registered in ``sys.modules`` so that pickle, which carries the examples'
+    ``_make_*`` factories by module and name, can find them again.
+    """
     path = _EXAMPLES / name / "main.py"
     spec = importlib.util.spec_from_file_location(f"_example_{name}", path)
     module = importlib.util.module_from_spec(spec)
@@ -90,17 +100,22 @@ def _max_scaled_error(actual, desired):
     return float(np.max(np.abs(actual - desired)) / (np.max(np.abs(desired)) + 1e-300))
 
 
+def _pickle_round_trip(rhs, samples):
+    """``rhs.jax`` must survive pickling and still agree with the original."""
+    rebuilt = pickle.loads(pickle.dumps(rhs.jax))
+    for y, t, p in samples:
+        expected = np.asarray(rhs.jax(jnp.asarray(y), t, jnp.asarray(p)))
+        got = np.asarray(rebuilt(jnp.asarray(y), t, jnp.asarray(p)))
+        np.testing.assert_array_equal(got, expected)
+
+
 # ---------------------------------------------------------------------------
-# BBN: rodas5P, four-species stiff network
+# The implicit examples: rodas5P over a stiff network, Enzyme-derived Jacobian
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def bbn():
-    return _load_example("bbn_estimation")
-
-
-def _bbn_samples(n=120):
+def _bbn_samples(bbn, n=120):
+    """BBN: four-species stiff network, ``(y, x, params)`` off the g_star step."""
     rng = np.random.default_rng(0)
     out = []
     while len(out) < n:
@@ -121,45 +136,8 @@ def _bbn_samples(n=120):
     return out
 
 
-def test_bbn_device_callbacks_compile(bbn):
-    _compile_device(bbn.bbn_ode_device)
-
-
-def test_bbn_device_rhs_matches_jnp(bbn):
-    for y, x, p in _bbn_samples():
-        ref = np.asarray(bbn.bbn_ode(jnp.asarray(y), x, jnp.asarray(p)))
-        assert _max_rel_error(bbn.BBN_ODE.host(y, x, p), ref) < 1e-12
-
-
-@requires_gpu
-def test_bbn_enzyme_derivatives_match_autodiff(bbn):
-    from tests.test_enzyme_jacobian import evaluate_derivatives
-
-    for y, x, p in _bbn_samples(n=12):
-        jacobian, time_jacobian = evaluate_derivatives(
-            bbn.bbn_ode_device, y[None, :], x, p[None, :]
-        )
-        ref_jac = jax.jacobian(lambda yy, x=x, p=p: bbn.bbn_ode(yy, x, jnp.asarray(p)))(
-            jnp.asarray(y)
-        )
-        ref_dt = jax.jacobian(
-            lambda xx, y=y, p=p: bbn.bbn_ode(jnp.asarray(y), xx, jnp.asarray(p))
-        )(x)
-        assert _max_rel_error(jacobian[0], ref_jac) < 1e-10
-        assert _max_rel_error(time_jacobian[0], ref_dt) < 1e-10
-
-
-# ---------------------------------------------------------------------------
-# 21-cm IGM: rodas5P, three-component thermal/ionization history
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="module")
-def igm():
-    return _load_example("21cm_igm_evolution")
-
-
 def _igm_samples(igm, n=120):
+    """21-cm IGM: three-component thermal/ionization history, ``(y, u, params)``."""
     rng = np.random.default_rng(0)
     u_max = float(igm.u_from_redshift(igm.Z_FINAL))
     out = []
@@ -182,35 +160,69 @@ def _igm_samples(igm, n=120):
     return out
 
 
-def test_igm_device_callbacks_compile(igm):
-    _compile_device(igm.igm_ode_device)
+class _Implicit(NamedTuple):
+    """One implicit example: where its RHS lives, sample points, tolerances."""
+
+    example: str
+    rhs: str  # the module attribute holding the ``Forms``
+    samples: Callable  # ``(module, n) -> [(y, t, p), ...]``
+    jacobian_tol: float
+    time_derivative_tol: float
 
 
-def test_igm_device_rhs_matches_jnp(igm):
-    for y, u, p in _igm_samples(igm):
-        ref = np.asarray(igm.igm_ode(jnp.asarray(y), u, jnp.asarray(p)))
-        assert _max_rel_error(igm.IGM_ODE.host(y, u, p), ref) < 1e-12
+_IMPLICIT = [
+    _Implicit("bbn_estimation", "BBN_ODE", _bbn_samples, 1e-10, 1e-10),
+    # The dTdt/dT_k entry is a near-exact cancellation of two terms that
+    # agree to ~9 digits, so its relative error floor is well above 1e-12
+    # while the absolute error stays at the double-precision limit.
+    _Implicit("21cm_igm_evolution", "IGM_ODE", _igm_samples, 1e-5, 1e-6),
+]
+implicit_case = pytest.mark.parametrize("case", _IMPLICIT, ids=lambda c: c.example)
+
+
+def _implicit(case):
+    module = _load_example(case.example)
+    return module, getattr(module, case.rhs)
+
+
+@implicit_case
+def test_device_callbacks_compile(case):
+    _, rhs = _implicit(case)
+    _compile_device(rhs.device)
+
+
+@implicit_case
+def test_device_rhs_matches_jnp(case):
+    module, rhs = _implicit(case)
+    for y, t, p in case.samples(module):
+        ref = np.asarray(rhs.jax(jnp.asarray(y), t, jnp.asarray(p)))
+        assert _max_rel_error(rhs.host(y, t, p), ref) < 1e-12
+
+
+@implicit_case
+def test_traced_rhs_pickles(case):
+    module, rhs = _implicit(case)
+    _pickle_round_trip(rhs, case.samples(module, n=4))
 
 
 @requires_gpu
-def test_igm_enzyme_derivatives_match_autodiff(igm):
+@implicit_case
+def test_enzyme_derivatives_match_autodiff(case):
     from tests.test_enzyme_jacobian import evaluate_derivatives
 
-    for y, u, p in _igm_samples(igm, n=12):
+    module, rhs = _implicit(case)
+    for y, t, p in case.samples(module, n=12):
         jacobian, time_jacobian = evaluate_derivatives(
-            igm.igm_ode_device, y[None, :], u, p[None, :]
+            rhs.device, y[None, :], t, p[None, :]
         )
-        ref_jac = jax.jacobian(lambda yy, u=u, p=p: igm.igm_ode(yy, u, jnp.asarray(p)))(
+        ref_jac = jax.jacobian(lambda yy, t=t, p=p: rhs.jax(yy, t, jnp.asarray(p)))(
             jnp.asarray(y)
         )
         ref_dt = jax.jacobian(
-            lambda uu, y=y, p=p: igm.igm_ode(jnp.asarray(y), uu, jnp.asarray(p))
-        )(u)
-        # The dTdt/dT_k entry is a near-exact cancellation of two terms that
-        # agree to ~9 digits, so its relative error floor is well above 1e-12
-        # while the absolute error stays at the double-precision limit.
-        assert _max_rel_error(jacobian[0], ref_jac) < 1e-5
-        assert _max_rel_error(time_jacobian[0], ref_dt) < 1e-6
+            lambda tt, y=y, p=p: rhs.jax(jnp.asarray(y), tt, jnp.asarray(p))
+        )(t)
+        assert _max_rel_error(jacobian[0], ref_jac) < case.jacobian_tol
+        assert _max_rel_error(time_jacobian[0], ref_dt) < case.time_derivative_tol
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +249,7 @@ def mukhanov_tables(mukhanov):
     params = np.array([mukhanov.MASS])
     sol = solve_ivp(
         lambda t, y: np.asarray(
-            mukhanov.background_ode(jnp.asarray(y), t, jnp.asarray(params))
+            mukhanov.BACKGROUND_ODE.jax(jnp.asarray(y), t, jnp.asarray(params))
         ),
         (times[0], times[-1]),
         np.array([mukhanov.PHI_INITIAL, mukhanov.D_PHI_DN_INITIAL]),
@@ -253,11 +265,11 @@ def mukhanov_tables(mukhanov):
 def test_mukhanov_background_device_rhs_matches_jnp(mukhanov):
     rng = np.random.default_rng(0)
     params = np.array([mukhanov.MASS])
-    _compile_device(mukhanov.background_ode_device)
+    _compile_device(mukhanov.BACKGROUND_ODE.device)
     for _ in range(200):
         y = np.array([rng.uniform(1.0, 18.0), rng.uniform(-1.0, 0.0)])
         ref = np.asarray(
-            mukhanov.background_ode(jnp.asarray(y), 0.0, jnp.asarray(params))
+            mukhanov.BACKGROUND_ODE.jax(jnp.asarray(y), 0.0, jnp.asarray(params))
         )
         got = mukhanov.BACKGROUND_ODE.host(y, 0.0, params)
         assert _max_rel_error(got, ref) < 1e-12
@@ -288,6 +300,15 @@ def test_mukhanov_mode_device_rhs_matches_jnp(mukhanov, mukhanov_tables):
             # how their maths functions round, so compare against the vector
             # scale rather than per component.
             assert _max_scaled_error(got, ref) < 1e-12
+
+
+def test_mukhanov_mode_rhs_pickles(mukhanov, mukhanov_tables):
+    """The table kwarg travels with the recipe, so a worker can rebuild it."""
+    mode_ode = mukhanov.make_mode_ode(mukhanov_tables)
+    _, _, y0, params = mukhanov.prepare_mode_problem(mukhanov_tables)
+    _pickle_round_trip(
+        mode_ode, [(y0[i], s, params[i]) for i, s in ((0, 0.3), (5, 0.9))]
+    )
 
 
 def test_mukhanov_mode_device_rhs_clamps_outside_the_table(mukhanov, mukhanov_tables):

@@ -17,11 +17,86 @@ parent's GPU state.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import multiprocessing as mp
 import os
 
 import numpy as np
 from scipy.integrate import solve_ivp
+
+# Environment a CPU-only JAX process wants: the platform pin, and one BLAS /
+# OpenMP thread per process so ``n_workers`` processes do not oversubscribe.
+_CPU_PLATFORM_ENV = ("JAX_PLATFORMS", "cpu")
+_SINGLE_THREAD_ENV = (
+    ("OPENBLAS_NUM_THREADS", "1"),
+    ("MKL_NUM_THREADS", "1"),
+    ("OMP_NUM_THREADS", "1"),
+)
+
+
+def _set_cpu_env_defaults() -> None:
+    """Pin JAX to the CPU and BLAS to one thread unless already configured."""
+    for key, value in (_CPU_PLATFORM_ENV, *_SINGLE_THREAD_ENV):
+        os.environ.setdefault(key, value)
+
+
+@contextlib.contextmanager
+def _cpu_env_for_spawn():
+    """Temporarily force the CPU environment while spawning worker processes.
+
+    Children inherit the environment at spawn time; if the parent has GPU JAX,
+    the child must be told to use CPU before any ``import jax`` runs (which
+    happens during unpickling of the user's example module).  The platform pin
+    is forced -- a parent pinned to ``gpu`` must not leak that -- while the
+    thread counts only fill in defaults.  The parent's own environment is
+    restored on exit.
+    """
+    keys = [_CPU_PLATFORM_ENV[0], *(key for key, _ in _SINGLE_THREAD_ENV)]
+    snapshot = {key: os.environ.get(key) for key in keys}
+    os.environ[_CPU_PLATFORM_ENV[0]] = _CPU_PLATFORM_ENV[1]
+    _set_cpu_env_defaults()
+    try:
+        yield
+    finally:
+        for key, value in snapshot.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _solve_trajectory(
+    rhs, t0, tf, save_times, method, rtol, atol, first_step, y0_i, p_i
+):
+    """Integrate one trajectory and return it as ``[n_save, n_vars]``.
+
+    ``rhs`` is a JIT-compiled ``(y, t, p) -> dy/dt`` on the CPU backend.  Rows
+    the integrator did not reach (an early failure) are left as NaN so the
+    caller can see where a trajectory stopped rather than reading stale data.
+    """
+    import jax.numpy as jnp  # noqa: PLC0415  (jax is imported lazily, see module doc)
+
+    n_vars = y0_i.shape[0]
+
+    def fun(t, y):
+        return np.asarray(rhs(jnp.asarray(y), t, p_i), dtype=np.float64)
+
+    sol = solve_ivp(
+        fun,
+        (t0, tf),
+        y0_i,
+        method=method,
+        t_eval=save_times,
+        rtol=rtol,
+        atol=atol,
+        first_step=first_step,
+    )
+    out = np.full((save_times.shape[0], n_vars), np.nan, dtype=np.float64)
+    ys = np.asarray(sol.y, dtype=np.float64)
+    if ys.ndim == 2 and ys.shape[0] == n_vars:
+        ys = ys.T
+        out[: ys.shape[0]] = ys
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -40,10 +115,7 @@ def _worker_init(rhs) -> None:
     this by exposing their right-hand sides as module-level functions or
     callable class instances.
     """
-    os.environ.setdefault("JAX_PLATFORMS", "cpu")
-    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-    os.environ.setdefault("MKL_NUM_THREADS", "1")
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    _set_cpu_env_defaults()
     import jax  # noqa: PLC0415  (deferred so the parent's GPU JAX is not used)
 
     global _WORKER_RHS
@@ -52,30 +124,7 @@ def _worker_init(rhs) -> None:
 
 def _worker_solve_one(args):
     """Solve a single trajectory using the worker's pre-JIT'd RHS."""
-    import jax.numpy as jnp  # noqa: PLC0415
-
-    (t0, tf, save_times, method, rtol, atol, first_step, y0_i, p_i, n_vars) = args
-    rhs = _WORKER_RHS
-
-    def fun(t, y, p=p_i):
-        return np.asarray(rhs(jnp.asarray(y), t, p), dtype=np.float64)
-
-    sol = solve_ivp(
-        fun,
-        (t0, tf),
-        y0_i,
-        method=method,
-        t_eval=save_times,
-        rtol=rtol,
-        atol=atol,
-        first_step=first_step,
-    )
-    out = np.full((save_times.shape[0], n_vars), np.nan, dtype=np.float64)
-    ys = np.asarray(sol.y, dtype=np.float64)
-    if ys.ndim == 2 and ys.shape[0] == n_vars:
-        ys = ys.T
-        out[: ys.shape[0]] = ys
-    return out
+    return _solve_trajectory(_WORKER_RHS, *args)
 
 
 # ---------------------------------------------------------------------------
@@ -100,30 +149,11 @@ atexit.register(_close_pools)
 def _get_pool(ode_fn, n_workers: int):
     key = (id(ode_fn), n_workers)
     if key not in _POOL_CACHE:
-        # Children inherit env at spawn time; if the parent has GPU JAX, the
-        # child must be told to use CPU before any ``import jax`` runs
-        # (which happens during unpickling of the user's example module).
-        snapshot = {k: os.environ.get(k) for k in (
-            "JAX_PLATFORMS",
-            "OPENBLAS_NUM_THREADS",
-            "MKL_NUM_THREADS",
-            "OMP_NUM_THREADS",
-        )}
-        os.environ["JAX_PLATFORMS"] = "cpu"
-        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-        os.environ.setdefault("MKL_NUM_THREADS", "1")
-        os.environ.setdefault("OMP_NUM_THREADS", "1")
-        try:
+        with _cpu_env_for_spawn():
             ctx = mp.get_context("spawn")
             _POOL_CACHE[key] = ctx.Pool(
                 n_workers, initializer=_worker_init, initargs=(ode_fn,)
             )
-        finally:
-            for k, v in snapshot.items():
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
     return _POOL_CACHE[key]
 
 
@@ -176,7 +206,6 @@ def solve(
         y0_arr = np.broadcast_to(y0_arr, (n, y0_arr.shape[0]))
     save_times = np.asarray(t_span, dtype=np.float64)
     t0, tf = float(save_times[0]), float(save_times[-1])
-    n_vars = y0_arr.shape[1]
 
     if n_processes is None:
         n_workers = os.cpu_count() or 1
@@ -187,30 +216,22 @@ def solve(
     if n_workers <= 1:
         # Serial in-process path: JIT the RHS once on the CPU backend.
         import jax  # noqa: PLC0415
-        import jax.numpy as jnp  # noqa: PLC0415
 
         cpu_rhs = jax.jit(lambda y, t, p: ode_fn(y, t, p), backend="cpu")
-        out = np.full((n, save_times.shape[0], n_vars), np.nan, dtype=np.float64)
+        out = np.empty((n, save_times.shape[0], y0_arr.shape[1]), dtype=np.float64)
         for i in range(n):
-            p_i = params_arr[i]
-
-            def fun(t, y, p=p_i):
-                return np.asarray(cpu_rhs(jnp.asarray(y), t, p), dtype=np.float64)
-
-            sol = solve_ivp(
-                fun,
-                (t0, tf),
+            out[i] = _solve_trajectory(
+                cpu_rhs,
+                t0,
+                tf,
+                save_times,
+                method,
+                rtol,
+                atol,
+                first_step,
                 y0_arr[i],
-                method=method,
-                t_eval=save_times,
-                rtol=rtol,
-                atol=atol,
-                first_step=first_step,
+                params_arr[i],
             )
-            ys = np.asarray(sol.y, dtype=np.float64)
-            if ys.ndim == 2 and ys.shape[0] == n_vars:
-                ys = ys.T
-                out[i, : ys.shape[0]] = ys
         return out
 
     # Parallel multi-process path.
@@ -226,7 +247,6 @@ def solve(
             first_step,
             np.asarray(y0_arr[i]),
             np.asarray(params_arr[i]),
-            n_vars,
         )
         for i in range(n)
     ]

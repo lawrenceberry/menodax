@@ -5,7 +5,6 @@ from __future__ import annotations
 import functools
 import gc
 import math
-from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
@@ -17,18 +16,11 @@ from solvers._jax_numba_custom_call import make_launch
 from solvers._numba_common import (
     SCRATCH_ARGTYPE,
     SOLVER_ARGTYPES,
-    PreparedNumbaSolve,
     build_error_weights,
-    copy_workspace_inputs,
     ensemble_ffi_call,
-    get_workspace,
     initial_step,
     make_cuda_transposed_vector_writer,
-    run_kernel,
     solver_stats,
-)
-from solvers._numba_common import (
-    normalize_inputs as _normalize_inputs,
 )
 from solvers._sensitivity import (
     SensitivitySpec,
@@ -100,8 +92,6 @@ FACTOR_MAX = 10.0
 # the kernel are expressed relative to this.
 EXPONENT = -1.0 / 5.0
 
-_WORKSPACE_CACHE: dict[tuple[int, int, int, int], object] = {}
-
 # Hybrid backend. The shared-memory kernel keeps all stage vectors in on-chip
 # shared memory (one thread per trajectory, BLOCK = _SHARED_BLOCK). It wins in
 # the latency-bound regime -- small ensembles and/or low dimension, where the
@@ -137,25 +127,18 @@ def _use_shared_backend(n: int, n_vars: int, backend: str) -> bool:
 
 
 def clear_caches() -> None:
-    """Drop the cached device workspaces and compiled kernels.
+    """Drop the compiled kernels.
 
     Useful when sweeping problem sizes in a single process: each unique
-    ``n_vars`` allocates a fresh device workspace and compiles a separate
-    kernel, and neither is released by GC because they're held by the
-    module-level caches.
+    ``n_vars`` compiles a separate kernel, and nothing releases it because the
+    module-level caches hold it.
     """
-    _WORKSPACE_CACHE.clear()
     _make_body.cache_clear()
     _make_kernel.cache_clear()
     _make_shared_kernel.cache_clear()
     _make_jax_launch.cache_clear()
     clear_sensitivity_caches()
     gc.collect()
-
-
-@dataclass(frozen=True)
-class PreparedSolve(PreparedNumbaSolve):
-    uses_shared: bool = False
 
 
 @functools.cache
@@ -559,71 +542,6 @@ def _make_shared_kernel(
         )
 
     return kernel
-
-
-def prepare_solve(
-    ode_fn,
-    y0,
-    t_span,
-    params,
-    *,
-    rtol=1e-8,
-    atol=1e-10,
-    first_step=None,
-    max_steps=100000,
-    error_weights=None,
-    pcoeff=0.0,
-    icoeff=1.0,
-    dcoeff=0.0,
-    backend="auto",
-):
-    y0_arr, times, params_arr, dt0 = _normalize_inputs(y0, t_span, params, first_step)
-    n, n_vars = y0_arr.shape
-    n_save = times.shape[0]
-    n_params = params_arr.shape[1]
-    weights_arr = build_error_weights(error_weights, n, n_vars)
-
-    workspace = get_workspace(
-        _WORKSPACE_CACHE, n, n_vars, n_save, n_params, transposed=True, n_work=9
-    )
-    # State/weights live transposed (n_vars, n) on the device; params keep the
-    # (n, n_params) row layout consumed by the callback.
-    copy_workspace_inputs(
-        workspace,
-        np.ascontiguousarray(y0_arr.T),
-        times,
-        params_arr,
-        np.ascontiguousarray(weights_arr.T),
-    )
-
-    uses_shared = _use_shared_backend(n, n_vars, backend)
-    if uses_shared:
-        kernel = _make_shared_kernel(ode_fn, n_vars, pcoeff, icoeff, dcoeff)
-        threads = _SHARED_BLOCK
-    else:
-        kernel = _make_kernel(ode_fn, n_vars, pcoeff, icoeff, dcoeff)
-        threads = _GLOBAL_BLOCK
-    blocks = (n + threads - 1) // threads
-    return PreparedSolve(
-        kernel=kernel,
-        workspace=workspace,
-        dt0=np.float64(dt0),
-        rtol=np.float64(rtol),
-        atol=np.float64(atol),
-        max_steps=np.int32(max_steps),
-        blocks=blocks,
-        threads=threads,
-        uses_shared=uses_shared,
-    )
-
-
-def run_prepared(prepared: PreparedSolve, *, return_stats=False, copy_solution=True):
-    # The shared-memory kernel allocates its stage workspace in shared memory and
-    # takes no scratch arrays; the global kernel takes the nine work buffers.
-    scratch = () if prepared.uses_shared else prepared.workspace.work
-    return run_kernel(
-        prepared, scratch, return_stats=return_stats, copy_solution=copy_solution
-    )
 
 
 @functools.cache

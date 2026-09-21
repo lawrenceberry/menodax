@@ -1,48 +1,21 @@
-"""Inverse Parameter Estimation: Big Bang Nucleosynthesis (BBN) Reaction Networks.
+"""Bayesian parameter estimation from primordial light-element abundances.
 
-If you want a rigorous test of a solver's ability to handle stiffness across a
-massive batch, BBN is an excellent benchmark.
-
-The Physics: During the first few minutes of the universe, the temperature and
-density dropped rapidly as the universe expanded. The production of light
-elements (Deuterium, Helium-3, Helium-4, Lithium-7) is governed by a network
-of nuclear reaction rates. This is modeled as a system of coupled, highly stiff
-ODEs tracking the mass fractions of these isotopes as a function of time (or
-temperature).
-
-The Inverse Problem: We have highly precise modern observations of the
-primordial abundances of these elements. The inverse problem is to find the
-exact cosmological parameters—specifically the baryon-to-photon ratio (eta) and
-the effective number of neutrino species (N_eff)—that, when plugged into the
-ODEs, produce a final state that matches those observations.
-
-Why it's a Massively Batched, Uncoupled Problem:
-To fit these parameters, you typically use an optimization algorithm (like
-L-BFGS) or a Bayesian inference method (like Hamiltonian Monte Carlo).
-If you are mapping the parameter space via a grid search to visualize the chi^2
-surface, you might evaluate a 1000 x 1000 grid of (eta, N_eff).
-This means you have 1,000,000 distinct ODE systems to integrate from
-t=10^-2 seconds to t=10^4 seconds.
-Each integration represents an entirely independent universe with slightly
-different initial conditions or expansion rates. There is zero cross-talk
-between the batches, allowing you to parallelize the solver massively across
-GPU threads to calculate the loss landscape in seconds.
-
-This example integrates a 4-species BBN network (n, p, D, 4He) with x=Q/T as
-the independent variable, then fits cosmological parameters (log10(eta_10),
-N_eff) to observed primordial abundances using nested sampling from
-handley-lab/blackjax.
+A four-species Big Bang Nucleosynthesis network (n, p, D, 4He) is integrated
+with the Rodas5P kernel solver, with x = Q/T as the independent variable, and
+the baryon-to-photon ratio log10(eta_10) and N_eff are fitted to the observed
+abundances by nested sampling (handley-lab/blackjax). Every likelihood
+evaluation is an independent stiff universe, so the sampler's population is
+one batched ensemble solve. The physics, the statistical model and the
+benchmark are laid out in README.md next to this file.
 
 Usage:
-    uv run python examples/bbn_estimation/main.py
+    uv run python examples/bbn_estimation/main.py [--benchmark]
 """
 
 from __future__ import annotations
 
-import argparse
 import math
 import sys
-import time
 from pathlib import Path
 
 import jax
@@ -52,6 +25,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from examples._common import Backends, parse_args, run_benchmark
 from examples.dual_backend import build_fn, build_rhs
 from solvers.rodas5P import solve as rodas5P_solve
 
@@ -145,12 +119,6 @@ WEAK_RATE_NP = build_fn(_make_weak_rate_np)
 HUBBLE = build_fn(_make_hubble, g_star=G_STAR)
 DEUTERIUM_EQ_RATIO = build_fn(_make_deuterium_eq_ratio, n_photon=N_PHOTON)
 
-g_star = G_STAR.jax
-hubble = HUBBLE.jax
-n_photon = N_PHOTON.jax
-weak_rate_np = WEAK_RATE_NP.jax
-deuterium_eq_ratio = DEUTERIUM_EQ_RATIO.jax
-
 
 # ---------------------------------------------------------------------------
 # ODE right-hand side
@@ -190,6 +158,8 @@ def _make_bbn_ode(*, exp, hubble, n_photon, weak_rate_np, deuterium_eq_ratio):
     return bbn_ode
 
 
+# dY/dx: ``.device`` is the 4-tuple for the modax kernel, ``.jax`` the array
+# for the Diffrax and scipy backends.
 BBN_ODE = build_rhs(
     _make_bbn_ode,
     hubble=HUBBLE,
@@ -197,17 +167,6 @@ BBN_ODE = build_rhs(
     weak_rate_np=WEAK_RATE_NP,
     deuterium_eq_ratio=DEUTERIUM_EQ_RATIO,
 )
-bbn_ode_device = BBN_ODE.device  # dY/dx as a 4-tuple, for the modax kernel
-
-
-def bbn_ode(y, x, params):
-    """dY/dx as a jnp array, for the Diffrax and scipy backends.
-
-    A module-level ``def`` rather than ``BBN_ODE.jax`` itself, because the
-    scipy backend sends its right-hand side to worker processes and pickle
-    carries a function by name -- which a closure has not got.
-    """
-    return BBN_ODE.jax(y, x, params)
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +181,34 @@ SOLVER_ATOL = 1e-7
 SOLVER_FIRST_STEP = 0.1
 SOLVER_MAX_STEPS = 256
 
+# The science uses the GPU-batched modax Rodas5P solver. For a like-for-like
+# timing, ``--benchmark`` also runs the identical four-species stiff network
+# on Diffrax Kvaerno5 (GPU, jax.vmap) and on serial scipy.solve_ivp LSODA, the
+# no-GPU baseline used by codes such as the original ECHO21. LSODA runs with an
+# automatic initial step, as those serial codes do; an imposed first_step of
+# 0.1 destabilises it here.
+MODAX_KWARGS = dict(
+    lu_precision="fp32",
+    rtol=SOLVER_RTOL,
+    atol=SOLVER_ATOL,
+    first_step=SOLVER_FIRST_STEP,
+    max_steps=SOLVER_MAX_STEPS,
+)
+BACKENDS = Backends(
+    modax_solve=rodas5P_solve,
+    modax_kwargs=MODAX_KWARGS,
+    diffrax_method="kvaerno5",
+    diffrax_kwargs=dict(
+        rtol=SOLVER_RTOL,
+        atol=SOLVER_ATOL,
+        first_step=SOLVER_FIRST_STEP,
+        max_steps=8192,
+    ),
+    scipy_kwargs=dict(
+        method="LSODA", rtol=SOLVER_RTOL, atol=SOLVER_ATOL, first_step=None
+    ),
+)
+
 
 def initial_conditions():
     """Weak-equilibrium initial state at T = 10 MeV (x = Q/10 ~ 0.13)."""
@@ -234,15 +221,7 @@ def initial_conditions():
 def predict_abundances(params):
     """Integrate BBN network and return [Y_P, D/H] for given params."""
     sol = rodas5P_solve(
-        bbn_ode_device,
-        initial_conditions(),
-        X_SAVE,
-        params,
-        lu_precision="fp32",
-        rtol=SOLVER_RTOL,
-        atol=SOLVER_ATOL,
-        first_step=SOLVER_FIRST_STEP,
-        max_steps=SOLVER_MAX_STEPS,
+        BBN_ODE.device, initial_conditions(), X_SAVE, params, **MODAX_KWARGS
     )
     _, Yp, Yd, YHe = sol[0, -1]
     Y_P = 4.0 * YHe  # helium mass fraction
@@ -251,65 +230,8 @@ def predict_abundances(params):
 
 
 # ---------------------------------------------------------------------------
-# Solver backends and benchmark
+# Benchmark: the chi^2-grid use case, N independent (eta, N_eff) universes
 # ---------------------------------------------------------------------------
-#
-# The science of the example uses the GPU-batched modax Rodas5P solver.  For a
-# like-for-like timing comparison we also expose two reference backends with the
-# identical four-species stiff network:
-#   * "scipy"   -- serial CPU integration with scipy.solve_ivp (LSODA), the
-#                  no-GPU baseline used by codes such as the original ECHO21.
-#   * "diffrax" -- GPU integration with plain Diffrax Kvaerno5 (jax.vmap).
-# The "chi^2 grid" use case of the docstring batches N independent (eta, N_eff)
-# universes into a single ensemble solve.
-
-
-def make_solver(backend):
-    """Return a uniform ``solve(ode_fn, y0, t_span, params)`` for a backend."""
-    if backend == "modax":
-        # The kernel solver takes its own CUDA-device callbacks rather than the
-        # traced ``bbn_ode``; ``f`` is ignored so every backend shares one
-        # ``solve(f, y0, ts, p)`` signature.
-        return lambda f, y0, ts, p: rodas5P_solve(
-            bbn_ode_device,
-            y0,
-            ts,
-            p,
-            lu_precision="fp32",
-            rtol=SOLVER_RTOL,
-            atol=SOLVER_ATOL,
-            first_step=SOLVER_FIRST_STEP,
-            max_steps=SOLVER_MAX_STEPS,
-        )
-    if backend == "diffrax":
-        from reference.solvers.python.diffrax_kvaerno5 import solve as diffrax_solve
-
-        return lambda f, y0, ts, p: diffrax_solve(
-            f,
-            y0,
-            ts,
-            p,
-            rtol=SOLVER_RTOL,
-            atol=SOLVER_ATOL,
-            first_step=SOLVER_FIRST_STEP,
-            max_steps=8192,
-        )
-    if backend == "scipy":
-        from reference.solvers.python.scipy_solve_ivp import solve as scipy_solve
-
-        # LSODA with an automatic initial step is what serial codes such as
-        # ECHO21 use; an imposed first_step of 0.1 destabilises it here.
-        return lambda f, y0, ts, p: scipy_solve(
-            f,
-            y0,
-            ts,
-            p,
-            method="LSODA",
-            rtol=SOLVER_RTOL,
-            atol=SOLVER_ATOL,
-            first_step=None,
-        )
-    raise ValueError(f"unknown backend: {backend}")
 
 
 def sample_grid_params(n):
@@ -322,45 +244,21 @@ def sample_grid_params(n):
     return jnp.asarray(grid, dtype=jnp.float64)
 
 
-def time_solve(fn, repeats):
-    """Return (mean seconds excluding compile, result) over ``repeats`` runs."""
-    result = fn()
-    jax.block_until_ready(result)
-    t0 = time.perf_counter()
-    for _ in range(repeats):
-        result = fn()
-        jax.block_until_ready(result)
-    return (time.perf_counter() - t0) / repeats, result
-
-
-def run_benchmark(n, backends, repeats):
+def benchmark(n, backends, repeats):
     params = sample_grid_params(n)
-    y0 = initial_conditions()
-    print(
-        f"BBN forward-solve benchmark: N = {n:,} stiff 4-species universes\n",
-        flush=True,
-    )
-    print(
-        f"{'backend':>10}  {'wall (s)':>10}  {'per solve':>12}  Y_P(eta~6,Neff~3)",
-        flush=True,
-    )
-    print("-" * 60, flush=True)
-    for backend in backends:
-        solve_fn = make_solver(backend)
-        run = lambda sf=solve_fn: sf(bbn_ode, y0, X_SAVE, params)
-        try:
-            secs, sol = time_solve(run, repeats)
-        except Exception as exc:  # noqa: BLE001
-            print(f"{backend:>10}  FAILED: {exc}", flush=True)
-            continue
-        sol = np.asarray(sol)
+    run_benchmark(
+        BACKENDS,
+        BBN_ODE,
+        initial_conditions(),
+        X_SAVE,
+        params,
+        backend_names=backends,
+        repeats=repeats,
+        title=f"BBN forward-solve benchmark: N = {n:,} stiff 4-species universes",
+        column="Y_P(eta~6,Neff~3)",
         # mid-grid sample for a sanity check on agreement across backends
-        yp_mid = 4.0 * sol[n // 2, -1, 3]
-        per = secs / n
-        print(
-            f"{backend:>10}  {secs:10.3f}  {per * 1e3:9.4f} ms  {yp_mid:.5f}",
-            flush=True,
-        )
+        metric=lambda sol: f"{4.0 * sol[n // 2, -1, 3]:.5f}",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -503,10 +401,10 @@ def run_nested_sampling():
     print(f"eta_10 = {eta10_mean:.3f} +/- {eta10_std:.3f}")
     print(f"N_eff  = {neff_mean:.3f} +/- {neff_std:.3f}")
 
-    _plot_posterior(dead_positions, w_np, eta10_samples, neff_samples)
+    _plot_posterior(w_np, eta10_samples, neff_samples)
 
 
-def _plot_posterior(dead_positions, w, eta10_samples, neff_samples):
+def _plot_posterior(w, eta10_samples, neff_samples):
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
 
     # 2D scatter coloured by weight
@@ -548,24 +446,9 @@ def _plot_posterior(dead_positions, w, eta10_samples, neff_samples):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--benchmark",
-        action="store_true",
-        help="time the batched forward solve across solver backends",
-    )
-    parser.add_argument(
-        "--backends",
-        nargs="+",
-        default=["modax", "diffrax", "scipy"],
-        choices=["modax", "diffrax", "scipy"],
-    )
-    parser.add_argument("--n", type=int, default=10_000, help="ensemble size")
-    parser.add_argument("--repeats", type=int, default=3)
-    args = parser.parse_args()
-
+    args = parse_args(__doc__, n_default=10_000, n_help="ensemble size")
     if args.benchmark:
-        run_benchmark(args.n, args.backends, args.repeats)
+        benchmark(args.n, args.backends, args.repeats)
         return
 
     print("Integrating BBN network (4 species, x = Q/T)", flush=True)

@@ -4,27 +4,23 @@ from __future__ import annotations
 
 import functools
 import math
+from dataclasses import dataclass, replace
 
 import jax.numpy as jnp
 import numpy as np
 from numba_cuda_mlir import cuda, types
 
+from solvers._codegen import compile_device_source
 from solvers._jax_common import make_custom_vmap_solver, normalize_y0_params
 from solvers._jax_numba_custom_call import make_launch
 from solvers._numba_common import (
     SOLVER_ARGTYPES,
-    PreparedNumbaSolve,
+    as_cuda_device,
     build_error_weights,
-    copy_workspace_inputs,
     ensemble_ffi_call,
-    get_workspace,
     initial_step,
     make_cuda_local_vector_writer,
-    run_kernel,
     solver_stats,
-)
-from solvers._numba_common import (
-    normalize_inputs as _normalize_inputs,
 )
 from solvers._sensitivity import (
     SensitivitySpec,
@@ -114,9 +110,6 @@ FACTOR_MAX = 6.0
 # the kernel are expressed relative to this.
 EXPONENT = -1.0 / 6.0
 
-_WORKSPACE_CACHE: dict[tuple[int, int, int, int], object] = {}
-
-
 # One warp per block: the trajectories in a block step adaptively and so diverge,
 # and a warp is the granularity at which that divergence is free.
 _DEFAULT_TRAJECTORIES_PER_BLOCK = 32
@@ -137,6 +130,29 @@ def trajectories_per_block_or_default(requested=None) -> int:
     if requested < 1:
         raise ValueError(f"trajectories_per_block must be positive, got {requested}")
     return requested
+
+
+@dataclass(frozen=True)
+class KernelOptions:
+    """Everything that selects a compiled kernel besides ``ode_fn`` and the shapes.
+
+    Hashable, so it is the kernel cache key: two solves with equal options and
+    the same callback share one compiled kernel. ``solve`` builds it once from
+    its keyword arguments and hands it down unchanged; the sensitivity rule
+    substitutes ``spec`` and nothing else.
+    """
+
+    pcoeff: float = 0.0
+    icoeff: float = 1.0
+    dcoeff: float = 0.0
+    lu_precision: str = "fp32"
+    trajectories_per_block: int = _DEFAULT_TRAJECTORIES_PER_BLOCK
+    spec: SensitivitySpec | None = None
+    sparsity: tuple[tuple[int, ...], ...] | None = None
+    ordering: str = "amd"
+    tf_index: int = -1
+    max_registers: int | None = None
+    array_rhs: object = None
 
 
 @functools.cache
@@ -212,17 +228,14 @@ def dense_lu_solver(n_vars: int):
     return factorize_local, solve_local
 
 
-_LITERAL_SEED_SOURCES = 0
-
 # Direction sets per jvp call. Several seeds in one call share one Enzyme entry
 # function, so once nvJitLink has inlined it the primal work the sweeps have in
 # common -- for an ODE whose coefficients depend on t alone, all of it -- is one
 # computation for LLVM to CSE rather than one per sweep. On DISCO-EB that was
 # the difference between 580 ms and 509 ms at N128, on top of the literal
 # seeds. numba-enzyme accepts up to 8 sets per call (its _MAX_DIRECTIONS), so
-# 12 colours take two calls; the cap here mirrors that limit.
+# 12 colours take two calls.
 SEED_BATCH = 8
-_MAX_SEED_BATCH = 8
 
 
 def _make_literal_seed_jacobian(*, n_vars, n_params, n_colours, store_table, namespace):
@@ -232,11 +245,8 @@ def _make_literal_seed_jacobian(*, n_vars, n_params, n_colours, store_table, nam
     slot`` with ``-1`` for none, or ``None`` for the plain colour grid where
     entry ``(row, g)`` sits at ``row * n_colours + g``.
     """
-    global _LITERAL_SEED_SOURCES
-    import linecache
-
     zero_row = n_colours
-    batch = max(1, min(_MAX_SEED_BATCH, SEED_BATCH))
+    batch = SEED_BATCH
 
     def slots_for(g):
         for row in range(n_vars):
@@ -280,33 +290,11 @@ def _make_literal_seed_jacobian(*, n_vars, n_params, n_colours, store_table, nam
         f"    for row in range({n_vars}):",
         "        dT[row] = column[row]",
     ]
-    source = "\n".join(lines) + "\n"
-    _LITERAL_SEED_SOURCES += 1
-    filename = f"<modax literal-seed jacobian {_LITERAL_SEED_SOURCES}>"
-    linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)
-    code = compile(source, filename, "exec")
-    ns = dict(namespace)
-    exec(code, ns)
-    return ns["cuda"].jit(device=True)(ns["write_negated_jacobian"])
+    return compile_device_source("write_negated_jacobian", lines, namespace)
 
 
 @functools.cache
-def _make_kernel(
-    ode_fn,
-    n_vars: int,
-    n_params: int,
-    pcoeff: float = 0.0,
-    icoeff: float = 1.0,
-    dcoeff: float = 0.0,
-    lu_precision: str = "fp32",
-    trajectories_per_block: int = _DEFAULT_TRAJECTORIES_PER_BLOCK,
-    spec: SensitivitySpec | None = None,
-    sparsity: tuple[tuple[int, ...], ...] | None = None,
-    ordering: str = "amd",
-    tf_index: int = -1,
-    max_registers: int | None = None,
-    array_rhs=None,
-):
+def _make_kernel(ode_fn, n_vars: int, n_params: int, options: KernelOptions):
     """Rodas5P, one trajectory per CUDA thread.
 
     A thread owns its trajectory outright: the state, the ten stage vectors,
@@ -323,9 +311,11 @@ def _make_kernel(
     image and the solver is compiled for it. The two differ in what they were
     built from and in nothing else the kernel can see.
     """
-    e1 = EXPONENT * (icoeff + pcoeff + dcoeff)
-    e2 = -EXPONENT * (pcoeff + 2.0 * dcoeff)
-    e3 = EXPONENT * dcoeff
+    spec, sparsity, lu_precision = options.spec, options.sparsity, options.lu_precision
+    tf_index, array_rhs = options.tf_index, options.array_rhs
+    e1 = EXPONENT * (options.icoeff + options.pcoeff + options.dcoeff)
+    e2 = -EXPONENT * (options.pcoeff + 2.0 * options.dcoeff)
+    e3 = EXPONENT * options.dcoeff
     # The state, right-hand side, Jacobian and error estimate are always
     # float64; lu_dtype governs only the iteration matrix and its solves. The
     # Rosenbrock--Wanner order conditions hold under an approximate Jacobian, so
@@ -339,7 +329,7 @@ def _make_kernel(
         factorize_local, solve_local = dense_lu_solver(n_vars)
         ipiv_per = n_vars
     else:
-        solver = sparse_direct_solver_for(sparsity, ordering)
+        solver = sparse_direct_solver_for(sparsity, options.ordering)
         structure = solver.compressed
         factorize_local, solve_local = solver.factorize_local, solver.solve_local
         ipiv_per = solver.ipiv_size
@@ -352,7 +342,7 @@ def _make_kernel(
     n_error = n_vars if spec is None else spec.n_error
     n_sens = 0 if spec is None else spec.n_sens
 
-    tpb = int(trajectories_per_block)
+    tpb = int(options.trajectories_per_block)
     n_colours = structure.n_colours
 
     lu_size = structure.size
@@ -370,9 +360,7 @@ def _make_kernel(
         # Enzyme, which only ever sees ode_fn. A caller whose right-hand side
         # also comes as ``f(y, t, p, out)`` over arrays can hand that in, and
         # the eight stage evaluations per step call it directly.
-        from solvers._numba_common import as_cuda_device as _as_device
-
-        _array_rhs = _as_device(array_rhs)
+        _array_rhs = as_cuda_device(array_rhs)
 
         @cuda.jit(device=True)
         def ode_write(y_row, t, p_row, out):
@@ -570,7 +558,96 @@ def _make_kernel(
             else:
                 work[j] = value
 
-    jit_options = {} if max_registers is None else {"max_registers": max_registers}
+    # --- the stages themselves, one device function per tableau row ----------
+    # Every coefficient is a closure constant and every loop below has a
+    # constant trip count, so each function lowers to the straight-line
+    # arithmetic the row spelled out by hand would: the compiled kernels carry
+    # the same instruction mix as the hand-unrolled form did. The split on
+    # ``d`` keeps the three stages without a df/dt term from emitting an
+    # ``x * 0.0`` the compiler may not drop.
+    c_rows = (
+        (),
+        (C21,),
+        (C31, C32),
+        (C41, C42, C43),
+        (C51, C52, C53, C54),
+        (C61, C62, C63, C64, C65),
+        (C71, C72, C73, C74, C75, C76),
+        (C81, C82, C83, C84, C85, C86, C87),
+    )
+    d_row = (D1, D2, D3, D4, D5, 0.0, 0.0, 0.0)
+    a_rows = (
+        (A21,),
+        (A31, A32),
+        (A41, A42, A43),
+        (A51, A52, A53, A54),
+        (A61, A62, A63, A64, A65),
+    )
+
+    def make_stage(s):
+        c_row = c_rows[s]
+        d = d_row[s]
+
+        if s == 0:
+
+            @cuda.jit(device=True)
+            def stage(lu, ipiv, rhs, k_stages, work, dT, y, p_row, t, dt_use, inv_dt):
+                for j in range(size):
+                    put_stage_rhs(rhs, work, j, work[j] + dt_use * d * dT[j])
+                stage_solve(lu, ipiv, rhs, k_stages, s, work, y, p_row, t)
+
+        elif d != 0.0:
+
+            @cuda.jit(device=True)
+            def stage(lu, ipiv, rhs, k_stages, work, dT, y, p_row, t, dt_use, inv_dt):
+                for j in range(size):
+                    acc = c_row[0] * k_stages[0, j]
+                    for k in range(1, s):
+                        acc += c_row[k] * k_stages[k, j]
+                    put_stage_rhs(
+                        rhs, work, j, work[j] + dt_use * d * dT[j] + acc * inv_dt
+                    )
+                stage_solve(lu, ipiv, rhs, k_stages, s, work, y, p_row, t)
+
+        else:
+
+            @cuda.jit(device=True)
+            def stage(lu, ipiv, rhs, k_stages, work, dT, y, p_row, t, dt_use, inv_dt):
+                for j in range(size):
+                    acc = c_row[0] * k_stages[0, j]
+                    for k in range(1, s):
+                        acc += c_row[k] * k_stages[k, j]
+                    put_stage_rhs(rhs, work, j, work[j] + acc * inv_dt)
+                stage_solve(lu, ipiv, rhs, k_stages, s, work, y, p_row, t)
+
+        return stage
+
+    def make_advance(s):
+        a_row = a_rows[s]
+        n_prev = s + 1
+
+        @cuda.jit(device=True)
+        def advance(u, y, k_stages):
+            for j in range(size):
+                acc = a_row[0] * k_stages[0, j]
+                for k in range(1, n_prev):
+                    acc += a_row[k] * k_stages[k, j]
+                u[j] = y[j] + acc
+
+        return advance
+
+    stage_0, stage_1, stage_2, stage_3, stage_4, stage_5, stage_6, stage_7 = (
+        make_stage(s) for s in range(8)
+    )
+    advance_0, advance_1, advance_2, advance_3, advance_4 = (
+        make_advance(s) for s in range(5)
+    )
+
+    jit_options = (
+        {}
+        if options.max_registers is None
+        else {"max_registers": options.max_registers}
+    )
 
     @cuda.jit(**jit_options)
     def kernel(
@@ -656,224 +733,130 @@ def _make_kernel(
                 lu_buf[diag[d]] += lu_dtype(dtgamma_inv)
             factorize_local(lu_buf, ipiv_buf)
 
-            # Stage 1
+            # The eight Rosenbrock stages. Each forms its right-hand side from
+            # the tableau row, solves against the step's one factorisation, and
+            # the u update between them is the next stage's argument.
             ode_write(y, t, p_row, work)
-            for j in range(size):
-                put_stage_rhs(rhs_buf, work, j, work[j] + dt_use * D1 * dT[j])
-            stage_solve(
+            stage_0(
                 lu_buf,
                 ipiv_buf,
                 rhs_buf,
                 k_stages,
-                0,
                 work,
+                dT,
                 y,
                 p_row,
                 t,
+                dt_use,
+                inv_dt,
             )
-            for j in range(size):
-                u[j] = y[j] + A21 * k_stages[0, j]
-
-            # Stage 2
+            advance_0(u, y, k_stages)
             ode_write(u, t + C2 * dt_use, p_row, work)
-            for j in range(size):
-                stage_rhs = (
-                    work[j] + dt_use * D2 * dT[j] + C21 * k_stages[0, j] * inv_dt
-                )
-                put_stage_rhs(rhs_buf, work, j, stage_rhs)
-            stage_solve(
+            stage_1(
                 lu_buf,
                 ipiv_buf,
                 rhs_buf,
                 k_stages,
-                1,
                 work,
+                dT,
                 y,
                 p_row,
                 t,
+                dt_use,
+                inv_dt,
             )
-            for j in range(size):
-                u[j] = y[j] + (A31 * k_stages[0, j] + A32 * k_stages[1, j])
-
-            # Stage 3
+            advance_1(u, y, k_stages)
             ode_write(u, t + C3 * dt_use, p_row, work)
-            for j in range(size):
-                stage_rhs = (
-                    work[j]
-                    + dt_use * D3 * dT[j]
-                    + (C31 * k_stages[0, j] + C32 * k_stages[1, j]) * inv_dt
-                )
-                put_stage_rhs(rhs_buf, work, j, stage_rhs)
-            stage_solve(
+            stage_2(
                 lu_buf,
                 ipiv_buf,
                 rhs_buf,
                 k_stages,
-                2,
                 work,
+                dT,
                 y,
                 p_row,
                 t,
+                dt_use,
+                inv_dt,
             )
-            for j in range(size):
-                u[j] = y[j] + (
-                    A41 * k_stages[0, j] + A42 * k_stages[1, j] + A43 * k_stages[2, j]
-                )
-
-            # Stage 4
+            advance_2(u, y, k_stages)
             ode_write(u, t + C4 * dt_use, p_row, work)
-            for j in range(size):
-                stage_rhs = (
-                    work[j]
-                    + dt_use * D4 * dT[j]
-                    + (
-                        C41 * k_stages[0, j]
-                        + C42 * k_stages[1, j]
-                        + C43 * k_stages[2, j]
-                    )
-                    * inv_dt
-                )
-                put_stage_rhs(rhs_buf, work, j, stage_rhs)
-            stage_solve(
+            stage_3(
                 lu_buf,
                 ipiv_buf,
                 rhs_buf,
                 k_stages,
-                3,
                 work,
+                dT,
                 y,
                 p_row,
                 t,
+                dt_use,
+                inv_dt,
             )
-            for j in range(size):
-                u[j] = y[j] + (
-                    A51 * k_stages[0, j]
-                    + A52 * k_stages[1, j]
-                    + A53 * k_stages[2, j]
-                    + A54 * k_stages[3, j]
-                )
-
-            # Stage 5
+            advance_3(u, y, k_stages)
             ode_write(u, t + C5 * dt_use, p_row, work)
-            for j in range(size):
-                stage_rhs = (
-                    work[j]
-                    + dt_use * D5 * dT[j]
-                    + (
-                        C51 * k_stages[0, j]
-                        + C52 * k_stages[1, j]
-                        + C53 * k_stages[2, j]
-                        + C54 * k_stages[3, j]
-                    )
-                    * inv_dt
-                )
-                put_stage_rhs(rhs_buf, work, j, stage_rhs)
-            stage_solve(
+            stage_4(
                 lu_buf,
                 ipiv_buf,
                 rhs_buf,
                 k_stages,
-                4,
                 work,
+                dT,
                 y,
                 p_row,
                 t,
+                dt_use,
+                inv_dt,
             )
-            for j in range(size):
-                u[j] = y[j] + (
-                    A61 * k_stages[0, j]
-                    + A62 * k_stages[1, j]
-                    + A63 * k_stages[2, j]
-                    + A64 * k_stages[3, j]
-                    + A65 * k_stages[4, j]
-                )
-
-            # Stage 6
+            advance_4(u, y, k_stages)
+            # Stages 6-8 share the end point and accumulate into u (FSAL form).
             ode_write(u, t_end, p_row, work)
-            for j in range(size):
-                stage_rhs = (
-                    work[j]
-                    + (
-                        C61 * k_stages[0, j]
-                        + C62 * k_stages[1, j]
-                        + C63 * k_stages[2, j]
-                        + C64 * k_stages[3, j]
-                        + C65 * k_stages[4, j]
-                    )
-                    * inv_dt
-                )
-                put_stage_rhs(rhs_buf, work, j, stage_rhs)
-            stage_solve(
+            stage_5(
                 lu_buf,
                 ipiv_buf,
                 rhs_buf,
                 k_stages,
-                5,
                 work,
+                dT,
                 y,
                 p_row,
                 t,
+                dt_use,
+                inv_dt,
             )
             for j in range(size):
                 u[j] += k_stages[5, j]
-
-            # Stage 7
             ode_write(u, t_end, p_row, work)
-            for j in range(size):
-                stage_rhs = (
-                    work[j]
-                    + (
-                        C71 * k_stages[0, j]
-                        + C72 * k_stages[1, j]
-                        + C73 * k_stages[2, j]
-                        + C74 * k_stages[3, j]
-                        + C75 * k_stages[4, j]
-                        + C76 * k_stages[5, j]
-                    )
-                    * inv_dt
-                )
-                put_stage_rhs(rhs_buf, work, j, stage_rhs)
-            stage_solve(
+            stage_6(
                 lu_buf,
                 ipiv_buf,
                 rhs_buf,
                 k_stages,
-                6,
                 work,
+                dT,
                 y,
                 p_row,
                 t,
+                dt_use,
+                inv_dt,
             )
             for j in range(size):
                 u[j] += k_stages[6, j]
-
-            # Stage 8
             ode_write(u, t_end, p_row, work)
-            for j in range(size):
-                stage_rhs = (
-                    work[j]
-                    + (
-                        C81 * k_stages[0, j]
-                        + C82 * k_stages[1, j]
-                        + C83 * k_stages[2, j]
-                        + C84 * k_stages[3, j]
-                        + C85 * k_stages[4, j]
-                        + C86 * k_stages[5, j]
-                        + C87 * k_stages[6, j]
-                    )
-                    * inv_dt
-                )
-                put_stage_rhs(rhs_buf, work, j, stage_rhs)
-            stage_solve(
+            stage_7(
                 lu_buf,
                 ipiv_buf,
                 rhs_buf,
                 k_stages,
-                7,
                 work,
+                dT,
                 y,
                 p_row,
                 t,
+                dt_use,
+                inv_dt,
             )
 
             # Weighted RMS error estimate.
@@ -970,106 +953,11 @@ def _make_kernel(
     return kernel, tpb
 
 
-def prepare_solve(
-    ode_fn,
-    y0,
-    t_span,
-    params,
-    *,
-    rtol=1e-8,
-    atol=1e-10,
-    first_step=None,
-    max_steps=100000,
-    error_weights=None,
-    pcoeff=0.0,
-    icoeff=1.0,
-    dcoeff=0.0,
-    lu_precision: str = "fp32",
-    trajectories_per_block=None,
-):
-    y0_arr, times, params_arr, dt0 = _normalize_inputs(y0, t_span, params, first_step)
-    n, n_vars = y0_arr.shape
-    n_save = times.shape[0]
-    n_params = params_arr.shape[1]
-    weights_arr = build_error_weights(error_weights, n, n_vars)
-    trajectories_per_block = trajectories_per_block_or_default(trajectories_per_block)
-
-    # No global scratch: every per-trajectory vector is thread-local.
-    workspace = get_workspace(
-        _WORKSPACE_CACHE, n, n_vars, n_save, n_params, transposed=False, n_work=0
-    )
-    copy_workspace_inputs(workspace, y0_arr, times, params_arr, weights_arr)
-
-    kernel, trajectories_per_block = _make_kernel(
-        ode_fn,
-        n_vars,
-        n_params,
-        pcoeff,
-        icoeff,
-        dcoeff,
-        lu_precision,
-        trajectories_per_block,
-    )
-    threads = (trajectories_per_block, 1, 1)
-    blocks = (n + trajectories_per_block - 1) // trajectories_per_block
-
-    return PreparedNumbaSolve(
-        kernel=kernel,
-        workspace=workspace,
-        dt0=np.float64(dt0),
-        rtol=np.float64(rtol),
-        atol=np.float64(atol),
-        max_steps=np.int32(max_steps),
-        blocks=blocks,
-        threads=threads,
-    )
-
-
-def run_prepared(
-    prepared: PreparedNumbaSolve, *, return_stats=False, copy_solution=True
-):
-    return run_kernel(
-        prepared,
-        prepared.workspace.work,
-        return_stats=return_stats,
-        copy_solution=copy_solution,
-    )
-
-
 @functools.cache
 def _make_jax_launch(
-    ode_fn,
-    n: int,
-    n_vars: int,
-    n_params: int,
-    pcoeff: float = 0.0,
-    icoeff: float = 1.0,
-    dcoeff: float = 0.0,
-    lu_precision: str = "fp32",
-    trajectories_per_block: int = _DEFAULT_TRAJECTORIES_PER_BLOCK,
-    spec: SensitivitySpec | None = None,
-    sparsity: tuple[tuple[int, ...], ...] | None = None,
-    ordering: str = "amd",
-    tf_index: int = -1,
-    max_registers: int | None = None,
-    array_rhs=None,
+    ode_fn, n: int, n_vars: int, n_params: int, options: KernelOptions
 ):
-    kernel, trajectories_per_block = _make_kernel(
-        ode_fn,
-        n_vars,
-        n_params,
-        pcoeff,
-        icoeff,
-        dcoeff,
-        lu_precision,
-        trajectories_per_block,
-        spec,
-        sparsity,
-        ordering,
-        tf_index,
-        max_registers,
-        array_rhs,
-    )
+    kernel, trajectories_per_block = _make_kernel(ode_fn, n_vars, n_params, options)
     blocks = (n + trajectories_per_block - 1) // trajectories_per_block
     return make_launch(
         kernel,
@@ -1219,8 +1107,20 @@ def solve(
     # arguments and a pattern has to arrive as the same hashable value twice.
     if sparsity is not None:
         sparsity = normalize_sparsity(sparsity, n_vars)
-    trajectories_per_block = trajectories_per_block_or_default(trajectories_per_block)
-
+    options = KernelOptions(
+        pcoeff=pcoeff,
+        icoeff=icoeff,
+        dcoeff=dcoeff,
+        lu_precision=lu_precision,
+        trajectories_per_block=trajectories_per_block_or_default(
+            trajectories_per_block
+        ),
+        sparsity=sparsity,
+        ordering=ordering,
+        tf_index=-1 if tf_index is None else int(tf_index),
+        max_registers=max_registers,
+        array_rhs=array_rhs,
+    )
     settings = dict(
         rtol=rtol,
         atol=atol,
@@ -1228,30 +1128,21 @@ def solve(
         max_steps=max_steps,
         return_stats=return_stats,
         error_weights=error_weights,
-        pcoeff=pcoeff,
-        icoeff=icoeff,
-        dcoeff=dcoeff,
-        lu_precision=lu_precision,
-        trajectories_per_block=trajectories_per_block,
-        sparsity=sparsity,
-        ordering=ordering,
-        tf_index=-1 if tf_index is None else int(tf_index),
-        array_rhs=array_rhs,
-        max_registers=max_registers,
     )
+
     # The JVP rule wraps the vmap-aware solvers rather than the other way
     # round: custom_vmap's own JVP path instantiates symbolic zeros, which is
     # what tells the rule which sensitivity blocks it has to integrate.
-    primal_solver = make_custom_vmap_solver(
-        functools.partial(_solve_impl, ode_fn, **settings),
-        return_stats=return_stats,
-    )
-
-    def joint_solver_for(spec):
+    def solver_for(options):
         return make_custom_vmap_solver(
-            functools.partial(_solve_impl, ode_fn, spec=spec, **settings),
+            functools.partial(_solve_impl, ode_fn, options=options, **settings),
             return_stats=return_stats,
         )
+
+    primal_solver = solver_for(options)
+
+    def joint_solver_for(spec):
+        return solver_for(replace(options, spec=spec))
 
     return make_sensitivity_solver(
         primal_solver,
@@ -1272,24 +1163,15 @@ def _solve_impl(
     t_span,
     params,
     *,
+    options: KernelOptions,
     rtol=1e-8,
     atol=1e-10,
     first_step=None,
     max_steps=100000,
     return_stats=False,
     error_weights=None,
-    pcoeff=0.0,
-    icoeff=1.0,
-    dcoeff=0.0,
-    lu_precision: str = "fp32",
-    trajectories_per_block: int = _DEFAULT_TRAJECTORIES_PER_BLOCK,
-    spec=None,
-    sparsity: tuple[tuple[int, ...], ...] | None = None,
-    ordering: str = "amd",
-    tf_index: int = -1,
-    max_registers: int | None = None,
-    array_rhs=None,
 ):
+    spec = options.spec
     y0_arr, params_arr, n, n_vars = normalize_y0_params(y0, params)
     times = jnp.asarray(t_span, dtype=jnp.float64)
     n_save = times.shape[0]
@@ -1305,23 +1187,7 @@ def _solve_impl(
         weights_host = augmented_error_weights(weights_host, spec)
     weights_arr = jnp.asarray(weights_host)
 
-    launch = _make_jax_launch(
-        ode_fn,
-        n,
-        n_vars,
-        n_params,
-        pcoeff,
-        icoeff,
-        dcoeff,
-        lu_precision,
-        trajectories_per_block,
-        spec,
-        sparsity,
-        ordering,
-        tf_index,
-        max_registers,
-        array_rhs,
-    )
+    launch = _make_jax_launch(ode_fn, n, n_vars, n_params, options)
     # No global scratch: the kernel keeps the state, the ten stage vectors and
     # df/dt in registers and thread-local memory.
     hist, accepted, rejected, loop_steps = ensemble_ffi_call(

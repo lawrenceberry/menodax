@@ -66,9 +66,9 @@ fill of an unpivoted `LU` of `S`, and it does so with a *symmetric* permutation
 and SuperLU use in their "symmetric mode", for these reasons, and an iteration
 matrix is about as close to structurally symmetric as an unsymmetric matrix
 gets. It comes from SuiteSparse through
-[scikit-sparse](https://scikit-sparse.readthedocs.io) (the `sparse` extra, plus
-`libsuitesparse-dev` or equivalent on the machine); `ordering="natural"` skips
-it and needs neither.
+[scikit-sparse](https://scikit-sparse.readthedocs.io), which builds against
+`libsuitesparse-dev` or equivalent on the machine; `ordering="natural"` skips
+the ordering and needs neither.
 
 **No pivoting at all.** The pattern has to be fixed at compile time and the same
 in every thread, so rows cannot be swapped on the numbers — which would also
@@ -503,7 +503,6 @@ not be.
 ```bash
 uv sync                 # CPU
 uv sync --extra cuda13  # or --extra cuda12, for GPU
-uv sync --extra sparse  # adds scikit-sparse, for sparse_direct_solver's ordering
 
 uv run pytest
 uv run ruff format && uv run ruff check --fix

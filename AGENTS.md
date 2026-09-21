@@ -45,11 +45,13 @@ lowering pipeline without a device.
 
 Shared support modules:
 
-- **`_numba_common.py`** — host-side helpers shared by both kernels: input
-  normalisation, initial step selection, error weights, the device workspace,
-  the shared kernel signature and its two launch paths (`run_kernel` for a
-  direct numba launch, `ensemble_ffi_call` for the JAX one), and the `cuda.jit`
-  coercion for user callbacks.
+- **`_numba_common.py`** — host-side helpers shared by both kernels: initial
+  step selection, error weights, the shared kernel signature and its JAX launch
+  (`ensemble_ffi_call`), and the `cuda.jit` coercion for user callbacks. There
+  is no direct numba launch path: every solve, the benchmark scripts included,
+  goes through `solve` and the XLA custom call.
+- **`_codegen.py`** — `compile_device_source`, the one place generated device
+  source is exec'd and registered with `linecache`. Both emitters below use it.
 - **`_jax_numba_custom_call.py`** — the XLA FFI shim. Compiles a launcher,
   registers it as an FFI target, and exposes `ffi_abi_call` so a numba kernel
   becomes a JAX primitive.
@@ -60,9 +62,9 @@ Shared support modules:
   and defines `CompressedJacobian`, the layout the Enzyme sweeps write into.
 - **`_sparse_direct.py`** — orders a pattern with AMD, factorises it
   symbolically, and compiles a sparse LU and sparse triangular solves for it as
-  `cuda.jit(device=True)` functions. Needs `scikit-sparse` (the `sparse` extra,
-  plus SuiteSparse on the machine) for the ordering; `ordering="natural"` needs
-  neither.
+  `cuda.jit(device=True)` functions. The ordering comes from `scikit-sparse`,
+  a dependency that builds against SuiteSparse's headers on the machine;
+  `ordering="natural"` skips it.
 
 Because the solvers go through `jax.ffi.ffi_call`, they are `jit`-traceable and
 usable inside `lax.scan`/`vmap` — see `examples/bbn_estimation`, which calls one
@@ -441,7 +443,8 @@ touching the code.
   consumes a hand-written Jacobian any more, so the systems no longer carry
   one; `tests/test_enzyme_jacobian.py` checks the Enzyme-derived Jacobian
   against JAX's forward-mode AD of the same `ode_fn`.
-  `_tuple_codegen.py` generates these callbacks for parameterised dimensions.
+  `_tuple_codegen.py` builds these callbacks for parameterised dimensions from
+  one expression string per component, so every index is a literal.
 - `reference/solvers/python/` — Diffrax, scipy and Julia (DiffEqGPU) baselines.
 - `scripts/` — scaling, dimensionality and divergence benchmarks. Each caches
   timings in `results.json` and writes a per-GPU CSV and plot.

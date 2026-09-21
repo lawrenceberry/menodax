@@ -25,7 +25,6 @@ Usage:
 
 from __future__ import annotations
 
-import argparse
 import math
 import sys
 import time
@@ -38,6 +37,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from examples._common import Backends, parse_args, run_benchmark
 from examples.dual_backend import build_fn, build_rhs
 from solvers.rodas5P import solve as rodas5P_solve
 
@@ -71,6 +71,35 @@ SOLVER_RTOL = 2.0e-4
 SOLVER_ATOL = 1.0e-7
 SOLVER_FIRST_STEP = 2.0e-3
 SOLVER_MAX_STEPS = 4096
+
+# The science uses the GPU-batched modax Rodas5P solver. For a like-for-like
+# timing, ``--benchmark`` also runs the identical stiff 3-component IGM history
+# on Diffrax Kvaerno5 (GPU, jax.vmap) and on serial scipy.solve_ivp LSODA, the
+# no-GPU baseline used by codes such as ECHO21.
+MODAX_KWARGS = dict(
+    lu_precision="fp32",
+    rtol=SOLVER_RTOL,
+    atol=SOLVER_ATOL,
+    first_step=SOLVER_FIRST_STEP,
+    max_steps=SOLVER_MAX_STEPS,
+    error_weights=jnp.array([1.0, 0.2, 0.2], dtype=jnp.float64),
+    pcoeff=0.3,
+    icoeff=0.4,
+)
+BACKENDS = Backends(
+    modax_solve=rodas5P_solve,
+    modax_kwargs=MODAX_KWARGS,
+    diffrax_method="kvaerno5",
+    diffrax_kwargs=dict(
+        rtol=SOLVER_RTOL,
+        atol=SOLVER_ATOL,
+        first_step=SOLVER_FIRST_STEP,
+        max_steps=SOLVER_MAX_STEPS,
+    ),
+    scipy_kwargs=dict(
+        method="LSODA", rtol=SOLVER_RTOL, atol=SOLVER_ATOL, first_step=None
+    ),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +177,6 @@ SIGMOID_FROM_LOGIT = build_fn(_make_sigmoid_from_logit)
 SOURCE_HISTORY = build_fn(_make_source_history)
 
 redshift_from_u = REDSHIFT_FROM_U.jax
-hubble_s = HUBBLE_S.jax
 cmb_temperature = CMB_TEMPERATURE.jax
 sigmoid_from_logit = SIGMOID_FROM_LOGIT.jax
 source_history = SOURCE_HISTORY.jax
@@ -157,6 +185,11 @@ source_history = SOURCE_HISTORY.jax
 def u_from_redshift(z):
     """Map redshift to integration coordinate u."""
     return jnp.log((1.0 + Z_INITIAL) / (1.0 + z))
+
+
+def u_grid(n_save=N_SAVE):
+    """The save points in u, from z = Z_INITIAL down to Z_FINAL."""
+    return jnp.linspace(0.0, u_from_redshift(Z_FINAL), n_save)
 
 
 def _clip_unit_interval(x):
@@ -253,6 +286,8 @@ def _make_igm_ode(
     return igm_ode
 
 
+# d/du: ``.device`` is the 3-tuple for the modax kernel, ``.jax`` the array for
+# the Diffrax and scipy backends.
 IGM_ODE = build_rhs(
     _make_igm_ode,
     redshift_from_u=REDSHIFT_FROM_U,
@@ -261,17 +296,6 @@ IGM_ODE = build_rhs(
     sigmoid_from_logit=SIGMOID_FROM_LOGIT,
     source_history=SOURCE_HISTORY,
 )
-igm_ode_device = IGM_ODE.device  # d/du as a 3-tuple, for the modax kernel
-
-
-def igm_ode(y, u, params):
-    """d/du as a jnp array, for the Diffrax and scipy backends.
-
-    A module-level ``def`` rather than ``IGM_ODE.jax`` itself, because the
-    scipy backend sends its right-hand side to worker processes and pickle
-    carries a function by name -- which a closure has not got.
-    """
-    return IGM_ODE.jax(y, u, params)
 
 
 def sample_parameters(key, n_samples=N_SAMPLES):
@@ -290,93 +314,23 @@ def initial_state():
     return jnp.array([jnp.log(T_k0), logit(x_e0), logit(Q0)], dtype=jnp.float64)
 
 
-def make_solver(backend):
-    """Return a uniform ``solve(ode_fn, y0, u_span, params)`` for a backend.
-
-    The science uses the GPU-batched modax Rodas5P solver.  Two reference
-    backends integrate the identical stiff 3-component IGM history for a
-    like-for-like timing comparison:
-      * "scipy"   -- serial CPU integration with scipy.solve_ivp (LSODA), the
-                     no-GPU baseline used by codes such as ECHO21.
-      * "diffrax" -- GPU integration with plain Diffrax Kvaerno5 (jax.vmap).
-    """
-    if backend == "modax":
-        # The kernel solver takes its own CUDA-device callbacks rather than the
-        # traced ``igm_ode``; ``f`` is ignored so every backend shares one
-        # ``solve(f, y0, ts, p)`` signature.
-        return lambda f, y0, ts, p: rodas5P_solve(
-            igm_ode_device,
-            y0,
-            ts,
-            p,
-            lu_precision="fp32",
-            rtol=SOLVER_RTOL,
-            atol=SOLVER_ATOL,
-            first_step=SOLVER_FIRST_STEP,
-            max_steps=SOLVER_MAX_STEPS,
-            error_weights=jnp.array([1.0, 0.2, 0.2], dtype=jnp.float64),
-            pcoeff=0.3,
-            icoeff=0.4,
-        )
-    if backend == "diffrax":
-        from reference.solvers.python.diffrax_kvaerno5 import solve as diffrax_solve
-
-        return lambda f, y0, ts, p: diffrax_solve(
-            f,
-            y0,
-            ts,
-            p,
-            rtol=SOLVER_RTOL,
-            atol=SOLVER_ATOL,
-            first_step=SOLVER_FIRST_STEP,
-            max_steps=SOLVER_MAX_STEPS,
-        )
-    if backend == "scipy":
-        from reference.solvers.python.scipy_solve_ivp import solve as scipy_solve
-
-        return lambda f, y0, ts, p: scipy_solve(
-            f,
-            y0,
-            ts,
-            p,
-            method="LSODA",
-            rtol=SOLVER_RTOL,
-            atol=SOLVER_ATOL,
-            first_step=None,
-        )
-    raise ValueError(f"unknown backend: {backend}")
-
-
-def solve_histories(params, n_save=N_SAVE, backend="modax"):
-    """Integrate the batched IGM histories."""
-    u_span = jnp.linspace(0.0, u_from_redshift(Z_FINAL), n_save)
-    solve_fn = make_solver(backend)
-    if backend == "modax":
-        return rodas5P_solve(
-            igm_ode_device,
-            initial_state(),
-            u_span,
-            params,
-            lu_precision="fp32",
-            rtol=SOLVER_RTOL,
-            atol=SOLVER_ATOL,
-            first_step=SOLVER_FIRST_STEP,
-            max_steps=SOLVER_MAX_STEPS,
-            error_weights=jnp.array([1.0, 0.2, 0.2], dtype=jnp.float64),
-            pcoeff=0.3,
-            icoeff=0.4,
-        )
-    return solve_fn(igm_ode, initial_state(), u_span, params)
+def solve_histories(params, n_save=N_SAVE):
+    """Integrate the batched IGM histories on the modax Rodas5P solver."""
+    return rodas5P_solve(
+        IGM_ODE.device, initial_state(), u_grid(n_save), params, **MODAX_KWARGS
+    )
 
 
 def compute_observables(solution, params, n_save=N_SAVE):
-    """Convert solver state histories into observable arrays and quantiles."""
-    u_span = jnp.linspace(0.0, u_from_redshift(Z_FINAL), n_save)
-    redshift = redshift_from_u(u_span)
+    """The redshift and frequency grids and the brightness-temperature quantiles.
+
+    Only the envelope leaves the device: the per-trajectory histories are
+    consumed here.
+    """
+    redshift = redshift_from_u(u_grid(n_save))
     frequency_mhz = NU_21_MHZ / (1.0 + redshift)
 
     T_k = jnp.exp(solution[:, :, 0])
-    x_e = sigmoid_from_logit(solution[:, :, 1])
     Q = sigmoid_from_logit(solution[:, :, 2])
     delta_Tb = jax.vmap(
         lambda sol_T, sol_Q, p: brightness_temperature_mk(redshift, sol_T, sol_Q, p)
@@ -386,10 +340,6 @@ def compute_observables(solution, params, n_save=N_SAVE):
     return {
         "redshift": redshift,
         "frequency_mhz": frequency_mhz,
-        "T_k": T_k,
-        "x_e": x_e,
-        "Q": Q,
-        "delta_Tb_mK": delta_Tb,
         "quantiles_mK": quantiles,
     }
 
@@ -416,7 +366,6 @@ def run_monte_carlo(
     elapsed_s = time.perf_counter() - start
     observables = compute_observables(solution, params, n_save=n_save)
     observables = jax.tree_util.tree_map(np.asarray, observables)
-    observables["params"] = np.asarray(params)
     observables["elapsed_s"] = elapsed_s
     return observables
 
@@ -469,58 +418,31 @@ def plot_envelope(results, out_path=None):
     return Path(out_path)
 
 
-def time_solve(fn, repeats):
-    """Return (mean seconds excluding compile, result) over ``repeats`` runs."""
-    result = fn()
-    jax.block_until_ready(result)
-    t0 = time.perf_counter()
-    for _ in range(repeats):
-        result = fn()
-        jax.block_until_ready(result)
-    return (time.perf_counter() - t0) / repeats, result
+def benchmark(n, backends, repeats, seed=RANDOM_SEED):
+    params = sample_parameters(jax.random.key(seed), n)
 
+    def median_trough(sol):
+        quantiles = compute_observables(jnp.asarray(sol), params)["quantiles_mK"]
+        return f"{float(np.nanmin(np.asarray(quantiles)[1])):.1f}"
 
-def run_benchmark(n, backends, repeats, seed=RANDOM_SEED):
-    key = jax.random.key(seed)
-    params = sample_parameters(key, n)
-    u_span = jnp.linspace(0.0, u_from_redshift(Z_FINAL), N_SAVE)
-    y0 = initial_state()
-    print(f"21-cm IGM benchmark: N = {n:,} stiff 3-component histories\n")
-    print(f"{'backend':>10}  {'wall (s)':>10}  {'per solve':>12}  median-trough(mK)")
-    print("-" * 60)
-    for backend in backends:
-        solve_fn = make_solver(backend)
-        run = lambda sf=solve_fn: sf(igm_ode, y0, u_span, params)
-        try:
-            secs, sol = time_solve(run, repeats)
-        except Exception as exc:  # noqa: BLE001
-            print(f"{backend:>10}  FAILED: {exc}")
-            continue
-        sol = np.asarray(sol)
-        obs = compute_observables(jnp.asarray(sol), params, n_save=N_SAVE)
-        trough = float(np.nanmin(np.asarray(obs["quantiles_mK"])[1]))
-        print(f"{backend:>10}  {secs:10.3f}  {secs / n * 1e3:9.4f} ms  {trough:.1f}")
+    run_benchmark(
+        BACKENDS,
+        IGM_ODE,
+        initial_state(),
+        u_grid(),
+        params,
+        backend_names=backends,
+        repeats=repeats,
+        title=f"21-cm IGM benchmark: N = {n:,} stiff 3-component histories",
+        column="median-trough(mK)",
+        metric=median_trough,
+    )
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--benchmark",
-        action="store_true",
-        help="time the batched ensemble solve across solver backends",
-    )
-    parser.add_argument(
-        "--backends",
-        nargs="+",
-        default=["modax", "diffrax", "scipy"],
-        choices=["modax", "diffrax", "scipy"],
-    )
-    parser.add_argument("--n", type=int, default=2000, help="ensemble size")
-    parser.add_argument("--repeats", type=int, default=3)
-    args = parser.parse_args()
-
+    args = parse_args(__doc__, n_default=2000, n_help="ensemble size")
     if args.benchmark:
-        run_benchmark(args.n, args.backends, args.repeats)
+        benchmark(args.n, args.backends, args.repeats)
         return
 
     print(

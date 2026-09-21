@@ -66,6 +66,7 @@ from dataclasses import dataclass, replace
 import numpy as np
 from numba_cuda_mlir import cuda
 
+from solvers._codegen import compile_device_source
 from solvers._sparsity import (
     CompressedJacobian,
     colour_sparsity,
@@ -216,13 +217,6 @@ class SparseLULayout:
     def col_origin(self) -> np.ndarray:
         """Caller's index of the column each slot belongs to."""
         return np.asarray(self.order, dtype=np.int32)[self.col_ind]
-
-    def slot(self, row: int, col: int) -> int:
-        """Where entry ``(row, col)`` of the caller's matrix lives."""
-        slot = int(self.slot_table()[row, col])
-        if slot < 0:
-            raise ValueError(f"entry ({row}, {col}) is not in the factorised pattern")
-        return slot
 
     def slot_table(self) -> np.ndarray:
         """``(n_vars, n_vars)`` of slots, ``-1`` where the structure has nothing."""
@@ -463,8 +457,6 @@ def sparse_direct_solver(sparsity, n_vars: int, *, ordering: str = "amd"):
 MAX_UNROLLED_SUBSTITUTIONS = 2048
 MAX_UNROLLED_UPDATES = 8192
 
-_UNROLLED_SOURCES = 0
-
 
 def _make_factorize(layout: SparseLULayout, ops):
     """Up-looking LU of ``M``, in place, no pivoting.
@@ -540,7 +532,7 @@ def _unrolled_factorize(layout, dst_start, destination, pivot_of, upper_end):
                 q += 1
         pivot = int(diag_ptr[i])
         lines.append(f"    lu[{pivot}] = 1.0 / lu[{pivot}]")
-    return _compile_unrolled("sparse_direct_factorize", lines)
+    return compile_device_source("sparse_direct_factorize", lines)
 
 
 def _make_solve(layout: SparseLULayout):
@@ -616,28 +608,7 @@ def _unrolled_solve(n, row_ptr, diag_ptr, origin, col_origin):
         row, pivot = int(origin[i]), int(diag_ptr[i])
         upper = range(pivot + 1, int(row_ptr[i + 1]))
         lines.append(f"    rhs[{row}] = (rhs[{row}]{terms(upper)}) * lu[{pivot}]")
-    return _compile_unrolled("sparse_direct_solve", lines)
-
-
-def _compile_unrolled(name, lines):
-    """Compile generated straight-line device source, keeping it traceable.
-
-    The source is registered with ``linecache`` under a name of its own, so a
-    numba typing error inside it points at the line that caused it rather than
-    at nothing, and ``fn._unrolled_source`` keeps it readable from a debugger.
-    """
-    global _UNROLLED_SOURCES
-    import linecache
-
-    source = "\n".join(lines) + "\n"
-    _UNROLLED_SOURCES += 1
-    filename = f"<modax unrolled {name} {_UNROLLED_SOURCES}>"
-    linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)
-    scope: dict = {}
-    exec(compile(source, filename, "exec"), {}, scope)  # noqa: S102
-    generated = scope[name]
-    generated._unrolled_source = source
-    return cuda.jit(device=True)(generated)
+    return compile_device_source("sparse_direct_solve", lines)
 
 
 def _pack(*arrays):

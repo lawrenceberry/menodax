@@ -8,32 +8,6 @@ function make_brusselator_spec(config)
     diff_coeff = alpha / (dx * dx)
     n_vars = 2 * n_grid
 
-    function reaction!(du, u, p, t)
-        scale = p[1]
-        a_eff = scale * a
-        b_eff = scale * b
-        for i in 1:n_grid
-            ui = u[2i - 1]
-            vi = u[2i]
-            u2v = ui * ui * vi
-            du[2i - 1] = a_eff + u2v - (b_eff + 1.0) * ui
-            du[2i] = b_eff * ui - u2v
-        end
-        return nothing
-    end
-
-    function diffusion!(du, u, p, t)
-        for i in 1:n_grid
-            il = mod(i - 2, n_grid) + 1
-            ir = mod(i, n_grid) + 1
-            ui = u[2i - 1]
-            vi = u[2i]
-            du[2i - 1] = diff_coeff * (u[2ir - 1] - 2.0 * ui + u[2il - 1])
-            du[2i] = diff_coeff * (u[2ir] - 2.0 * vi + u[2il])
-        end
-        return nothing
-    end
-
     function ode!(du, u, p, t)
         scale = p[1]
         a_eff = scale * a
@@ -78,36 +52,6 @@ function make_brusselator_spec(config)
         return nothing
     end
 
-    function explicit_jac!(J, u, p, t)
-        fill!(J, 0.0)
-        scale = p[1]
-        b_eff = scale * b
-        for i in 1:n_grid
-            ui = u[2i - 1]
-            vi = u[2i]
-            J[2i - 1, 2i - 1] = 2.0 * ui * vi - (b_eff + 1.0)
-            J[2i - 1, 2i] = ui * ui
-            J[2i, 2i - 1] = b_eff - 2.0 * ui * vi
-            J[2i, 2i] = -ui * ui
-        end
-        return nothing
-    end
-
-    function implicit_jac!(J, u, p, t)
-        fill!(J, 0.0)
-        for i in 1:n_grid
-            il = mod(i - 2, n_grid) + 1
-            ir = mod(i, n_grid) + 1
-            J[2i - 1, 2i - 1] = -2.0 * diff_coeff
-            J[2i - 1, 2 * il - 1] += diff_coeff
-            J[2i - 1, 2 * ir - 1] += diff_coeff
-            J[2i, 2i] = -2.0 * diff_coeff
-            J[2i, 2 * il] += diff_coeff
-            J[2i, 2 * ir] += diff_coeff
-        end
-        return nothing
-    end
-
     function kernel_ode(u::SVector{N, T}, p, t) where {N, T}
         scale = p[1]
         a_eff = scale * a
@@ -131,13 +75,6 @@ function make_brusselator_spec(config)
     return ReferenceSystemSpec(
         build_array_full_problem=(y0, tspan, p0) -> SciMLBase.ODEProblem(
             SciMLBase.ODEFunction(ode!; jac=jac!, tgrad=zero_tgrad!),
-            copy(y0),
-            tspan,
-            copy(p0),
-        ),
-        build_array_split_problem=(y0, tspan, p0) -> SciMLBase.SplitODEProblem(
-            SciMLBase.ODEFunction(diffusion!; jac=implicit_jac!, tgrad=zero_tgrad!),
-            SciMLBase.ODEFunction(reaction!; jac=explicit_jac!, tgrad=zero_tgrad!),
             copy(y0),
             tspan,
             copy(p0),

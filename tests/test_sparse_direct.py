@@ -213,7 +213,9 @@ def test_layout_is_a_consistent_csr_image(mask):
         assert (np.diff(span) > 0).all(), "columns must ascend within a row"
         assert layout.col_ind[layout.diag_ptr[i]] == i
     # every declared nonzero has a slot of its own, inside the buffer
-    slots = [layout.slot(r, c) for r, c in zip(*np.nonzero(mask))]
+    table = layout.slot_table()
+    slots = [int(table[r, c]) for r, c in zip(*np.nonzero(mask))]
+    assert min(slots) >= 0
     assert len(set(slots)) == len(slots)
     assert max(slots) < layout.nnz
 

@@ -5,7 +5,6 @@ using StaticArrays
 Base.@kwdef struct ReferenceSystemSpec
     build_array_full_problem::Function
     build_kernel_full_problem::Function
-    build_array_split_problem::Union{Function,Nothing} = nothing
 end
 
 function parse_config(path::String)
@@ -63,18 +62,6 @@ end
 function zero_tgrad!(dT, u, p, t)
     fill!(dT, 0.0)
     return nothing
-end
-
-function make_zero_jac!(n::Int)
-    function zero_jac!(J, u, p, t)
-        fill!(J, 0.0)
-        return nothing
-    end
-    return zero_jac!
-end
-
-function zero_out_of_place(u, p, t)
-    return zero(u)
 end
 
 function vector_to_svector(v::AbstractVector{<:Real})

@@ -18,16 +18,12 @@ function make_solver_algorithm(solver_name::String, ensemble_backend::String)
             return Tsit5()
         elseif solver_name == "rodas5P"
             return Rodas5P()
-        elseif solver_name == "kvaerno5"
-            return Kvaerno5()
         end
     elseif ensemble_backend == "EnsembleGPUKernel"
         if solver_name == "tsit5"
             return GPUTsit5()
         elseif solver_name == "rodas5P"
             return GPURodas5P()
-        elseif solver_name == "kvaerno5"
-            return GPUKvaerno5()
         end
     end
     error("Unsupported solver/backend combination: $(solver_name) + $(ensemble_backend)")
@@ -52,7 +48,7 @@ end
 const SOLVE_WARMUP_RUNS = 1
 const SOLVE_TIMED_RUNS = 1
 
-function make_problem(spec::ReferenceSystemSpec, solver_name::String, ensemble_backend::String, y0, tspan, p0)
+function make_problem(spec::ReferenceSystemSpec, ensemble_backend::String, y0, tspan, p0)
     if ensemble_backend == "EnsembleGPUArray"
         return spec.build_array_full_problem(y0, tspan, p0)
     end
@@ -123,7 +119,7 @@ function main(args)
     spec = make_system_spec(system_name, system_config)
     tspan = (Float64(t_span[1]), Float64(t_span[end]))
     p0 = remake_param(params, 1, ensemble_backend)
-    prob = make_problem(spec, solver_name, ensemble_backend, y0, tspan, p0)
+    prob = make_problem(spec, ensemble_backend, y0, tspan, p0)
     ensemble_prob = SciMLBase.EnsembleProblem(
         prob;
         prob_func=(prob, i, repeat) -> SciMLBase.remake(

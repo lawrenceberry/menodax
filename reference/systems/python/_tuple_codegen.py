@@ -1,100 +1,35 @@
-"""Helpers for building Numba-compatible fixed-size tuple callbacks."""
+"""Build a numba-compatible tuple callback from one expression per component.
+
+The kernel solvers differentiate ``ode_fn`` with Enzyme, which needs every
+index into ``y`` and ``p`` to be a literal (see "Writing ODE callbacks" in
+AGENTS.md). A system whose dimension is a parameter therefore cannot loop over
+its components inside the callback; it spells them out instead. Each reference
+system writes its components as plain Python expression strings over ``y[i]``,
+``p[j]`` and ``t`` -- ``f"{coeff!r} * y[{j}]"`` and the like -- and this module
+turns the list into ``ode_fn(y, t, p)`` returning them as a tuple.
+"""
 
 from __future__ import annotations
 
-import ast
-import copy
 from collections.abc import Sequence
 
-Expr = ast.expr
 
+def make_tuple_callback(name: str, components: Sequence[str]):
+    """``def name(y, t, p): return (c0, c1, ...)`` from expression strings.
 
-def const(value: float) -> Expr:
-    return ast.Constant(float(value))
-
-
-def y(index: int) -> Expr:
-    return _subscript("y", index)
-
-
-def p(index: int) -> Expr:
-    return _subscript("p", index)
-
-
-def add(*terms: Expr) -> Expr:
-    if not terms:
-        return const(0.0)
-    expr = _clone(terms[0])
-    for term in terms[1:]:
-        expr = ast.BinOp(left=expr, op=ast.Add(), right=_clone(term))
-    return expr
-
-
-def sub(left: Expr, right: Expr) -> Expr:
-    return ast.BinOp(left=_clone(left), op=ast.Sub(), right=_clone(right))
-
-
-def mul(*factors: Expr) -> Expr:
-    if not factors:
-        return const(1.0)
-    expr = _clone(factors[0])
-    for factor in factors[1:]:
-        expr = ast.BinOp(left=expr, op=ast.Mult(), right=_clone(factor))
-    return expr
-
-
-def neg(expr: Expr) -> Expr:
-    return ast.UnaryOp(op=ast.USub(), operand=_clone(expr))
-
-
-def square(expr: Expr) -> Expr:
-    return mul(expr, expr)
-
-
-def make_tuple_callback(name: str, values: Sequence[Expr]):
-    return _compile_callback(
-        name,
-        ast.Tuple(elts=[_float_expr(value) for value in values], ctx=ast.Load()),
-    )
-
-
-def _compile_callback(name: str, return_value: Expr):
-    module = ast.Module(
-        body=[
-            ast.FunctionDef(
-                name=name,
-                args=ast.arguments(
-                    posonlyargs=[],
-                    args=[ast.arg(arg="y"), ast.arg(arg="t"), ast.arg(arg="p")],
-                    vararg=None,
-                    kwonlyargs=[],
-                    kw_defaults=[],
-                    kwarg=None,
-                    defaults=[],
-                ),
-                body=[ast.Return(value=return_value)],
-                decorator_list=[],
-            )
-        ],
-        type_ignores=[],
-    )
-    ast.fix_missing_locations(module)
+    Each component is wrapped as ``(expr) + 0.0`` so an entry that is a bare
+    ``y[i]`` still lowers to a float and never aliases its input.
+    """
+    body = ",\n        ".join(f"({expr}) + 0.0" for expr in components)
+    source = f"def {name}(y, t, p):\n    return (\n        {body},\n    )\n"
     namespace: dict[str, object] = {}
-    exec(compile(module, filename=f"<generated {name}>", mode="exec"), namespace)
-    return namespace[name]
+    exec(compile(source, f"<generated {name}>", "exec"), namespace)  # noqa: S102
+    fn = namespace[name]
+    fn._generated_source = source
+    return fn
 
 
-def _subscript(name: str, index: int) -> Expr:
-    return ast.Subscript(
-        value=ast.Name(id=name, ctx=ast.Load()),
-        slice=ast.Constant(index),
-        ctx=ast.Load(),
-    )
-
-
-def _float_expr(expr: Expr) -> Expr:
-    return add(expr, const(0.0))
-
-
-def _clone(expr: Expr) -> Expr:
-    return copy.deepcopy(expr)
+def linear_combination(coefficients: Sequence[float], indices: Sequence[int]) -> str:
+    """``c0 * y[i0] + c1 * y[i1] + ...`` with the zero coefficients dropped."""
+    terms = [f"{float(c)!r} * y[{int(i)}]" for c, i in zip(coefficients, indices) if c]
+    return " + ".join(terms) if terms else "0.0"

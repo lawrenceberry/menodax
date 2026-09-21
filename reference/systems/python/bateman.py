@@ -36,12 +36,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from reference.systems.python._tuple_codegen import (
-    add,
-    const,
+    linear_combination,
     make_tuple_callback,
-    mul,
-    p,
-    y,
 )
 
 TIMES = jnp.array((0.0, 0.2, 0.5, 1.0, 2.0), dtype=jnp.float64)
@@ -65,12 +61,13 @@ def make_system(n_vars, stiffness):
 
     y0 = jnp.array([1.0] + [0.0] * n_radioactive, dtype=jnp.float64)
 
-    values = []
-    for i in range(n_vars):
-        terms = [mul(const(M_np[i, j]), y(j)) for j in range(n_vars) if M_np[i, j]]
-        values.append(mul(p(0), add(*terms)))
-
-    ode_fn = make_tuple_callback("ode_fn", values)
+    ode_fn = make_tuple_callback(
+        "ode_fn",
+        [
+            f"p[0] * ({linear_combination(M_np[i], range(n_vars))})"
+            for i in range(n_vars)
+        ],
+    )
 
     return {
         "n_vars": n_vars,

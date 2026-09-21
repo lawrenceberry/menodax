@@ -1,4 +1,4 @@
-"""Shared helpers for benchmark scripts."""
+"""Helpers shared by the two benchmark drivers, ``_divergence.py`` and ``_sweep.py``."""
 
 from __future__ import annotations
 
@@ -14,16 +14,17 @@ import jax
 T = TypeVar("T")
 
 TIMEOUT_ERROR = "exceeded timeout"
-TIMEOUT_STATUS = "timeout"
-LATEX_PLOT_RCPARAMS = {
-    "text.usetex": True,
-    "font.family": "serif",
-    "font.serif": ["Computer Modern Roman"],
-}
+_TIMEOUT_STATUS = "timeout"
 
 
 def configure_latex_plot_style(plt: Any) -> None:
-    plt.rcParams.update(LATEX_PLOT_RCPARAMS)
+    plt.rcParams.update(
+        {
+            "text.usetex": True,
+            "font.family": "serif",
+            "font.serif": ["Computer Modern Roman"],
+        }
+    )
 
 
 def print_plot_title(title: str) -> None:
@@ -38,14 +39,19 @@ class BenchmarkCase:
     linestyle: str = "-"
 
 
+def label_width(cases: Sequence[BenchmarkCase]) -> int:
+    """Column width that fits every case key in the progress output."""
+    return max(len(case.key) for case in cases)
+
+
 def timeout_cache_entry() -> dict[str, str]:
-    return {"status": TIMEOUT_STATUS, "error": TIMEOUT_ERROR}
+    return {"status": _TIMEOUT_STATUS, "error": TIMEOUT_ERROR}
 
 
 def is_timeout(value) -> bool:
     return (
         isinstance(value, dict)
-        and value.get("status") == TIMEOUT_STATUS
+        and value.get("status") == _TIMEOUT_STATUS
         and value.get("error") == TIMEOUT_ERROR
     )
 
@@ -102,28 +108,47 @@ def save_cache(path: Path, cache: dict) -> None:
     path.write_text(json.dumps(cache, indent=2))
 
 
-def output_paths(script_dir: Path, gpu_name: str) -> tuple[Path, Path]:
-    slug = gpu_slug(gpu_name)
-    return script_dir / f"results-{slug}.csv", script_dir / f"plot-{slug}.png"
+def output_paths(
+    script_dir: Path, gpu_name: str, scenario: str | None = None
+) -> tuple[Path, Path]:
+    """The CSV and plot paths for one GPU, and one scenario if the script has several."""
+    stem = (
+        gpu_slug(gpu_name) if scenario is None else f"{gpu_slug(gpu_name)}-{scenario}"
+    )
+    return script_dir / f"results-{stem}.csv", script_dir / f"plot-{stem}.png"
 
 
 def time_blocked(run: Callable[[], T], n_runs: int) -> tuple[float, T]:
-    def time_once() -> tuple[float, T]:
+    """Mean wall time of ``run`` in ms over ``n_runs``, after one warm-up call.
+
+    Blocks on the result each time, so an asynchronous JAX dispatch is timed to
+    completion. Returns the last result too.
+    """
+    result = run()
+    jax.block_until_ready(result)
+
+    t0 = time.perf_counter()
+    for _ in range(n_runs):
         result = run()
         jax.block_until_ready(result)
-
-        t0 = time.perf_counter()
-        for _ in range(n_runs):
-            result = run()
-            jax.block_until_ready(result)
-        return (time.perf_counter() - t0) / n_runs * 1000, result
-
-    return time_once()
+    return (time.perf_counter() - t0) / n_runs * 1000, result
 
 
-def time_blocked_ms(run: Callable[[], T], n_runs: int) -> float:
-    ms, _ = time_blocked(run, n_runs)
-    return ms
+def jit_solve(
+    solve_fn: Callable[..., T], ode_fn: Callable, t_span: Any, **kwargs: Any
+) -> Callable[[Any, Any], T]:
+    """``solve_fn(ode_fn, y0, t_span, params, **kwargs)`` under ``jax.jit``.
+
+    Only ``y0`` and ``params`` are traced; the callback, the save times and the
+    solver settings are closed over. The first call compiles, which is why the
+    timers warm up before they measure.
+    """
+
+    @jax.jit
+    def run(y0, params):
+        return solve_fn(ode_fn, y0, t_span, params, **kwargs)
+
+    return run
 
 
 def julia_solve_time_ms(
@@ -134,6 +159,7 @@ def julia_solve_time_ms(
     params: Any,
     **kwargs: Any,
 ) -> float:
+    """Julia's own solve time, which excludes the subprocess and transfer overhead."""
     result = solve._julia_solve_with_timing(
         system_name,
         y0,
@@ -142,34 +168,3 @@ def julia_solve_time_ms(
         **kwargs,
     )
     return result.solve_time_s * 1000
-
-
-def drop_none_rows(
-    rows: Sequence[tuple[str, str, int, float | None]],
-    key: str,
-) -> tuple[list[int], list[float]]:
-    pairs = [(x, ms) for row_key, _, x, ms in rows if row_key == key and ms is not None]
-    if not pairs:
-        return [], []
-    xs, times = zip(*pairs)
-    return list(xs), list(times)
-
-
-def collect_timed_timing(
-    label: str,
-    descriptor: str,
-    run: Callable[[], float],
-    *,
-    label_width: int,
-) -> float | dict[str, str] | None:
-    print(f"  {label:<{label_width}} {descriptor} ...", end=" ", flush=True)
-    try:
-        ms = run()
-    except TimeoutError:
-        print(TIMEOUT_ERROR)
-        return timeout_cache_entry()
-    except Exception as exc:
-        print(f"FAILED ({exc})")
-        return None
-    print(f"{ms:.1f} ms")
-    return ms

@@ -1,64 +1,20 @@
-"""Solve Mukhanov-Sasaki modes for a quadratic inflation example.
+"""Primordial scalar power spectrum from quadratic inflation.
 
-The Mukhanov-Sasaki equation describes the gauge-invariant scalar perturbation
-that seeds the CMB temperature anisotropies and the large-scale distribution of
-matter.  For a single inflaton field on an FLRW background, the canonical
-perturbation variable v obeys
-
-    v_k'' + (k^2 - z'' / z) v_k = 0,
-
-where primes denote derivatives with respect to conformal time, k is the
-comoving wavenumber, z = a dphi/dN in reduced Planck units, a is the scale
-factor, phi is the homogeneous inflaton, and N = log(a) is e-fold time.  The
-quantity z'' / z is a time-dependent effective mass that couples each quantum
-fluctuation to the evolving background geometry.
-
-The standard initial condition is the Bunch-Davies vacuum.  Deep inside the
-horizon, k >> aH, curvature and expansion are negligible over the wavelength,
-so each mode behaves like a flat-spacetime oscillator:
-
-    v_k ~= exp(-i k tau) / sqrt(2 k).
-
-The equation follows from expanding the Einstein-Hilbert plus scalar-field
-action to second order around an FLRW background.  Metric and inflaton
-perturbations are combined into one gauge-invariant variable, v, and applying
-the Euler-Lagrange equations to the quadratic action gives the linear
-Mukhanov-Sasaki equation.  Spatial homogeneity and isotropy make the background
-depend only on time; after a Fourier transform, the linearized PDE splits into
-independent ODEs labelled by |k|.  That independence is why this example maps
-many k modes onto a batched ensemble solve.
-
-The final frozen curvature perturbation is R_k = v_k / z.  Its dimensionless
-power spectrum is P_R(k) = k^3 |R_k|^2 / (2 pi^2).  Einstein-Boltzmann solvers
-commonly take this primordial spectrum through its amplitude A_s at a pivot
-scale and its scalar spectral index n_s = d log(P_R) / d log(k).
-
-In the code below the mode equation is solved in e-fold time N, not conformal
-time.  With epsilon = -d log(H) / dN, q = (z'' / z) / (aH)^2, and
-x = k / (aH), the complex mode equation becomes
-
-    d^2 v_k/dN^2 + (1 - epsilon) dv_k/dN + (x^2 - q) v_k = 0.
-
-The solver state stores real and imaginary parts separately:
-
-    y = [Re(v_k), Im(v_k), Re(dv_k/dN), Im(dv_k/dN)].
-
-Each trajectory is integrated over a normalized time s in [0, 1], where
-N = N_start + s (N_stop - N_start), so the right-hand side returned to the
-solver is multiplied by dN/ds = N_stop - N_start.
-
-References:
-    D. Baumann, "TASI Lectures on Inflation", arXiv:0907.5424.
+The homogeneous inflaton background is solved in e-fold time N, then the
+Mukhanov-Sasaki mode equation is integrated for many Fourier modes as one
+Tsit5 ensemble -- each k is its own uncoupled oscillator, which is what makes
+the batch -- and A_s and n_s are read off at the pivot scale against slow-roll
+estimates. The equations, the conventions (Baumann, arXiv:0907.5424), the
+real-valued state layout and the normalised per-mode time s in [0, 1] are laid
+out in README.md next to this file.
 
 Usage:
-    uv run python examples/mukhanov_sasaki/main.py
+    uv run python examples/mukhanov_sasaki/main.py [--benchmark]
 """
 
 from __future__ import annotations
 
-import argparse
 import sys
-import time
 from pathlib import Path
 
 import jax
@@ -67,6 +23,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from examples._common import Backends, make_solver, parse_args, rhs_for, run_benchmark
 from examples.dual_backend import Forms, build_fn, build_rhs
 from solvers.tsit5 import solve as tsit5_solve
 
@@ -92,7 +49,30 @@ BACKGROUND_RTOL = 1.0e-9  # Relative tolerance for the background solve.
 BACKGROUND_ATOL = 1.0e-11  # Absolute tolerance for the background solve.
 MODE_RTOL = 1.0e-7  # Relative tolerance for the Mukhanov-Sasaki mode solve.
 MODE_ATOL = 1.0e-9  # Absolute tolerance for the Mukhanov-Sasaki mode solve.
+MODE_FIRST_STEP = 1.0e-5  # Initial step in normalised time s for the mode solve.
 MODE_MAX_STEPS = 200000  # Step cap per mode trajectory.
+
+# The mode equation is non-stiff and oscillatory, so the science uses the
+# explicit modax Tsit5 solver. For a like-for-like timing, ``--benchmark``
+# also runs the identical complex mode equation on Diffrax Tsit5 (GPU,
+# jax.vmap) -- the explicit analogue of the Kvaerno5 baseline the stiff
+# examples use, which as an implicit method is a poor match here -- and on
+# serial scipy.solve_ivp RK45, the no-GPU baseline.
+_MODE_KWARGS = dict(
+    rtol=MODE_RTOL,
+    atol=MODE_ATOL,
+    first_step=MODE_FIRST_STEP,
+    max_steps=MODE_MAX_STEPS,
+)
+BACKENDS = Backends(
+    modax_solve=tsit5_solve,
+    modax_kwargs=_MODE_KWARGS,
+    diffrax_method="tsit5",
+    diffrax_kwargs=_MODE_KWARGS,
+    scipy_kwargs=dict(
+        method="RK45", rtol=MODE_RTOL, atol=MODE_ATOL, first_step=MODE_FIRST_STEP
+    ),
+)
 
 
 def quadratic_mass_from_slow_roll(
@@ -134,7 +114,6 @@ def _make_dpotential_dphi():
 POTENTIAL = build_fn(_make_potential)
 DPOTENTIAL_DPHI = build_fn(_make_dpotential_dphi)
 potential = POTENTIAL.jax
-dpotential_dphi = DPOTENTIAL_DPHI.jax
 
 
 def _make_background_ode(*, potential, dpotential_dphi):
@@ -158,8 +137,6 @@ def _make_background_ode(*, potential, dpotential_dphi):
 BACKGROUND_ODE = build_rhs(
     _make_background_ode, potential=POTENTIAL, dpotential_dphi=DPOTENTIAL_DPHI
 )
-background_ode = BACKGROUND_ODE.jax
-background_ode_device = BACKGROUND_ODE.device
 
 
 def solve_background():
@@ -168,7 +145,7 @@ def solve_background():
     y0 = jnp.array([PHI_INITIAL, D_PHI_DN_INITIAL], dtype=jnp.float64)
     params = jnp.array([MASS], dtype=jnp.float64)
     solution = tsit5_solve(
-        background_ode_device,
+        BACKGROUND_ODE.device,
         y0,
         times,
         params,
@@ -227,15 +204,10 @@ def build_background_tables(n_grid, background):
     }
 
 
-def interp_np(x, xp, fp):
-    """Return one-dimensional NumPy linear interpolation as a Python float."""
-    return float(np.interp(x, xp, fp))
-
-
 def prepare_mode_problem(tables, n_modes=N_MODES):
     """Create k values, per-mode integration windows, and Bunch-Davies y0."""
     physical_k = np.geomspace(K_MIN_MPC, K_MAX_MPC, n_modes)
-    log_a_h_pivot = interp_np(tables["n_pivot"], tables["n"], tables["log_a_h"])
+    log_a_h_pivot = np.interp(tables["n_pivot"], tables["n"], tables["log_a_h"])
     code_k_pivot = np.exp(log_a_h_pivot)
     code_k = code_k_pivot * physical_k / K_PIVOT_MPC
     log_code_k = np.log(code_k)
@@ -337,95 +309,16 @@ def make_mode_ode(tables):
     )
 
 
-class ModeODE:
-    """Picklable traced mode RHS, for the scipy backend's worker processes.
-
-    ``make_mode_ode(...).jax`` is a closure, and stdlib pickle carries a
-    function by name; ``multiprocessing`` therefore cannot send it to a
-    worker.  This carries the background tables instead -- plain arrays --
-    and rebuilds the closure on the other side.
-    """
-
-    _TABLES = ("n", "epsilon", "log_a_h", "q")
-
-    def __init__(self, tables):
-        self.tables = {key: np.asarray(tables[key]) for key in self._TABLES}
-        self._rhs = make_mode_ode(self.tables).jax
-
-    def __call__(self, y, s, params):
-        return self._rhs(y, s, params)
-
-    def __getstate__(self):
-        return self.tables
-
-    def __setstate__(self, tables):
-        self.__init__(tables)
-
-
-def make_solver(backend):
-    """Return a uniform ``solve(ode_fn, y0, s_span, params)`` for a backend.
-
-    The mode equation is non-stiff and oscillatory, so the science uses the
-    explicit modax Tsit5 solver.  Two reference backends integrate the
-    identical complex mode equation for a like-for-like timing comparison:
-      * "scipy"   -- serial CPU integration with scipy.solve_ivp (RK45), the
-                     no-GPU baseline.
-      * "diffrax" -- GPU integration with plain Diffrax Tsit5 (jax.vmap), the
-                     explicit analogue of the Kvaerno5 baseline used for the
-                     stiff examples (Kvaerno5 is an implicit method and is a
-                     poor match for this non-stiff oscillatory problem).
-    """
-    if backend == "modax":
-        return lambda f, y0, ts, p: tsit5_solve(
-            f,
-            y0,
-            ts,
-            p,
-            rtol=MODE_RTOL,
-            atol=MODE_ATOL,
-            first_step=1.0e-5,
-            max_steps=MODE_MAX_STEPS,
-        )
-    if backend == "diffrax":
-        from reference.solvers.python.diffrax_tsit5 import solve as diffrax_solve
-
-        return lambda f, y0, ts, p: diffrax_solve(
-            f,
-            y0,
-            ts,
-            p,
-            rtol=MODE_RTOL,
-            atol=MODE_ATOL,
-            first_step=1.0e-5,
-            max_steps=MODE_MAX_STEPS,
-        )
-    if backend == "scipy":
-        from reference.solvers.python.scipy_solve_ivp import solve as scipy_solve
-
-        return lambda f, y0, ts, p: scipy_solve(
-            f,
-            y0,
-            ts,
-            p,
-            method="RK45",
-            rtol=MODE_RTOL,
-            atol=MODE_ATOL,
-            first_step=1.0e-5,
-        )
-    raise ValueError(f"unknown backend: {backend}")
+S_SPAN = jnp.array([0.0, 1.0], dtype=jnp.float64)  # normalised per-mode time
 
 
 def solve_modes(tables, backend="modax", n_modes=N_MODES):
     """Solve all uncoupled Mukhanov-Sasaki Fourier modes as one ensemble."""
     physical_k, code_k, y0, params = prepare_mode_problem(tables, n_modes)
-    solve_fn = make_solver(backend)
-    # The modax kernel solver compiles its RHS with numba-cuda; the reference
-    # backend traces the jnp form built from the same body.
-    ode_fn = make_mode_ode(tables).device if backend == "modax" else ModeODE(tables)
-    solution = solve_fn(
-        ode_fn,
+    solution = make_solver(backend, BACKENDS)(
+        rhs_for(backend, make_mode_ode(tables)),
         jnp.asarray(y0, dtype=jnp.float64),
-        jnp.array([0.0, 1.0], dtype=jnp.float64),
+        S_SPAN,
         jnp.asarray(params, dtype=jnp.float64),
     )
     return physical_k, code_k, params[:, 2], np.asarray(solution[:, -1, :])
@@ -457,7 +350,7 @@ def log_interp(x, xp, fp):
 def slow_roll_estimates(tables):
     """Compute approximate quadratic-inflation slow-roll values at the pivot."""
     n_star = tables["n_end"] - tables["n_pivot"]
-    phi_pivot = interp_np(tables["n_pivot"], tables["n"], tables["phi"])
+    phi_pivot = np.interp(tables["n_pivot"], tables["n"], tables["phi"])
     epsilon_v = 1.0 / (2.0 * n_star + 1.0)
     eta_v = epsilon_v
     v_pivot = potential(phi_pivot, MASS)
@@ -474,18 +367,16 @@ def slow_roll_estimates(tables):
     }
 
 
-def print_results(results):
+def print_results(a_s, n_s, slow_roll, n_end):
     """Print numerical and slow-roll primordial-spectrum outputs side by side."""
-    a_s = results["A_s"]
-    n_s = results["n_s"]
-    a_s_sr = results["A_s_slow_roll"]
-    n_s_sr = results["n_s_slow_roll"]
+    a_s_sr = slow_roll["A_s"]
+    n_s_sr = slow_roll["n_s"]
     print("Mukhanov-Sasaki scalar spectrum from quadratic inflation")
     print(f"m                 = {MASS:.6e} M_pl")
     print(f"N modes           = {N_MODES}")
     print(f"k pivot           = {K_PIVOT_MPC:.6g} Mpc^-1")
-    print(f"N_end             = {results['background']['N_end']:.6f}")
-    print(f"N_*               = {results['background']['N_star']:.6f}")
+    print(f"N_end             = {n_end:.6f}")
+    print(f"N_*               = {slow_roll['n_star']:.6f}")
     print()
     print("quantity    numerical MS        slow-roll estimate    diff")
     print(
@@ -493,71 +384,37 @@ def print_results(results):
         f"{(a_s - a_s_sr) / a_s_sr: .3e} rel"
     )
     print(f"n_s         {n_s: .8f}       {n_s_sr: .8f}       {n_s - n_s_sr: .3e} abs")
-    print(
-        f"n_s compact slow-roll sanity estimate: {results['n_s_slow_roll_compact']:.8f}"
-    )
+    print(f"n_s compact slow-roll sanity estimate: {slow_roll['n_s_compact']:.8f}")
 
 
-def time_solve(fn, repeats):
-    """Return (mean seconds excluding compile, result) over ``repeats`` runs."""
-    result = fn()
-    jax.block_until_ready(result)
-    t0 = time.perf_counter()
-    for _ in range(repeats):
-        result = fn()
-        jax.block_until_ready(result)
-    return (time.perf_counter() - t0) / repeats, result
-
-
-def run_benchmark(n_modes, backends, repeats):
+def benchmark(n_modes, backends, repeats):
     n_grid, background = solve_background()
     tables = build_background_tables(n_grid, background)
     physical_k, code_k, y0, params = prepare_mode_problem(tables, n_modes)
-    # The modax kernel solver compiles its RHS with numba-cuda; the reference
-    # backends trace the jnp form of the same equations.
-    mode_ode_device = make_mode_ode(tables).device
-    mode_ode = ModeODE(tables)
-    y0 = jnp.asarray(y0, dtype=jnp.float64)
-    params = jnp.asarray(params, dtype=jnp.float64)
-    s_span = jnp.array([0.0, 1.0], dtype=jnp.float64)
-    print(f"Mukhanov-Sasaki benchmark: N = {n_modes:,} uncoupled k-modes\n")
-    print(f"{'backend':>10}  {'wall (s)':>10}  {'per solve':>12}  A_s(pivot)")
-    print("-" * 56)
-    for backend in backends:
-        solve_fn = make_solver(backend)
-        f = mode_ode_device if backend == "modax" else mode_ode
-        run = lambda sf=solve_fn, fn=f: sf(fn, y0, s_span, params)
-        try:
-            secs, sol = time_solve(run, repeats)
-        except Exception as exc:  # noqa: BLE001
-            print(f"{backend:>10}  FAILED: {exc}")
-            continue
-        final_state = np.asarray(sol)[:, -1, :]
-        power = compute_power_spectrum(tables, code_k, params[:, 2], final_state)
-        a_s = log_interp(K_PIVOT_MPC, physical_k, power)
-        print(f"{backend:>10}  {secs:10.3f}  {secs / n_modes * 1e3:9.4f} ms  {a_s:.4e}")
+
+    def a_s_at_pivot(sol):
+        power = compute_power_spectrum(tables, code_k, params[:, 2], sol[:, -1, :])
+        return f"{log_interp(K_PIVOT_MPC, physical_k, power):.4e}"
+
+    run_benchmark(
+        BACKENDS,
+        make_mode_ode(tables),
+        jnp.asarray(y0, dtype=jnp.float64),
+        S_SPAN,
+        jnp.asarray(params, dtype=jnp.float64),
+        backend_names=backends,
+        repeats=repeats,
+        title=f"Mukhanov-Sasaki benchmark: N = {n_modes:,} uncoupled k-modes",
+        column="A_s(pivot)",
+        metric=a_s_at_pivot,
+    )
 
 
 def main():
     """Run the background solve, mode solve, spectrum extraction, and reporting."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--benchmark",
-        action="store_true",
-        help="time the batched mode solve across solver backends",
-    )
-    parser.add_argument(
-        "--backends",
-        nargs="+",
-        default=["modax", "diffrax", "scipy"],
-        choices=["modax", "diffrax", "scipy"],
-    )
-    parser.add_argument("--n", type=int, default=4096, help="number of k-modes")
-    parser.add_argument("--repeats", type=int, default=3)
-    args = parser.parse_args()
-
+    args = parse_args(__doc__, n_default=4096, n_help="number of k-modes")
     if args.benchmark:
-        run_benchmark(args.n, args.backends, args.repeats)
+        benchmark(args.n, args.backends, args.repeats)
         return
 
     n_grid, background = solve_background()
@@ -566,27 +423,7 @@ def main():
     power = compute_power_spectrum(tables, code_k, n_stop, final_state)
     a_s = log_interp(K_PIVOT_MPC, physical_k, power)
     n_s = local_spectral_index(physical_k, power, K_PIVOT_MPC)
-    slow_roll = slow_roll_estimates(tables)
-
-    results = {
-        "A_s": a_s,
-        "n_s": n_s,
-        "A_s_slow_roll": slow_roll["A_s"],
-        "n_s_slow_roll": slow_roll["n_s"],
-        "n_s_slow_roll_compact": slow_roll["n_s_compact"],
-        "k_pivot": K_PIVOT_MPC,
-        "k": physical_k,
-        "power_spectrum": power,
-        "background": {
-            "N_end": tables["n_end"],
-            "N_pivot": tables["n_pivot"],
-            "N_star": slow_roll["n_star"],
-            "epsilon_V": slow_roll["epsilon_v"],
-            "eta_V": slow_roll["eta_v"],
-        },
-    }
-    print_results(results)
-    return results
+    print_results(a_s, n_s, slow_roll_estimates(tables), tables["n_end"])
 
 
 if __name__ == "__main__":

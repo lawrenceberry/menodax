@@ -1,4 +1,11 @@
-"""Shared subprocess utilities for Julia GPU reference solvers."""
+"""Shared subprocess utilities for Julia GPU reference solvers.
+
+Each public solver module (``julia_tsit5``, ``julia_rodas5P``) is built by
+:func:`make_julia_solver`, which binds the Julia solver name and returns the
+``(solve, solve_with_timing)`` pair the scripts and tests consume. A missing or
+broken Julia toolchain raises :class:`JuliaUnavailableError`; only the
+test-side :func:`benchmark_julia_solver` turns that into a pytest skip.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +20,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 _REFERENCE_SOLVERS_DIR = Path(__file__).resolve().parents[1]
 _JULIA_DIR = _REFERENCE_SOLVERS_DIR / "julia"
@@ -21,12 +27,12 @@ _JULIA_RUNNER = _JULIA_DIR / "run_solver.jl"
 _JULIA_PROJECT_FLAG = f"--project={_JULIA_DIR}"
 JULIA_SOLVE_TIMEOUT_SECONDS = 30.0
 
+JULIA_SOLVERS = ("tsit5", "rodas5P")
 JULIA_ENSEMBLE_BACKENDS = ("EnsembleGPUArray", "EnsembleGPUKernel")
-_SUPPORTED_SOLVER_BACKENDS = {
-    "tsit5": set(JULIA_ENSEMBLE_BACKENDS),
-    "kvaerno5": set(JULIA_ENSEMBLE_BACKENDS),
-    "rodas5P": set(JULIA_ENSEMBLE_BACKENDS),
-}
+
+
+class JuliaUnavailableError(RuntimeError):
+    """The Julia reference solver cannot run in this environment."""
 
 
 @dataclass(frozen=True)
@@ -46,16 +52,14 @@ def julia_backend_id(ensemble_backend: str) -> str:
     return ensemble_backend.lower()
 
 
-def maybe_mark_large_ensemble_sizes(sizes):
-    """Apply the existing slow-mark convention to very large ensemble sizes."""
-    return [
-        pytest.param(size, marks=pytest.mark.slow) if size >= 10000 else size
-        for size in sizes
-    ]
-
-
 def benchmark_julia_solver(benchmark, solve, *solve_args, **solve_kwargs):
-    """Record Julia solve-only timing in pytest-benchmark and return NumPy output."""
+    """Record Julia solve-only timing in pytest-benchmark and return NumPy output.
+
+    This is the one test-facing entry point: a :class:`JuliaUnavailableError`
+    becomes a pytest skip here and nowhere else.
+    """
+    import pytest  # noqa: PLC0415  (test-only dependency)
+
     solve_with_timing = getattr(solve, "_julia_solve_with_timing", None)
     if solve_with_timing is None:
         raise TypeError(
@@ -79,101 +83,90 @@ def benchmark_julia_solver(benchmark, solve, *solve_args, **solve_kwargs):
         benchmark.extra_info["julia_total_wall_time_s"] = result.total_wall_time_s
         benchmark.extra_info["julia_solver_payload"] = result.payload
         return np.asarray(result.ys)
+    except JuliaUnavailableError as exc:
+        pytest.skip(str(exc))
     except Exception:
         benchmark.has_error = True
         raise
 
 
-def solve_with_timing(
-    solver_name: str,
-    system_name: str,
-    y0,
-    t_span,
-    params,
-    *,
-    system_config: dict | None = None,
-    ensemble_backend: str = "EnsembleGPUArray",
-    rtol=1e-8,
-    atol=1e-10,
-    first_step=None,
-    max_steps=100000,
-):
-    """Run a Julia reference solver and return output plus timing metadata."""
-    system_config_dict = {} if system_config is None else dict(system_config)
-    require_julia_reference_support(
-        solver_name,
-        ensemble_backend,
-        system_name=system_name,
-        system_config=system_config_dict,
-    )
-    return _run_julia_solver(
-        solver_name,
-        system_name,
-        ensemble_backend,
-        system_config_dict,
-        y0,
-        t_span,
-        params,
-        rtol=rtol,
-        atol=atol,
-        first_step=first_step,
-        max_steps=max_steps,
-    )
+def make_julia_solver(solver_name: str):
+    """Build the ``(solve, solve_with_timing)`` pair for one Julia solver.
 
-
-def solve(
-    solver_name: str,
-    system_name: str,
-    y0,
-    t_span,
-    params,
-    *,
-    system_config: dict | None = None,
-    ensemble_backend: str = "EnsembleGPUArray",
-    rtol=1e-8,
-    atol=1e-10,
-    first_step=None,
-    max_steps=100000,
-):
-    """Run a Julia reference solver and return the ensemble solution."""
-    return solve_with_timing(
-        solver_name,
-        system_name,
-        y0,
-        t_span,
-        params,
-        system_config=system_config,
-        ensemble_backend=ensemble_backend,
-        rtol=rtol,
-        atol=atol,
-        first_step=first_step,
-        max_steps=max_steps,
-    ).ys
-
-
-solve._julia_solve_with_timing = solve_with_timing
-
-
-def require_julia_reference_support(
-    solver_name: str,
-    ensemble_backend: str,
-    *,
-    system_name: str | None = None,
-    system_config: dict | None = None,
-) -> None:
-    """Skip cleanly when the requested Julia solver/backend cannot run here."""
-    supported = _SUPPORTED_SOLVER_BACKENDS.get(solver_name)
-    if supported is None:
-        pytest.skip(f"Unknown Julia reference solver '{solver_name}'")
-    if ensemble_backend not in supported:
-        pytest.skip(
-            f"Julia reference solver '{solver_name}' does not support "
-            f"{ensemble_backend}"
+    ``solve`` returns the ensemble solution; ``solve_with_timing`` returns a
+    :class:`JuliaSolveResult` with the solve-only timing the benchmark scripts
+    read through ``solve._julia_solve_with_timing``.
+    """
+    if solver_name not in JULIA_SOLVERS:
+        raise ValueError(
+            f"Unknown Julia reference solver '{solver_name}'; "
+            f"expected one of {JULIA_SOLVERS}"
         )
 
-    check = _check_julia_environment()
-    if not check["ok"]:
-        pytest.skip(check["reason"])
+    def solve_with_timing(
+        system_name,
+        y0,
+        t_span,
+        params,
+        *,
+        system_config=None,
+        ensemble_backend="EnsembleGPUArray",
+        rtol=1e-8,
+        atol=1e-10,
+        first_step=None,
+        max_steps=100000,
+    ):
+        if ensemble_backend not in JULIA_ENSEMBLE_BACKENDS:
+            raise JuliaUnavailableError(
+                f"Julia reference solver '{solver_name}' does not support "
+                f"{ensemble_backend}; expected one of {JULIA_ENSEMBLE_BACKENDS}"
+            )
+        return _run_julia_solver(
+            solver_name,
+            system_name,
+            ensemble_backend,
+            {} if system_config is None else dict(system_config),
+            y0,
+            t_span,
+            params,
+            rtol=rtol,
+            atol=atol,
+            first_step=first_step,
+            max_steps=max_steps,
+        )
+
+    def solve(
+        system_name,
+        y0,
+        t_span,
+        params,
+        *,
+        system_config=None,
+        ensemble_backend="EnsembleGPUArray",
+        rtol=1e-8,
+        atol=1e-10,
+        first_step=None,
+        max_steps=100000,
+    ):
+        return solve_with_timing(
+            system_name,
+            y0,
+            t_span,
+            params,
+            system_config=system_config,
+            ensemble_backend=ensemble_backend,
+            rtol=rtol,
+            atol=atol,
+            first_step=first_step,
+            max_steps=max_steps,
+        ).ys
+
+    solve.__doc__ = f"Solve an ensemble with Julia {solver_name}."
+    solve_with_timing.__doc__ = (
+        f"Solve an ensemble with Julia {solver_name} and return timing metadata."
+    )
+    solve._julia_solve_with_timing = solve_with_timing
+    return solve, solve_with_timing
 
 
 def _julia_subprocess_env():
@@ -181,15 +174,19 @@ def _julia_subprocess_env():
 
 
 @functools.lru_cache(maxsize=1)
-def _check_julia_environment():
+def _julia_executable() -> str:
+    """Return the Julia executable, or raise :class:`JuliaUnavailableError`.
+
+    The check is cached: it runs a Julia process that loads every package the
+    runner needs, which is too slow to repeat per solve.
+    """
     julia_exe = shutil.which("julia")
     if julia_exe is None:
-        return {"ok": False, "reason": "Julia executable not found on PATH"}
+        raise JuliaUnavailableError("Julia executable not found on PATH")
     if not _JULIA_RUNNER.exists():
-        return {
-            "ok": False,
-            "reason": f"Julia reference runner missing at {_JULIA_RUNNER}",
-        }
+        raise JuliaUnavailableError(
+            f"Julia reference runner missing at {_JULIA_RUNNER}"
+        )
 
     cmd = [
         julia_exe,
@@ -212,15 +209,15 @@ def _check_julia_environment():
     if completed.returncode != 0:
         message = completed.stderr.strip() or completed.stdout.strip()
         if "Pkg.instantiate" in message or "Package" in message:
-            reason = (
+            raise JuliaUnavailableError(
                 "Julia reference solver environment is not ready. "
                 f"Activate {_JULIA_DIR} and run `Pkg.instantiate()`. "
                 f"Julia said: {message}"
             )
-        else:
-            reason = f"Julia reference solver environment check failed: {message}"
-        return {"ok": False, "reason": reason}
-    return {"ok": True, "julia_exe": julia_exe}
+        raise JuliaUnavailableError(
+            f"Julia reference solver environment check failed: {message}"
+        )
+    return julia_exe
 
 
 def _run_julia_solver(
@@ -237,9 +234,7 @@ def _run_julia_solver(
     first_step,
     max_steps,
 ):
-    check = _check_julia_environment()
-    if not check["ok"]:
-        raise RuntimeError(check["reason"])
+    julia_exe = _julia_executable()
 
     y0_arr = np.ascontiguousarray(np.asarray(y0, dtype=np.float64))
     t_span_arr = np.ascontiguousarray(np.asarray(t_span, dtype=np.float64))
@@ -266,7 +261,7 @@ def _run_julia_solver(
         _write_c_order_array(t_span_bin, t_span_meta, t_span_arr)
 
         cmd = [
-            check["julia_exe"],
+            julia_exe,
             _JULIA_PROJECT_FLAG,
             str(_JULIA_RUNNER),
             solver_name,

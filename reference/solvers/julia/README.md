@@ -21,17 +21,14 @@ faster when the ODE function fits the kernel restrictions, but it requires out-o
 In this test harness:
 
 - `Tsit5` runs as `Tsit5()` on `EnsembleGPUArray` and `GPUTsit5()` on `EnsembleGPUKernel`.
-- `Kvaerno5` runs as `Kvaerno5()` on `EnsembleGPUArray` and `GPUKvaerno5()` on `EnsembleGPUKernel`.
-- `Rodas5` runs as `Rodas5()` on `EnsembleGPUArray` and can run as `GPURodas5P()` on
-  `EnsembleGPUKernel` for a limited validated subset in this harness:
-  `stiff_scalar` and `nn_reactions` with `n_vars=5`.
+- `Rodas5P` runs as `Rodas5P()` on `EnsembleGPUArray` and `GPURodas5P()` on `EnsembleGPUKernel`.
 
 ## Environment
 
 The Python wrappers launch Julia with:
 
 ```bash
-julia --project=tests/reference_solvers/julia tests/reference_solvers/julia/run_solver.jl ...
+julia --project=reference/solvers/julia reference/solvers/julia/run_solver.jl ...
 ```
 
 If the local Julia environment has not been instantiated yet, activate this project and

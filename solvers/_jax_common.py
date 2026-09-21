@@ -9,17 +9,16 @@ import jax.numpy as jnp
 from jax.custom_batching import custom_vmap
 
 
-def normalize_y0_params(y0, params, xp=jnp):
+def normalize_y0_params(y0, params):
     """Broadcast ``y0`` / ``params`` to a consistent ``(N, …)`` ensemble layout.
 
     Accepts either 1-D (``(n_vars,)`` / ``(n_params,)``) or 2-D
     (``(N, n_vars)`` / ``(N, n_params)``) inputs and returns 2-D arrays with a
     common leading axis, so every numba-cuda solver shares one calling
-    convention.  ``xp`` picks the array module: ``jnp`` for the JAX entry
-    points, ``numpy`` for the host-side ``prepare_solve`` path.
+    convention.
     """
-    y0_arr = xp.asarray(y0, dtype=xp.float64)
-    params_arr = xp.asarray(params, dtype=xp.float64)
+    y0_arr = jnp.asarray(y0, dtype=jnp.float64)
+    params_arr = jnp.asarray(params, dtype=jnp.float64)
 
     if y0_arr.ndim not in (1, 2) or params_arr.ndim not in (1, 2):
         raise ValueError(
@@ -41,9 +40,9 @@ def normalize_y0_params(y0, params, xp=jnp):
         n = 1
 
     if y0_arr.ndim == 1:
-        y0_arr = xp.broadcast_to(y0_arr, (n, y0_arr.shape[0]))
+        y0_arr = jnp.broadcast_to(y0_arr, (n, y0_arr.shape[0]))
     if params_arr.ndim == 1:
-        params_arr = xp.broadcast_to(params_arr, (n, params_arr.shape[0]))
+        params_arr = jnp.broadcast_to(params_arr, (n, params_arr.shape[0]))
     return y0_arr, params_arr, n, y0_arr.shape[1]
 
 

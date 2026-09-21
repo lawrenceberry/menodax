@@ -18,33 +18,6 @@ function make_kaps_spec(config)
         return nothing
     end
 
-    function explicit_ode!(du, u, p, t)
-        s = p[1]
-        for pair_idx in 1:n_pairs
-            y1_idx = 2 * pair_idx - 1
-            y2_idx = y1_idx + 1
-            y1 = u[y1_idx]
-            y2 = u[y2_idx]
-            du[y1_idx] = -2.0 * s * y1
-            du[y2_idx] = s * (y1 - y2 - y2^2)
-        end
-        return nothing
-    end
-
-    function implicit_ode!(du, u, p, t)
-        s = p[1]
-        for pair_idx in 1:n_pairs
-            y1_idx = 2 * pair_idx - 1
-            y2_idx = y1_idx + 1
-            y1 = u[y1_idx]
-            y2 = u[y2_idx]
-            inv_eps = 1.0 / epsilon[pair_idx]
-            du[y1_idx] = -s * inv_eps * (y1 - y2^2)
-            du[y2_idx] = 0.0
-        end
-        return nothing
-    end
-
     function jac!(J, u, p, t)
         fill!(J, 0.0)
         s = p[1]
@@ -57,34 +30,6 @@ function make_kaps_spec(config)
             J[y1_idx, y2_idx] = s * (2.0 * inv_eps * y2)
             J[y2_idx, y1_idx] = s
             J[y2_idx, y2_idx] = s * (-1.0 - 2.0 * y2)
-        end
-        return nothing
-    end
-
-    function explicit_jac!(J, u, p, t)
-        fill!(J, 0.0)
-        s = p[1]
-        for pair_idx in 1:n_pairs
-            y1_idx = 2 * pair_idx - 1
-            y2_idx = y1_idx + 1
-            y2 = u[y2_idx]
-            J[y1_idx, y1_idx] = -2.0 * s
-            J[y2_idx, y1_idx] = s
-            J[y2_idx, y2_idx] = s * (-1.0 - 2.0 * y2)
-        end
-        return nothing
-    end
-
-    function implicit_jac!(J, u, p, t)
-        fill!(J, 0.0)
-        s = p[1]
-        for pair_idx in 1:n_pairs
-            y1_idx = 2 * pair_idx - 1
-            y2_idx = y1_idx + 1
-            y2 = u[y2_idx]
-            inv_eps = 1.0 / epsilon[pair_idx]
-            J[y1_idx, y1_idx] = -s * inv_eps
-            J[y1_idx, y2_idx] = s * (2.0 * inv_eps * y2)
         end
         return nothing
     end
@@ -105,13 +50,6 @@ function make_kaps_spec(config)
     return ReferenceSystemSpec(
         build_array_full_problem=(y0, tspan, p0) -> SciMLBase.ODEProblem(
             SciMLBase.ODEFunction(ode!; jac=jac!, tgrad=zero_tgrad!),
-            copy(y0),
-            tspan,
-            copy(p0),
-        ),
-        build_array_split_problem=(y0, tspan, p0) -> SciMLBase.SplitODEProblem(
-            SciMLBase.ODEFunction(implicit_ode!; jac=implicit_jac!, tgrad=zero_tgrad!),
-            SciMLBase.ODEFunction(explicit_ode!; jac=explicit_jac!, tgrad=zero_tgrad!),
             copy(y0),
             tspan,
             copy(p0),

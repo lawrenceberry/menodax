@@ -24,6 +24,13 @@ so the device form lowers to the code a hand-written one would --
 ``tests/test_examples.py`` compiles every device callback to PTX and checks
 its values against the traced twin.
 
+The ``jax`` form is a :class:`Traced` callable rather than the bare closure,
+because the scipy reference backend sends its right-hand side to worker
+processes and pickle carries a function by name, which a closure has not got.
+``Traced`` pickles as its recipe -- the module-level factory and the
+arguments it was built with -- and rebuilds the closure on the other side, so
+``RHS.jax`` goes to a worker as it is.
+
 What such a body may use:
 
 * the operations listed in :data:`MATH_OPS`, taken as keyword arguments;
@@ -52,11 +59,11 @@ class Forms(NamedTuple):
     """One body in its three forms.
 
     ``device`` is what a modax solver takes: ``math`` scalars, and any helper
-    it calls compiled as a CUDA device function. ``jax`` is the traced form.
-    ``host`` is the device body with those helpers left as plain Python, which
-    is the same arithmetic runnable without a GPU -- how the tests compare the
-    two backends on a machine that has none. With no helpers to compile the
-    two are the same function.
+    it calls compiled as a CUDA device function. ``jax`` is the traced form, a
+    :class:`Traced`. ``host`` is the device body with those helpers left as
+    plain Python, which is the same arithmetic runnable without a GPU -- how
+    the tests compare the two backends on a machine that has none. With no
+    helpers to compile the two are the same function.
     """
 
     device: Any
@@ -66,14 +73,11 @@ class Forms(NamedTuple):
 
 # The names a body takes as keyword arguments, in each backend's spelling.
 # ``maximum``/``minimum`` are the two-argument forms (``jnp.maximum`` and the
-# builtins agree on that shape) and ``index_of`` floors to a table index.
+# builtins agree on that shape) and ``index_of`` floors to a table index. Add
+# a pair here when a body needs a name the two backends spell differently.
 MATH_OPS: dict[str, Callable] = {
     "exp": math.exp,
-    "log": math.log,
-    "log10": math.log10,
     "sqrt": math.sqrt,
-    "sin": math.sin,
-    "cos": math.cos,
     "maximum": max,
     "minimum": min,
     "index_of": int,
@@ -81,11 +85,7 @@ MATH_OPS: dict[str, Callable] = {
 
 JAX_OPS: dict[str, Callable] = {
     "exp": jnp.exp,
-    "log": jnp.log,
-    "log10": jnp.log10,
     "sqrt": jnp.sqrt,
-    "sin": jnp.sin,
-    "cos": jnp.cos,
     "maximum": jnp.maximum,
     "minimum": jnp.minimum,
     "index_of": lambda value: jnp.floor(value).astype(jnp.int32),
@@ -111,6 +111,39 @@ def _call(factory, side: str, kwargs):
     return factory(**arguments)
 
 
+class Traced:
+    """The ``jax`` form of a body: the traced closure, picklable by recipe.
+
+    Pickle carries the factory by name -- the ``_make_*`` factories are
+    module-level -- and the keyword arguments by value, each :class:`Forms`
+    among them reduced to its own ``jax`` member (itself a ``Traced``, or a
+    plain array), since neither the compiled device function nor the host
+    closure would pickle and neither is wanted where this is going.
+    """
+
+    def __init__(self, factory, kwargs):
+        self._factory = factory
+        self._kwargs = kwargs
+        self._fn = _call(factory, "jax", kwargs)
+
+    def __call__(self, *args):
+        return self._fn(*args)
+
+    def __reduce__(self):
+        kwargs = {
+            name: Forms(None, value.jax, None) if isinstance(value, Forms) else value
+            for name, value in self._kwargs.items()
+        }
+        return type(self), (self._factory, kwargs)
+
+
+class TracedRHS(Traced):
+    """A :class:`Traced` right-hand side, returning the stacked array."""
+
+    def __call__(self, y, t, p):
+        return jnp.stack(jnp.broadcast_arrays(*self._fn(y, t, p)))
+
+
 def build_fn(factory, **kwargs) -> Forms:
     """Build a scalar helper that a right-hand side and the module can share.
 
@@ -120,7 +153,7 @@ def build_fn(factory, **kwargs) -> Forms:
     """
     host = _call(factory, "host", kwargs)
     device = cuda.jit(device=True, inline="always")(_call(factory, "device", kwargs))
-    return Forms(device, _call(factory, "jax", kwargs), host)
+    return Forms(device, Traced(factory, kwargs), host)
 
 
 def build_rhs(factory, **kwargs) -> Forms:
@@ -130,18 +163,13 @@ def build_rhs(factory, **kwargs) -> Forms:
     take; the ``jax`` member stacks that tuple into the array the Diffrax
     backends and the rest of the example expect.
     """
-    traced = _call(factory, "jax", kwargs)
-
-    def rhs(y, t, p):
-        return jnp.stack(jnp.broadcast_arrays(*traced(y, t, p)))
-
     host = _call(factory, "host", kwargs)
     # With nothing to compile the two forms are one function, so what the
     # tests exercise through ``host`` is the callback the solver is handed.
     device = (
         host if not _has_device_helper(kwargs) else _call(factory, "device", kwargs)
     )
-    return Forms(device, rhs, host)
+    return Forms(device, TracedRHS(factory, kwargs), host)
 
 
 def _has_device_helper(kwargs) -> bool:

@@ -21,25 +21,15 @@ _GPU_KERNEL_UNSUPPORTED_SYSTEMS = {"bateman", "heat", "kaps"}
 
 
 @parametrize_system_cases
-def test_diffrax_tsit5_reference_system(benchmark, case):
+@pytest.mark.parametrize(
+    "solve_fn",
+    (diffrax_tsit5_solve, diffrax_kvaerno5_solve),
+    ids=("tsit5", "kvaerno5"),
+)
+def test_diffrax_reference_system(benchmark, case, solve_fn):
     result = benchmark_solve(
         benchmark,
-        lambda: diffrax_tsit5_solve(
-            case.ode_fn,
-            jnp.asarray(case.y0, dtype=jnp.float64),
-            jnp.asarray(case.t_span, dtype=jnp.float64),
-            jnp.asarray(case.params, dtype=jnp.float64),
-            **case.kwargs,
-        ),
-    )
-    assert_case_output(result, case)
-
-
-@parametrize_system_cases
-def test_diffrax_kvaerno5_reference_system(benchmark, case):
-    result = benchmark_solve(
-        benchmark,
-        lambda: diffrax_kvaerno5_solve(
+        lambda: solve_fn(
             case.ode_fn,
             jnp.asarray(case.y0, dtype=jnp.float64),
             jnp.asarray(case.t_span, dtype=jnp.float64),
@@ -54,31 +44,12 @@ def test_diffrax_kvaerno5_reference_system(benchmark, case):
 @pytest.mark.parametrize(
     "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
 )
-def test_julia_tsit5_reference_system(benchmark, case, ensemble_backend):
-    if (
-        ensemble_backend == "EnsembleGPUKernel"
-        and case.name in _GPU_KERNEL_UNSUPPORTED_SYSTEMS
-    ):
-        pytest.skip(f"{case.name} is not GPUKernel-compatible in the Julia runner")
-    result = benchmark_julia_solver(
-        benchmark,
-        julia_tsit5_solve,
-        case.name,
-        y0=case.y0,
-        t_span=case.t_span,
-        params=case.params,
-        system_config=case.system_config,
-        ensemble_backend=ensemble_backend,
-        **case.kwargs,
-    )
-    assert_case_output(np.asarray(result), case)
-
-
-@parametrize_system_cases
 @pytest.mark.parametrize(
-    "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
+    "solve_fn",
+    (julia_tsit5_solve, julia_rodas5P_solve),
+    ids=("tsit5", "rodas5P"),
 )
-def test_julia_rodas5P_reference_system(benchmark, case, ensemble_backend):
+def test_julia_reference_system(benchmark, case, ensemble_backend, solve_fn):
     if (
         ensemble_backend == "EnsembleGPUKernel"
         and case.name in _GPU_KERNEL_UNSUPPORTED_SYSTEMS
@@ -86,7 +57,7 @@ def test_julia_rodas5P_reference_system(benchmark, case, ensemble_backend):
         pytest.skip(f"{case.name} is not GPUKernel-compatible in the Julia runner")
     result = benchmark_julia_solver(
         benchmark,
-        julia_rodas5P_solve,
+        solve_fn,
         case.name,
         y0=case.y0,
         t_span=case.t_span,

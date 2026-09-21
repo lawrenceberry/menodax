@@ -3,17 +3,7 @@
 import jax.numpy as jnp
 import numpy as np
 
-from reference.systems.python._tuple_codegen import (
-    add,
-    const,
-    make_tuple_callback,
-    mul,
-    neg,
-    p,
-    square,
-    sub,
-    y,
-)
+from reference.systems.python._tuple_codegen import make_tuple_callback
 
 N_OSC = 35
 N_VARS = 2 * N_OSC
@@ -33,23 +23,20 @@ def make_system(n_osc: int, *, mu: float = MU, d: float = D, omega: float = OMEG
     ``mu=1.0`` for the non-stiff variant used by explicit-method benchmarks.
     """
     y0 = jnp.array([2.0, 0.0] * n_osc, dtype=jnp.float64)
-    values = []
+    components = []
     for osc in range(n_osc):
         base = 2 * osc
         left = 2 * ((osc - 1) % n_osc)
         right = 2 * ((osc + 1) % n_osc)
-        x = y(base)
-        v = y(base + 1)
-        values.append(v)
-        values.append(
-            add(
-                mul(p(0), const(mu), sub(const(1.0), square(x)), v),
-                mul(neg(const(omega * omega)), x),
-                mul(const(d), add(y(left), mul(const(-2.0), x), y(right))),
-            )
-        )
+        x, v = f"y[{base}]", f"y[{base + 1}]"
+        components += [
+            v,
+            f"p[0] * {mu!r} * (1.0 - {x} * {x}) * {v}"
+            f" + -{omega * omega!r} * {x}"
+            f" + {d!r} * (y[{left}] + -2.0 * {x} + y[{right}])",
+        ]
 
-    ode_fn = make_tuple_callback("ode_fn", values)
+    ode_fn = make_tuple_callback("ode_fn", components)
 
     return ode_fn, y0
 
