@@ -520,4 +520,3 @@ Worked end-to-end problems live in `examples/` (each with its own README):
 - `21cm_igm_evolution/` — toy global 21cm IGM thermal/ionisation history;
 - `mukhanov_sasaki/` — Mukhanov–Sasaki mode evolution.
 
-Scaling, dimensionality and divergence benchmarks are under `scripts/`.

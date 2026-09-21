@@ -68,7 +68,7 @@ addopts = "-m 'not slow'"
 
 [tool.setuptools.packages.find]
 include = ["solvers*"]
-exclude = ["reference*", "tests*", "scripts*"]
+exclude = ["reference*", "tests*"]
 
 [tool.ruff.lint]
 # On top of the default `select`, enable imports sorting
