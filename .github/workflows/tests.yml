@@ -69,7 +69,9 @@ jobs:
       - name: Update the coverage badge
         # Only from master, and only once the gist is set up: a pull request
         # from a fork gets no secrets, and the badge is meant to report the
-        # state of master rather than of whatever was last proposed. The gist
+        # state of master rather than of whatever was last proposed. A manual
+        # `workflow_dispatch` on master counts, so the badge can be refreshed
+        # without an empty commit -- after setting `GPU_RUNNER`, say. The gist
         # is named by the repository variable `COVERAGE_GIST_ID` and written
         # with the secret `GIST_TOKEN`, a token carrying the `gist` scope.
         #
@@ -78,7 +80,7 @@ jobs:
         # coverage of the host-side remainder rather than of the suite. It
         # rises to the real figure on the first run that has a device.
         if: >
-          github.event_name == 'push' && github.ref == 'refs/heads/master'
+          github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
           && vars.COVERAGE_GIST_ID != ''
         uses: schneegans/dynamic-badges-action@v1.9.0
         with:
