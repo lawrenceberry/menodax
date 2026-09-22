@@ -16,6 +16,10 @@ quantification, and integrating physically uncoupled systems.
 # Install dependencies (uses uv)
 uv sync                 # CPU
 uv sync --extra cuda13  # or --extra cuda12, for GPU
+# CHOLMOD's colamd/metis/nesdis/best orderings, which need
+# `apt install libsuitesparse-dev` on the machine first. The default
+# ordering="amd" does not: cvxopt's wheel carries the same SuiteSparse AMD.
+uv sync --extra cuda13 --extra sparse
 
 # Run tests
 uv run pytest
@@ -88,9 +92,13 @@ Shared support modules:
   and defines `CompressedJacobian`, the layout the Enzyme sweeps write into.
 - **`_sparse_direct.py`** — orders a pattern with AMD, factorises it
   symbolically, and compiles a sparse LU and sparse triangular solves for it as
-  `cuda.jit(device=True)` functions. The ordering comes from `scikit-sparse`,
-  a dependency that builds against SuiteSparse's headers on the machine;
-  `ordering="natural"` skips it.
+  `cuda.jit(device=True)` functions. The AMD ordering comes from `cvxopt`,
+  which ships SuiteSparse's AMD in a wheel; `scikit-sparse` is preferred when
+  installed and is the only route to CHOLMOD's other orderings, but it builds
+  against SuiteSparse's headers, so it sits behind the `sparse` extra rather
+  than in the dependencies. `ordering="natural"` needs neither. The two AMD
+  backends leave identical fill -- `tests/test_sparse_direct.py` pins that --
+  and differ only in how they break ties between equally good orders.
 
 Because the solvers go through `jax.ffi.ffi_call`, they are `jit`-traceable and
 usable inside `lax.scan`/`vmap` — see `examples/bbn_estimation`, which calls one
@@ -161,9 +169,10 @@ assumed, which is the win a hand-written solver bought without the hand-written
 solver. The two are the same `(factorize_local, solve_local)` shape, so the
 kernel has no branch. Four host-side steps at kernel-build time:
 
-1. **Order.** The symmetrised pattern goes to SuiteSparse's AMD through
-   scikit-sparse. AMD rather than COLAMD because COLAMD orders columns to bound
-   fill under whatever row permutation *partial pivoting* chooses, and there is
+1. **Order.** The symmetrised pattern goes to SuiteSparse's AMD, through
+   cvxopt's wheel or scikit-sparse's CHOLMOD. AMD rather than COLAMD because
+   COLAMD orders columns to bound fill under whatever row permutation
+   *partial pivoting* chooses, and there is
    no pivoting here — the pattern is compiled in and cannot depend on the
    numbers. AMD's permutation is symmetric, so `I/(h*gamma)`'s diagonal stays on
    the diagonal and every pivot exists structurally. (CHOLMOD's `order="colamd"`

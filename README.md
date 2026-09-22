@@ -77,10 +77,13 @@ fill of an unpivoted `LU` of `S`, and it does so with a *symmetric* permutation
 `P S Pᵀ` that leaves every diagonal entry on the diagonal. It is what UMFPACK
 and SuperLU use in their "symmetric mode", for these reasons, and an iteration
 matrix is about as close to structurally symmetric as an unsymmetric matrix
-gets. It comes from SuiteSparse through
-[scikit-sparse](https://scikit-sparse.readthedocs.io), which builds against
-`libsuitesparse-dev` or equivalent on the machine; `ordering="natural"` skips
-the ordering and needs neither.
+gets. It comes from SuiteSparse, through
+[cvxopt](https://cvxopt.org), whose wheel carries AMD itself, or through
+[scikit-sparse](https://scikit-sparse.readthedocs.io) when that is installed —
+which is the only route to CHOLMOD's other orderings, and needs
+`libsuitesparse-dev` or equivalent on the machine, so it lives behind the
+`sparse` extra. Both leave exactly the same fill; they differ only in how they
+break ties between equally good orders. `ordering="natural"` needs neither.
 
 **No pivoting at all.** The pattern has to be fixed at compile time and the same
 in every thread, so rows cannot be swapped on the numbers — which would also
@@ -540,9 +543,10 @@ and no system LLVM is involved. It provides the `numba_enzyme` import package,
 so upstream `numba-enzyme` must not be installed alongside it. See
 [wheels/README.md](wheels/README.md) for what is in the wheel and why.
 
-`pip install menodax` gets the same set. A GPU is needed to run a solve, and
-`scikit-sparse` builds against SuiteSparse's headers (`apt install
-libsuitesparse-dev`) unless `ordering="natural"` is used.
+`pip install menodax` gets the same set, with no system library to install
+first — the AMD ordering comes from cvxopt's wheel. A GPU is needed to run a
+solve. `menodax[sparse]` adds scikit-sparse for CHOLMOD's other orderings and
+is the one thing here that wants `apt install libsuitesparse-dev`.
 
 <!-- --8<-- [end:install] -->
 

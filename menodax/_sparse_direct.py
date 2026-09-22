@@ -10,8 +10,8 @@ solver bought is available to any caller who can say where its nonzeros are.
 
 The analysis happens once, on the host, when the kernel is built:
 
-1. **Order.** The pattern is symmetrised and handed to SuiteSparse's AMD through
-   scikit-sparse, which returns a fill-reducing permutation (see
+1. **Order.** The pattern is symmetrised and handed to SuiteSparse's AMD, which
+   returns a fill-reducing permutation (see
    [`fill_reducing_order`][menodax._sparse_direct.fill_reducing_order] for
    why AMD and not COLAMD).
 2. **Factor symbolically.** The exact pattern of ``L + U`` for the permuted
@@ -86,8 +86,7 @@ ORDERINGS = ("amd", "colamd", "metis", "nesdis", "best", "natural")
 def fill_reducing_order(pattern: tuple[tuple[int, ...], ...], ordering: str = "amd"):
     """A permutation of the variables that keeps ``L + U`` small.
 
-    AMD, on the symmetrised pattern ``S + S.T``, via scikit-sparse's CHOLMOD
-    bindings.
+    AMD, on the symmetrised pattern ``S + S.T``.
 
     Why AMD rather than COLAMD, which is the other obvious candidate: COLAMD
     orders the *columns* so that fill stays bounded whatever row permutation
@@ -110,6 +109,18 @@ def fill_reducing_order(pattern: tuple[tuple[int, ...], ...], ordering: str = "a
     free-streaming multipole hierarchy from its truncated end inwards, then
     eliminate the densely coupled core last.
 
+    AMD reaches this from either of two packages, because scikit-sparse has no
+    wheels and builds against SuiteSparse's headers, which an ordinary `pip
+    install menodax` has no way to put on the machine. cvxopt carries the same
+    SuiteSparse AMD in a manylinux wheel, so it is the one that makes the
+    default ordering work out of the box. scikit-sparse is preferred when it is
+    installed, since it is the only route to CHOLMOD's other orderings and
+    keeps the permutation this project has always compiled; the two agree on
+    the fill exactly -- measured over arrow, ring and bordered-block patterns,
+    including the Einstein-Boltzmann-like case where both find a *perfect*
+    elimination order -- and differ only in how they break ties between orders
+    that are equally good.
+
     ``ordering`` is passed through to CHOLMOD; see :data:`ORDERINGS`.
     """
     if ordering not in ORDERINGS:
@@ -120,12 +131,15 @@ def fill_reducing_order(pattern: tuple[tuple[int, ...], ...], ordering: str = "a
     try:
         from sksparse.cholmod import cho_factor
     except ImportError as exc:  # pragma: no cover - depends on the environment
+        if ordering == "amd":
+            return _amd_via_cvxopt(pattern)
         raise ImportError(
-            "the sparse direct solver orders its variables with SuiteSparse's "
-            "AMD through scikit-sparse, which is not installed. Install the "
-            "system library first (Debian/Ubuntu: `apt install "
-            "libsuitesparse-dev`), then `uv pip install scikit-sparse`, or pass "
-            "ordering='natural' to skip the ordering entirely."
+            f"ordering={ordering!r} comes from CHOLMOD through scikit-sparse, "
+            "which is not installed. Install the system library first "
+            "(Debian/Ubuntu: `apt install libsuitesparse-dev`), then "
+            "`uv pip install scikit-sparse` -- or use ordering='amd', which "
+            "cvxopt supplies without either, or ordering='natural', which "
+            "skips the ordering entirely."
         ) from exc
     from scipy import sparse as sp
 
@@ -142,6 +156,35 @@ def fill_reducing_order(pattern: tuple[tuple[int, ...], ...], ordering: str = "a
     degree = np.asarray(mask.sum(axis=1)).ravel()
     symmetric = (mask + sp.diags_array(degree + 1.0)).tocsc()
     return tuple(int(i) for i in cho_factor(symmetric, order=ordering).perm)
+
+
+def _amd_via_cvxopt(pattern: tuple[tuple[int, ...], ...]) -> tuple[int, ...]:
+    """SuiteSparse AMD out of cvxopt's wheel, for a machine with no CHOLMOD.
+
+    Same algorithm CHOLMOD calls, reached without SuiteSparse's headers -- see
+    :func:`fill_reducing_order` for why that matters and for what the two were
+    measured to agree on. ``amd.order`` reads the *lower triangle* of a
+    symmetric matrix and takes the pattern alone, so the symmetrised pattern
+    goes in with a unit on every entry and nothing has to be made definite for
+    it, unlike CHOLMOD's factorisation.
+    """
+    try:
+        from cvxopt import amd, spmatrix
+    except ImportError as exc:  # pragma: no cover - depends on the environment
+        raise ImportError(
+            "the sparse direct solver orders its variables with SuiteSparse's "
+            "AMD, which reaches it through cvxopt (a wheel, no system library) "
+            "or scikit-sparse (which needs `apt install libsuitesparse-dev`). "
+            "Neither is installed. Install one, or pass ordering='natural' to "
+            "skip the ordering entirely."
+        ) from exc
+    n = len(pattern)
+    entries = {(r, c) for r, cs in enumerate(pattern) for c in cs}
+    entries |= {(c, r) for r, c in entries}
+    entries |= {(i, i) for i in range(n)}
+    lower = sorted((r, c) for r, c in entries if r >= c)
+    matrix = spmatrix(1.0, [r for r, _ in lower], [c for _, c in lower], (n, n))
+    return tuple(int(i) for i in amd.order(matrix))
 
 
 def fill_pattern(pattern: tuple[tuple[int, ...], ...]) -> np.ndarray:

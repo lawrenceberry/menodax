@@ -19,6 +19,7 @@ from numba_cuda_mlir import cuda
 from menodax._sparse_direct import (
     ORDERINGS,
     SparseDirectSolver,
+    _amd_via_cvxopt,
     analyse,
     compressed_jacobian,
     fill_pattern,
@@ -31,15 +32,25 @@ jax.config.update("jax_enable_x64", True)
 
 requires_cuda = pytest.mark.skipif(not cuda.is_available(), reason="CUDA required")
 
-try:  # the ordering needs SuiteSparse through scikit-sparse
+try:  # CHOLMOD's orderings, and the AMD this project has always compiled
     from sksparse.cholmod import cho_factor as _cho_factor  # noqa: F401
 
     HAVE_SKSPARSE = True
 except ImportError:  # pragma: no cover - depends on the environment
     HAVE_SKSPARSE = False
 
+try:  # the same SuiteSparse AMD, out of a wheel and with no system library
+    from cvxopt import amd as _amd  # noqa: F401
+
+    HAVE_CVXOPT = True
+except ImportError:  # pragma: no cover - depends on the environment
+    HAVE_CVXOPT = False
+
 requires_sksparse = pytest.mark.skipif(
     not HAVE_SKSPARSE, reason="scikit-sparse (SuiteSparse CHOLMOD) required"
+)
+requires_amd = pytest.mark.skipif(
+    not (HAVE_SKSPARSE or HAVE_CVXOPT), reason="an AMD backend is required"
 )
 
 
@@ -85,6 +96,16 @@ def _ring(n):
     for i in range(n):
         mask[i, i] = mask[i, (i + 1) % n] = mask[i, (i - 1) % n] = True
     return mask
+
+
+def _fill_under(pattern, order):
+    """``nnz(L + U)`` after relabelling ``pattern`` by ``order``."""
+    n = len(pattern)
+    inverse = [0] * n
+    for new, old in enumerate(order):
+        inverse[old] = new
+    permuted = tuple(tuple(sorted(inverse[c] for c in pattern[old])) for old in order)
+    return int(fill_pattern(permuted).sum())
 
 
 def _matrix(mask, seed=0, shift=60.0):
@@ -161,7 +182,7 @@ def test_fill_pattern_is_exactly_what_an_unpivoted_lu_touches():
     assert (touched == predicted).all()
 
 
-@requires_sksparse
+@requires_amd
 def test_amd_undoes_the_worst_case_for_the_natural_order():
     mask = _arrow(12)
     pattern = normalize_sparsity(mask, 12)
@@ -173,7 +194,7 @@ def test_amd_undoes_the_worst_case_for_the_natural_order():
     assert amd.order[-1] == 0
 
 
-@requires_sksparse
+@requires_amd
 def test_a_bordered_block_system_needs_no_fill_at_all():
     """The structure DISCO-EB has: minimum degree rediscovers its Schur solver.
 
@@ -188,6 +209,37 @@ def test_a_bordered_block_system_needs_no_fill_at_all():
     assert amd.nnz == int(mask.sum())
     # and the densely coupled core is what is left until last
     assert set(amd.order[-5:]) == set(range(5))
+
+
+@pytest.mark.skipif(
+    not (HAVE_SKSPARSE and HAVE_CVXOPT), reason="both AMD backends required"
+)
+@pytest.mark.parametrize(
+    "mask",
+    [
+        _arrow(12),
+        _arrow(40),
+        _ring(16),
+        _ring(64),
+        _bordered_block(core=5, tails=3, length=7),
+        _bordered_block(core=10, tails=8, length=16),
+    ],
+    ids=["arrow12", "arrow40", "ring16", "ring64", "bordered", "disco-like"],
+)
+def test_the_two_amd_backends_fill_the_same(mask):
+    """cvxopt's AMD is as good as CHOLMOD's, which is what lets it be a default.
+
+    scikit-sparse has no wheels and needs SuiteSparse's headers, so it cannot be
+    what an ordinary install relies on; cvxopt ships the same SuiteSparse AMD in
+    a manylinux wheel. The permutations need not be identical -- on the bordered
+    patterns the two break ties between equally good orders differently -- but
+    the fill they leave must be, or the fallback would be a silent regression in
+    the one number the ordering exists to minimise.
+    """
+    pattern = normalize_sparsity(mask, len(mask))
+    cholmod = analyse(pattern, "amd")
+
+    assert _fill_under(pattern, _amd_via_cvxopt(pattern)) == cholmod.nnz
 
 
 def test_the_ordering_is_validated():
@@ -232,8 +284,8 @@ def test_the_compiled_tables_factorise_the_matrix(mask, ordering):
     This is where a mistake in the ordering, the fill, the slot map or the
     grouping of the rank-one updates shows up, without a GPU in the way.
     """
-    if ordering == "amd" and not HAVE_SKSPARSE:
-        pytest.skip("scikit-sparse required")
+    if ordering == "amd" and not (HAVE_SKSPARSE or HAVE_CVXOPT):
+        pytest.skip("an AMD backend is required")
     n = len(mask)
     layout = analyse(normalize_sparsity(mask, n), ordering)
     dense = _matrix(mask)
