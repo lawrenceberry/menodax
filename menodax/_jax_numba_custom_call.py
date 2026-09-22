@@ -268,7 +268,11 @@ def register_target() -> None:
     so_path = _build_bridge()
     _LOADED_LIB = ctypes.CDLL(str(so_path))
     symbol = getattr(_LOADED_LIB, _TARGET_NAME)
-    capsule = _pycapsule_new(ctypes.cast(symbol, ctypes.c_void_p).value)
+    address = ctypes.cast(symbol, ctypes.c_void_p).value
+    # A symbol resolved out of a loaded library always has one; the
+    # `None` is what `c_void_p` carries for a null pointer.
+    assert address is not None
+    capsule = _pycapsule_new(address)
     jax.ffi.register_ffi_target(_TARGET_NAME, capsule, platform="CUDA", api_version=1)
     _REGISTERED = True
 

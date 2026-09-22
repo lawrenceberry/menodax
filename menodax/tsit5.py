@@ -436,7 +436,7 @@ def _make_kernel(
         k6,
         k7,
     ):
-        i = cuda.grid(1)
+        i = cuda.grid(1)  # ty: ignore[unresolved-attribute]
         if i >= y0.shape[1]:
             return
         body(
@@ -502,8 +502,8 @@ def _make_shared_kernel(
         rejected_out,
         loop_out,
     ):
-        i = cuda.grid(1)
-        tx = cuda.threadIdx.x
+        i = cuda.grid(1)  # ty: ignore[unresolved-attribute]
+        tx = cuda.threadIdx.x  # ty: ignore[unresolved-attribute]
         if i >= y0.shape[1]:
             return
         y = cuda.shared.array(shape=shape, dtype=np.float64)

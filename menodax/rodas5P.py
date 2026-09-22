@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import math
 from dataclasses import dataclass, replace
+from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
@@ -335,6 +336,7 @@ def _make_kernel(ode_fn, n_vars: int, n_params: int, options: KernelOptions):
         @cuda.jit(device=True)
         def save_hook(save_idx, y, t, p_row, acc):
             return
+
     e1 = EXPONENT * (options.icoeff + options.pcoeff + options.dcoeff)
     e2 = -EXPONENT * (options.pcoeff + 2.0 * options.dcoeff)
     e3 = EXPONENT * options.dcoeff
@@ -665,7 +667,10 @@ def _make_kernel(ode_fn, n_vars: int, n_params: int, options: KernelOptions):
         make_advance(s) for s in range(5)
     )
 
-    jit_options = (
+    # Annotated rather than inferred: splatted into `cuda.jit`, a
+    # `dict[str, int]` is matched against every keyword of numba's decorator in
+    # turn and each non-`int` one is reported as a mismatch.
+    jit_options: dict[str, Any] = (
         {}
         if options.max_registers is None
         else {"max_registers": options.max_registers}
@@ -687,7 +692,10 @@ def _make_kernel(ode_fn, n_vars: int, n_params: int, options: KernelOptions):
         loop_out,
         hook_out,
     ):
-        i = cuda.blockIdx.x * tpb + cuda.threadIdx.x
+        # `blockIdx`/`threadIdx` exist only inside a compiled kernel;
+        # numba materialises them during lowering, so a static reader
+        # sees nothing on the `cuda` namespace here.
+        i = cuda.blockIdx.x * tpb + cuda.threadIdx.x  # ty: ignore[unresolved-attribute]
         # Nothing in a step is collective any more, so a thread past the end of
         # the ensemble simply leaves rather than shadowing a trajectory through
         # barriers it would otherwise have to reach.

@@ -15,3 +15,8 @@ wheels/*.whl
 
 # mkdocs build output
 site/
+
+# Coverage output (pytest --cov); CI uploads coverage.xml as an artifact
+.coverage
+coverage.xml
+htmlcov/

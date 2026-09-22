@@ -86,10 +86,15 @@ dev = [
     "blackjax @ git+https://github.com/handley-lab/blackjax@nested_sampling",
     "diffrax>=0.7.2",
     "matplotlib>=3.10.8",
+    "pre-commit>=4.4.0",
     "pytest>=9.0.2",
     "pytest-benchmark>=5.2.3",
+    "pytest-cov>=7.0.0",
     "pytest-regressions>=2.10.0",
     "ruff>=0.15.5",
+    # The same type checker CI and the pre-commit hook run, so `uv run ty check`
+    # locally is the identical check rather than whatever `uvx` last resolved.
+    "ty>=0.0.83",
 ]
 
 [tool.pytest.ini_options]
@@ -107,6 +112,38 @@ exclude = ["reference*", "tests*"]
 [tool.ruff.lint]
 # On top of the default `select`, enable imports sorting
 extend-select = ["I"]
+
+[tool.coverage.run]
+# The package only. `reference/` and `examples/` are exercised by the suite but
+# are baselines and worked problems, not the thing under test.
+source = ["menodax"]
+branch = true
+
+[tool.coverage.report]
+exclude_also = [
+    # Device code. The bodies below a `cuda.jit` decorator are read by numba
+    # and compiled to PTX; CPython never executes a line of them, so counting
+    # them as unreached would measure the compiler rather than the tests.
+    "@cuda\\.jit",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
+
+[tool.ty.src]
+# The shipped package is what the type check gates. `tests/`, `examples/` and
+# `reference/` are not checked: they splat `**kwargs` dicts into `solve` (which
+# ty resolves against every keyword in turn) and lean on blackjax and diffrax,
+# neither of which ships type information, so the diagnostics there are about
+# the type checker's view of other people's libraries rather than this code.
+include = ["menodax"]
+
+[tool.ty.rules]
+# numba-cuda-mlir assembles `cuda.local`, `cuda.const` and `cuda.shared` onto
+# the `cuda` namespace at import time rather than as real submodules, so a
+# static reader cannot see that `from numba_cuda_mlir import cuda` brings them
+# in. Every kernel in this package indexes them.
+possibly-missing-submodule = "ignore"
 
 [tool.pyright]
 typeCheckingMode = "recommended"

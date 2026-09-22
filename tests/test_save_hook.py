@@ -51,15 +51,25 @@ def test_hook_accumulates_what_the_history_integrates():
     settings = dict(rtol=1e-8, atol=1e-10, lu_precision="fp64")
     hist = np.asarray(rodas5P_solve(damped_oscillator, y0, t_span, params, **settings))
     final, acc = rodas5P_solve(
-        damped_oscillator, y0, t_span, params,
-        save_hook=integrate_state, hook_size=3, save_history=False, **settings,
+        damped_oscillator,
+        y0,
+        t_span,
+        params,
+        save_hook=integrate_state,
+        hook_size=3,
+        save_history=False,
+        **settings,
     )
     final, acc = np.asarray(final), np.asarray(acc)
 
     assert final.shape == (3, 1, 2)
     np.testing.assert_allclose(final[:, 0], hist[:, -1], rtol=0, atol=1e-13)
-    np.testing.assert_allclose(acc[:, 0], np.trapezoid(hist[..., 0], t_span, axis=1), rtol=1e-12)
-    np.testing.assert_allclose(acc[:, 1], np.trapezoid(hist[..., 1], t_span, axis=1), rtol=1e-12)
+    np.testing.assert_allclose(
+        acc[:, 0], np.trapezoid(hist[..., 0], t_span, axis=1), rtol=1e-12
+    )
+    np.testing.assert_allclose(
+        acc[:, 1], np.trapezoid(hist[..., 1], t_span, axis=1), rtol=1e-12
+    )
     assert np.all(acc[:, 2] == N_SAVE)
 
 
@@ -72,8 +82,13 @@ def test_hook_can_store_derived_saves_beside_the_history():
 
     settings = dict(rtol=1e-8, atol=1e-10, lu_precision="fp64")
     hist, energy = rodas5P_solve(
-        damped_oscillator, y0, t_span, params,
-        save_hook=store_energy, hook_size=N_SAVE, **settings,
+        damped_oscillator,
+        y0,
+        t_span,
+        params,
+        save_hook=store_energy,
+        hook_size=N_SAVE,
+        **settings,
     )
     hist, energy = np.asarray(hist), np.asarray(energy)
     assert hist.shape == (3, N_SAVE, 2)

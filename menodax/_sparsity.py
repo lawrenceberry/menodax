@@ -84,6 +84,10 @@ class CompressedJacobian:
         if self.n_slots is not None:
             return self.n_slots
         if self.packed is not None:
+            # `menodax._sparse_direct.compressed_jacobian` is the only thing
+            # that packs a layout and it sets both tables at once, so a packed
+            # layout always carries its diagonal slots.
+            assert self.packed_diagonal is not None
             return 1 + max(max(self.packed), max(self.packed_diagonal))
         return self.n_vars * self.n_colours
 
@@ -99,6 +103,7 @@ class CompressedJacobian:
             return grid
         slot = self.packed[grid]
         if slot < 0 and row == col:
+            assert self.packed_diagonal is not None
             return self.packed_diagonal[row]
         if slot < 0:
             raise ValueError(

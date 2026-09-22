@@ -131,7 +131,7 @@ def fill_reducing_order(pattern: tuple[tuple[int, ...], ...], ordering: str = "a
     if ordering == "natural":
         return tuple(range(n))
     try:
-        from cvxopt import amd, spmatrix
+        from cvxopt import amd, spmatrix  # ty: ignore[unresolved-import]
     except ImportError as exc:  # pragma: no cover - depends on the environment
         raise ImportError(
             "the sparse direct solver orders its variables with SuiteSparse's "
@@ -150,7 +150,6 @@ def fill_reducing_order(pattern: tuple[tuple[int, ...], ...], ordering: str = "a
     lower = sorted((r, c) for r, c in entries if r >= c)
     matrix = spmatrix(1.0, [r for r, _ in lower], [c for _, c in lower], (n, n))
     return tuple(int(i) for i in amd.order(matrix))
-
 
 
 def fill_pattern(pattern: tuple[tuple[int, ...], ...]) -> np.ndarray:

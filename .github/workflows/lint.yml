@@ -1,0 +1,51 @@
+name: lint
+
+# Its own workflow rather than a job inside `ci`, because a workflow is the
+# unit GitHub renders a status badge for: this is what the "lint" badge in the
+# README reports. Nothing here needs a GPU or the CUDA toolchain.
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned so a ruff release cannot turn master red on its own. Keep in step
+  # with the `rev` in .pre-commit-config.yaml and the floor in pyproject.toml.
+  RUFF_VERSION: "0.15.5"
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Formatting
+        run: uvx ruff@${{ env.RUFF_VERSION }} format --check --diff .
+      - name: Lint
+        # `--output-format=github` turns each finding into an annotation on the
+        # offending line rather than a line of log to go hunting through.
+        run: uvx ruff@${{ env.RUFF_VERSION }} check --output-format=github .
+
+  types:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install the project
+        # ty resolves third-party imports out of an environment, so the
+        # dependencies have to be there even though nothing is executed and no
+        # GPU is present. The default (CPU) extra is enough for that.
+        run: uv sync --frozen
+      - name: Type check
+        # Scoped to `menodax/` by `[tool.ty.src]` in pyproject.toml, which is
+        # also what the pre-commit hook obeys.
+        run: uv run --no-sync ty check --output-format concise

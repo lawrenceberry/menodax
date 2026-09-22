@@ -1,0 +1,87 @@
+name: tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Most of this suite is one CUDA kernel per test, so it wants a GPU runner.
+    # GitHub's GPU-enabled larger runners carry a label chosen when the runner
+    # group is created, so there is no name that could be hard-coded here:
+    # set the repository variable `GPU_RUNNER` to that label. Without it the
+    # job falls back to an ordinary runner, where everything that needs a
+    # device skips itself (`cuda.is_available()`) and what is left --
+    # `test_examples.py`, the sparsity colouring, the symbolic factorisation --
+    # still runs, so the workflow is meaningful either way.
+    runs-on: ${{ vars.GPU_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Show the device
+        if: vars.GPU_RUNNER != ''
+        run: nvidia-smi
+
+      - name: Install
+        # The CUDA extra only where there is a device to use it: on the
+        # fallback runner it would pull a few GB of nvidia wheels that nothing
+        # can load. jax's own CPU build is what `uv sync` installs there, and
+        # the FFI custom call is never reached.
+        run: uv sync --frozen ${{ vars.GPU_RUNNER != '' && '--extra cuda13' || '' }}
+
+      - name: Tests
+        # `tests/` explicitly, not the whole tree: a bare `pytest` also
+        # collects `reference/tests/`, which benchmarks menodax against Julia's
+        # DiffEqGPU and so wants a Julia install no runner has. `-m 'not slow'`
+        # comes from `addopts` in pyproject.toml.
+        run: >
+          uv run --no-sync pytest tests -q
+          --cov --cov-report=xml --cov-report=term-missing:skip-covered
+
+      - name: Coverage total
+        id: coverage
+        run: echo "percent=$(uv run --no-sync coverage report --format=total)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        # Kept even when the suite fails, which is when the line-by-line report
+        # is worth having. `pytest` writes it before it reports, unless it died
+        # during collection -- hence the tolerance for it not being there.
+        if: always()
+        with:
+          name: coverage-${{ github.run_id }}
+          path: coverage.xml
+          if-no-files-found: ignore
+
+      - name: Update the coverage badge
+        # Only from master, and only once the gist is set up: a pull request
+        # from a fork gets no secrets, and the badge is meant to report the
+        # state of master rather than of whatever was last proposed. Set the
+        # repository variable `COVERAGE_GIST_ID` to the gist's id and the
+        # secret `GIST_TOKEN` to a token with the `gist` scope.
+        if: >
+          github.event_name == 'push' && github.ref == 'refs/heads/master'
+          && vars.COVERAGE_GIST_ID != ''
+        uses: schneegans/dynamic-badges-action@v1.9.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.COVERAGE_GIST_ID }}
+          filename: menodax-coverage.json
+          label: coverage
+          message: ${{ steps.coverage.outputs.percent }}%
+          valColorRange: ${{ steps.coverage.outputs.percent }}
+          minColorRange: 50
+          maxColorRange: 90

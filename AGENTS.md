@@ -20,6 +20,10 @@ uv sync --extra cuda13  # or --extra cuda12, for GPU
 # Run tests
 uv run pytest
 
+# Run tests with coverage, as CI does. `tests/` explicitly: a bare `pytest`
+# also collects `reference/tests/`, the Julia/DiffEqGPU benchmarks.
+uv run pytest tests --cov --cov-report=term-missing
+
 # Run a specific test file / test
 uv run pytest tests/test_solvers.py
 uv run pytest tests/test_examples.py -v
@@ -27,6 +31,14 @@ uv run pytest tests/test_examples.py -v
 # Format and lint
 uv run ruff format
 uv run ruff check --fix
+
+# Type check (scoped to menodax/ by [tool.ty.src] in pyproject.toml)
+uv run ty check
+
+# Install the pre-commit hooks once; they then run the three checks above on
+# every commit. `--all-files` runs them over the whole repository.
+uv run pre-commit install
+uv run pre-commit run --all-files
 
 # Docs (mkdocs-material + mkdocstrings). Build them in their OWN environment:
 # `uv sync` with a group writes .venv, so syncing the docs group into the
@@ -37,6 +49,45 @@ export UV_PROJECT_ENVIRONMENT=.venv-docs
 uv sync --only-group docs --no-install-project
 uv run --no-sync mkdocs serve      # or: mkdocs build --strict
 ```
+
+## CI
+
+Four workflows, all in `.github/workflows/`:
+
+- **`lint.yml`** — `ruff format --check`, `ruff check` and `ty check`, on
+  every push to `master` and every pull request. Its own workflow rather than a
+  job in `tests.yml` because GitHub renders a status badge per *workflow*,
+  and the README carries one for it. The ruff version is pinned in the
+  workflow's `env` and again as the `rev` in `.pre-commit-config.yaml`; bump
+  the two together, or a commit that passes locally can fail in CI over
+  formatting alone.
+- **`tests.yml`** — the test suite under `pytest --cov`, same triggers. It
+  runs on the runner named by the **repository variable `GPU_RUNNER`**:
+  GitHub's GPU-enabled larger runners take a label chosen when the runner
+  group is created, so there is nothing to hard-code. Unset, the job falls
+  back to `ubuntu-latest`, where everything needing a device skips itself
+  and the host-side tests still run — green, but measuring much less. On a
+  push to `master` it writes the coverage percentage to a gist for the README
+  badge, which wants the variable `COVERAGE_GIST_ID` and a secret
+  `GIST_TOKEN` with the `gist` scope; without them that step is skipped
+  rather than failed, so a fork's pull request does not go red over a secret
+  it cannot have.
+- **`docs.yml`** — the site, below.
+- **`publish.yml`** — the PyPI release.
+
+`ty` is scoped to `menodax/` by `[tool.ty.src]` in `pyproject.toml`, which is
+what both CI and the pre-commit hook read (the hook is deliberately passed no
+filenames — checking a file alone would report imports it cannot see). The
+exclusion is not tidiness: `tests/`, `examples/` and `reference/` splat
+`**kwargs` dicts into `solve`, which ty resolves against every keyword in turn,
+and lean on blackjax and diffrax, neither of which ships type information.
+Inside `menodax/` the check is clean and the few suppressions are narrow and
+in-line — CUDA intrinsics (`cuda.grid`, `cuda.threadIdx`) that numba only
+materialises during lowering, and cvxopt's untyped `amd`.
+
+Coverage counts `menodax/` only and `[tool.coverage.report]` excludes
+`cuda.jit` bodies: CPython never executes a line of device code, so counting it
+as unreached would measure the compiler rather than the tests.
 
 The site is `docs/` plus `mkdocs.yml`, and `.github/workflows/docs.yml`
 publishes it to GitHub Pages on every push to `master`. The long-form prose is
