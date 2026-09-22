@@ -1,12 +1,11 @@
 """Solver scaling benchmark on the Lorenz system.
 
 Sweeps ensemble size from 3 to 100k on a log scale and records solve time for
-the modax Tsit5 kernel, Diffrax Tsit5, and Julia Tsit5 with both DiffEqGPU
-ensemble backends. Outputs a CSV and a log-log plot per scenario named after
-the GPU.
+modax Tsit5, Diffrax Tsit5, and Julia Tsit5 with both DiffEqGPU ensemble
+backends. Outputs a CSV and a log-log plot per scenario named after the GPU.
 
 Usage:
-    uv run python benchmarks/tsit5_lorenz_scaling/main.py
+    uv run python benchmarks/nonstiff_lorenz_scaling/main.py
 """
 
 import sys
@@ -47,7 +46,7 @@ BENCHMARK = SweepBenchmark(
     julia_system="lorenz",
     cases=(
         SweepCase(
-            key="modax tsit5 kernel",
+            key="modax tsit5",
             color="#f0a202",
             marker="P",
             solve_fn=tsit5_solve,
@@ -61,7 +60,7 @@ BENCHMARK = SweepBenchmark(
             kwargs=_LOCAL_SOLVER_KWARGS,
         ),
         SweepCase(
-            key="julia tsit5 array",
+            key="julia tsit5 EnsembleGPUArray",
             color="#9b59b6",
             marker="^",
             mode="julia",
@@ -69,7 +68,7 @@ BENCHMARK = SweepBenchmark(
             kwargs=_SOLVER_KWARGS,
         ),
         SweepCase(
-            key="julia tsit5 kernel",
+            key="julia tsit5 EnsembleGPUKernel",
             color="#9b59b6",
             marker="v",
             linestyle="--",

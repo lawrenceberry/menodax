@@ -1,8 +1,8 @@
 """Dimensionality scaling benchmark on the non-stiff coupled VDP lattice (Tsit5).
 
 Sweeps ODE dimension from 2 to 128 (n_osc = 1 to 64) on a log scale with a
-fixed ensemble of 1000 trajectories and records solve time for the modax Tsit5
-kernel, Diffrax Tsit5, and Julia Tsit5 with both DiffEqGPU ensemble backends.
+fixed ensemble of 1000 trajectories and records solve time for modax Tsit5,
+Diffrax Tsit5, and Julia Tsit5 with both DiffEqGPU ensemble backends.
 EnsembleGPUKernel failures (expected for large dimensions) are stored as null
 and omitted from the plot. Runs both "identical" and "divergent" scenarios;
 outputs a CSV and log-log plot per scenario, named after the GPU and scenario.
@@ -11,7 +11,7 @@ Uses the non-stiff coupled VDP variant (mu = 1.0) so that explicit Tsit5
 remains an appropriate solver.
 
 Usage:
-    uv run python benchmarks/tsit5_vdp_dimensionality/main.py
+    uv run python benchmarks/nonstiff_vdp_dimensionality/main.py
 """
 
 import sys
@@ -73,7 +73,7 @@ BENCHMARK = SweepBenchmark(
     julia_system="vdp",
     cases=(
         SweepCase(
-            key="modax tsit5 kernel",
+            key="modax tsit5",
             color="#f0a202",
             marker="P",
             solve_fn=tsit5_solve,
@@ -90,7 +90,7 @@ BENCHMARK = SweepBenchmark(
             kwargs=_LOCAL_SOLVER_KWARGS,
         ),
         SweepCase(
-            key="julia tsit5 array",
+            key="julia tsit5 EnsembleGPUArray",
             color="#9b59b6",
             marker="^",
             mode="julia",
@@ -98,7 +98,7 @@ BENCHMARK = SweepBenchmark(
             kwargs=_SOLVER_KWARGS,
         ),
         SweepCase(
-            key="julia tsit5 kernel",
+            key="julia tsit5 EnsembleGPUKernel",
             color="#9b59b6",
             marker="v",
             linestyle="--",

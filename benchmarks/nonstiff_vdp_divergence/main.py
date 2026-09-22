@@ -6,7 +6,7 @@ For each solver and divergence value, the benchmark records solve time and the
 actual distribution of accepted plus rejected Tsit5 steps.
 
 Usage:
-    uv run python benchmarks/tsit5_vdp_divergence/main.py
+    uv run python benchmarks/nonstiff_vdp_divergence/main.py
 """
 
 import sys
@@ -56,22 +56,22 @@ BENCHMARK = DivergenceBenchmark(
     julia_system_config={"n_osc": _N_OSC, "mu": _MU_NONSTIFF, "d": _D, "omega": _OMEGA},
     extra_fields={"n_osc": _N_OSC},
     cases=(
-        DivergenceCase(key="modax tsit5 kernel", color="#f0a202", marker="s"),
+        DivergenceCase(key="modax tsit5", color="#f0a202", marker="s"),
         DivergenceCase(
-            key="modax tsit5 kernel (sorted)",
+            key="modax tsit5 (sorted)",
             color="#f0a202",
             marker="P",
             sort_by_steps=True,
         ),
         DivergenceCase(
-            key="julia tsit5 kernel",
+            key="julia tsit5 EnsembleGPUKernel",
             color="#d35400",
             marker="v",
             mode="julia",
             ensemble_backend="EnsembleGPUKernel",
         ),
         DivergenceCase(
-            key="julia tsit5 kernel (sorted)",
+            key="julia tsit5 EnsembleGPUKernel (sorted)",
             color="#d35400",
             marker="X",
             mode="julia",

@@ -2,12 +2,12 @@
 
 Runs the 96D coupled VDP lattice (n_osc = 48) with 1000 trajectories while
 sweeping the ``make_scenario(..., divergence=...)`` knob, timing the fp32
-Rodas5P kernel both as-is and with trajectories pre-sorted by attempted step
+Rodas5P solve both as-is and with trajectories pre-sorted by attempted step
 count. For each solver and divergence value, the benchmark records solve time
 and the actual distribution of accepted plus rejected Rodas5P steps.
 
 Usage:
-    uv run python benchmarks/rodas5P_vdp_divergence/main.py
+    uv run python benchmarks/stiff_vdp_divergence/main.py
 """
 
 import sys
@@ -53,9 +53,9 @@ BENCHMARK = DivergenceBenchmark(
     julia_system_config={"n_osc": _N_OSC},
     extra_fields={"n_osc": _N_OSC},
     cases=(
-        DivergenceCase(key="modax rodas5P kernel fp32", color="#f0a202", marker="s"),
+        DivergenceCase(key="modax rodas5P fp32", color="#f0a202", marker="s"),
         DivergenceCase(
-            key="modax rodas5P kernel fp32 (sorted)",
+            key="modax rodas5P fp32 (sorted)",
             color="#f0a202",
             marker="P",
             sort_by_steps=True,

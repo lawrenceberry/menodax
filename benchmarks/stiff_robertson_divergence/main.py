@@ -6,7 +6,7 @@ value, the benchmark records solve time and the actual distribution of accepted
 plus rejected Rodas5P steps.
 
 Usage:
-    uv run python benchmarks/rodas5P_robertson_divergence/main.py
+    uv run python benchmarks/stiff_robertson_divergence/main.py
 """
 
 import sys
@@ -47,9 +47,9 @@ BENCHMARK = DivergenceBenchmark(
     julia_solve=julia_rodas5P_solve,
     julia_system="robertson",
     cases=(
-        DivergenceCase(key="modax rodas5P kernel fp32", color="#f0a202", marker="s"),
+        DivergenceCase(key="modax rodas5P fp32", color="#f0a202", marker="s"),
         DivergenceCase(
-            key="modax rodas5P kernel fp32 (sorted)",
+            key="modax rodas5P fp32 (sorted)",
             color="#f0a202",
             marker="P",
             sort_by_steps=True,
@@ -64,14 +64,14 @@ BENCHMARK = DivergenceBenchmark(
         #     max_divergence=1.5,
         # ),
         # DivergenceCase(
-        #     key="julia rodas5P array",
+        #     key="julia rodas5P EnsembleGPUArray",
         #     color="#9b59b6",
         #     marker="D",
         #     mode="julia",
         #     ensemble_backend="EnsembleGPUArray",
         # ),
         DivergenceCase(
-            key="julia rodas5P kernel",
+            key="julia rodas5P EnsembleGPUKernel",
             color="#d35400",
             marker="v",
             mode="julia",
@@ -79,7 +79,7 @@ BENCHMARK = DivergenceBenchmark(
             max_divergence=2.5,
         ),
         DivergenceCase(
-            key="julia rodas5P kernel (sorted)",
+            key="julia rodas5P EnsembleGPUKernel (sorted)",
             color="#d35400",
             marker="X",
             mode="julia",
