@@ -5,6 +5,14 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
+    inputs:
+      force_badge:
+        description: >
+          Rewrite the coverage gist even when the percentage is unchanged.
+          The action skips an identical write, so this is what proves the
+          badge path works end to end after rotating GIST_TOKEN.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -92,3 +100,6 @@ jobs:
           valColorRange: ${{ steps.coverage.outputs.percent }}
           minColorRange: 50
           maxColorRange: 90
+          # Off by default so an unchanged percentage leaves the gist, and its
+          # revision history, alone.
+          forceUpdate: ${{ inputs.force_badge || false }}
