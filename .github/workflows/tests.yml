@@ -67,17 +67,19 @@ jobs:
           if-no-files-found: ignore
 
       - name: Update the coverage badge
-        # Only from master, only once the gist is set up, and only from a run
-        # that had a GPU. A pull request from a fork gets no secrets, and the
-        # badge is meant to report the state of master rather than of whatever
-        # was last proposed; the GPU condition matters just as much, because a
-        # fallback run skips the kernels and would overwrite the badge with the
-        # coverage of the host-side remainder. Set the repository variable
-        # `COVERAGE_GIST_ID` to the gist's id and the secret `GIST_TOKEN` to a
-        # token with the `gist` scope.
+        # Only from master, and only once the gist is set up: a pull request
+        # from a fork gets no secrets, and the badge is meant to report the
+        # state of master rather than of whatever was last proposed. The gist
+        # is named by the repository variable `COVERAGE_GIST_ID` and written
+        # with the secret `GIST_TOKEN`, a token carrying the `gist` scope.
+        #
+        # Note what the number means without `GPU_RUNNER`: a fallback run
+        # skips every test that needs a driver, so the badge then reports the
+        # coverage of the host-side remainder rather than of the suite. It
+        # rises to the real figure on the first run that has a device.
         if: >
           github.event_name == 'push' && github.ref == 'refs/heads/master'
-          && vars.COVERAGE_GIST_ID != '' && vars.GPU_RUNNER != ''
+          && vars.COVERAGE_GIST_ID != ''
         uses: schneegans/dynamic-badges-action@v1.9.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}

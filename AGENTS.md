@@ -70,9 +70,11 @@ Four workflows, all in `.github/workflows/`:
   `master` it writes the coverage percentage to a gist for the README badge,
   which wants the variable `COVERAGE_GIST_ID` and a secret `GIST_TOKEN` with
   the `gist` scope; without them that step is skipped rather than failed, so a
-  fork's pull request does not go red over a secret it cannot have. That step
-  also requires `GPU_RUNNER`, or a fallback run would overwrite the badge with
-  the coverage of the handful of tests that do not need a device.
+  fork's pull request does not go red over a secret it cannot have. It is not
+  gated on `GPU_RUNNER`, so read the number with the runner in mind: a
+  fallback run skips everything needing a driver and the badge then reports
+  the coverage of the host-side remainder, rising to the real figure on the
+  first run with a device.
 - **`docs.yml`** — the site, below.
 - **`publish.yml`** — the PyPI release.
 
