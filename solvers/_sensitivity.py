@@ -423,7 +423,7 @@ def make_sensitivity_solver(
 
         if not isinstance(dt_span, SymbolicZero):
             raise NotImplementedError(
-                "differentiating a modax solve with respect to t_span is not "
+                "differentiating a menodax solve with respect to t_span is not "
                 "supported; wrap the save times in jax.lax.stop_gradient, or "
                 "differentiate with respect to y0 and/or params only"
             )

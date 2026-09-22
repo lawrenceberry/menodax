@@ -47,7 +47,7 @@ names the two backends spell differently (`math.exp`/`jnp.exp`, `max`/
 
 | Member | What it is | Used for |
 |--------|------------|----------|
-| `.device` | the tuple form | the modax solve |
+| `.device` | the tuple form | the menodax solve |
 | `.jax` | the array form | the Diffrax baseline |
 | `.host` | the device arithmetic in plain Python | comparing the two without a GPU, as `tests/test_examples.py` does |
 

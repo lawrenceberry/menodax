@@ -28,7 +28,7 @@ def compile_device_source(name: str, lines: list[str], namespace: dict | None = 
     refers to by name.
     """
     source = "\n".join(lines) + "\n"
-    filename = f"<modax generated {name} {next(_SOURCES)}>"
+    filename = f"<menodax generated {name} {next(_SOURCES)}>"
     linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)
     scope: dict = {}
     exec(compile(source, filename, "exec"), dict(namespace or {}), scope)  # noqa: S102

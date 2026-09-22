@@ -1,4 +1,4 @@
-site_name: modax
+site_name: menodax
 site_description: GPU-accelerated ODE solvers for massive ensembles of low-dimensional trajectories
 site_url: https://lawrenceberry.github.io/modax/
 repo_url: https://github.com/lawrenceberry/modax

@@ -12,7 +12,7 @@ Run it with:
 uv run python examples/21cm_igm_evolution/main.py
 ```
 
-The modax solve runs as a Numba-CUDA kernel, so this needs a CUDA GPU.
+The menodax solve runs as a Numba-CUDA kernel, so this needs a CUDA GPU.
 The `scipy` backend below is the CPU-only path.
 
 The default run uses 50,000 trajectories.  Tests use a much smaller batch.
@@ -20,7 +20,7 @@ The default run uses 50,000 trajectories.  Tests use a much smaller batch.
 ## Solver-backend benchmark
 
 The batched ensemble solve can be timed across solver backends on identical
-right-hand-side code with the `--benchmark` flag: modax Rodas5P (GPU), Diffrax
+right-hand-side code with the `--benchmark` flag: menodax Rodas5P (GPU), Diffrax
 Kvaerno5 (GPU), and serial `scipy.solve_ivp` LSODA (the no-GPU baseline used by
 codes such as ECHO21).
 
@@ -28,7 +28,7 @@ codes such as ECHO21).
 # head-to-head at N=2000 (scipy is the slow one)
 uv run python examples/21cm_igm_evolution/main.py --benchmark --n 2000
 # GPU backends at the full default ensemble size
-uv run python examples/21cm_igm_evolution/main.py --benchmark --backends modax diffrax --n 50000
+uv run python examples/21cm_igm_evolution/main.py --benchmark --backends menodax diffrax --n 50000
 ```
 
 ## Model

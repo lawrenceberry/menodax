@@ -28,8 +28,12 @@ uv run pytest tests/test_examples.py -v
 uv run ruff format
 uv run ruff check --fix
 
-# Docs (mkdocs-material + mkdocstrings); the group installs neither CUDA nor
-# the project, since griffe reads solvers/ statically
+# Docs (mkdocs-material + mkdocstrings). Build them in their OWN environment:
+# `uv sync` with a group writes .venv, so syncing the docs group into the
+# default environment replaces the project's packages with the docs toolchain.
+# The group installs neither CUDA nor the project, since griffe reads solvers/
+# statically.
+export UV_PROJECT_ENVIRONMENT=.venv-docs
 uv sync --only-group docs --no-install-project
 uv run --no-sync mkdocs serve      # or: mkdocs build --strict
 ```
@@ -418,7 +422,7 @@ touching the code.
   the whole tangent map, so the call carries a fourth direction for the inner
   one's own variation; the solver passes zero for it, which leaves the plain
   bilinear form. Both the tuple-shaped `jvp` and its composability are
-  modax-driven additions to the numba-enzyme fork, where every endpoint now
+  menodax-driven additions to the numba-enzyme fork, where every endpoint now
   composes over a `jvp`; see `wheels/README.md`.
 - **The unit and zero directions are windows into one constant-memory table**,
   `seed_table`: `2L` zeros with a single `1.0` at `L`, so the window starting at

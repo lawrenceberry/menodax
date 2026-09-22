@@ -20,7 +20,7 @@ import jax
 import numpy as np
 
 _CAPSULE_NAME = b"xla._CUSTOM_CALL_TARGET"
-_TARGET_NAME = "modax_numba_cuda_abi_launch"
+_TARGET_NAME = "menodax_numba_cuda_abi_launch"
 _CUSTOM_CALL_API_VERSION = 4
 _REGISTERED = False
 _LOADED_LIB: ctypes.CDLL | None = None
@@ -213,7 +213,7 @@ static ffi::Error LaunchNumbaCudaAbi(
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
-    modax_numba_cuda_abi_launch, LaunchNumbaCudaAbi,
+    menodax_numba_cuda_abi_launch, LaunchNumbaCudaAbi,
     ffi::Ffi::Bind()
         .Ctx<ffi::PlatformStream<void*>>()
         .Attr<int64_t>("function")
@@ -234,7 +234,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
 
 def _build_bridge() -> Path:
     include_dir = Path(jax.ffi.include_dir())
-    build_dir = Path(tempfile.gettempdir()) / "modax_jax_numba_cuda_bridge"
+    build_dir = Path(tempfile.gettempdir()) / "menodax_jax_numba_cuda_bridge"
     build_dir.mkdir(parents=True, exist_ok=True)
     source = _source()
     digest = hashlib.sha256(source.encode()).hexdigest()[:16]

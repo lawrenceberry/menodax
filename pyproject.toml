@@ -1,14 +1,25 @@
 [project]
-name = "modax"
-version = "0.1.0"
-description = "Add your description here"
+name = "menodax"
+version = "0.0.1"
+description = "GPU-accelerated ODE solvers for massive ensembles of low-dimensional trajectories"
 readme = "README.md"
 requires-python = ">=3.13"
+authors = [{ name = "Lawrence Berry", email = "lawrenceberry@outlook.com" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+# Only what `solvers/` itself needs. The Diffrax and BlackJAX baselines the
+# examples compare against, and the matplotlib their figures use, moved to the
+# dev group: nothing here solves an ODE without them, and PyPI rejects a
+# distribution whose metadata carries a direct URL dependency, which the
+# BlackJAX fork is.
 dependencies = [
-    "blackjax @ git+https://github.com/handley-lab/blackjax@nested_sampling",
-    "diffrax>=0.7.2",
     "jax>=0.9.1",
-    "matplotlib>=3.10.8",
     # numba itself is still needed: numba-enzyme builds on it. numba-cuda is
     # not -- it came in only through nvmath's numba extra, and numba-cuda-mlir
     # vendors its own numba_cuda rather than depending on that package.
@@ -32,9 +43,14 @@ dependencies = [
     "scipy>=1.17.1",
 ]
 
+[project.urls]
+Documentation = "https://lawrenceberry.github.io/modax/"
+Source = "https://github.com/lawrenceberry/modax"
+Issues = "https://github.com/lawrenceberry/modax/issues"
+
 [project.optional-dependencies]
 # scikit-sparse used to live behind this extra; it is a plain dependency now.
-# The name stays so `modax[sparse]` in a consumer's pyproject keeps resolving.
+# The name stays so `menodax[sparse]` in a consumer's pyproject keeps resolving.
 sparse = []
 
 cuda12 = [
@@ -46,7 +62,7 @@ cuda13 = [
 
 [tool.uv.sources]
 # A release asset rather than the `cuda` branch itself: the wheel is prebuilt
-# and hash-pinned in uv.lock, so `uv add modax` downloads ~73 MB and is done,
+# and hash-pinned in uv.lock, so `uv add menodax` downloads ~73 MB and is done,
 # with no build step and no LLVM in the way. Installing from the branch
 # (`{ git = "https://github.com/lawrenceberry/numba-enzyme", branch = "cuda" }`)
 # is equally self-contained -- its build hook stages the same binaries out of
@@ -66,6 +82,12 @@ docs = [
     "ruff>=0.15.5",
 ]
 dev = [
+    # The example baselines and their plotting, not runtime dependencies of the
+    # solvers. `uv sync` installs this group by default, so the examples run as
+    # they always did.
+    "blackjax @ git+https://github.com/handley-lab/blackjax@nested_sampling",
+    "diffrax>=0.7.2",
+    "matplotlib>=3.10.8",
     "pytest>=9.0.2",
     "pytest-benchmark>=5.2.3",
     "pytest-regressions>=2.10.0",
@@ -75,6 +97,10 @@ dev = [
 [tool.pytest.ini_options]
 markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
 addopts = "-m 'not slow'"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["solvers*"]

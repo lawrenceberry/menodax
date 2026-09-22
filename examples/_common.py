@@ -1,6 +1,6 @@
 """What the worked examples share: the solver backends and the benchmark.
 
-Each example's science runs on a modax kernel solver. For a like-for-like
+Each example's science runs on a menodax kernel solver. For a like-for-like
 timing it also drives two reference backends over the same right-hand side --
 Diffrax on the GPU under ``jax.vmap``, and ``scipy.solve_ivp`` on the CPU,
 the no-GPU baseline serial codes such as ECHO21 use. What differs between the
@@ -22,21 +22,21 @@ import numpy as np
 
 from examples.dual_backend import Forms
 
-BACKENDS = ("modax", "diffrax", "scipy")
+BACKENDS = ("menodax", "diffrax", "scipy")
 
 
 class Backends(NamedTuple):
     """How one example runs its ensemble on each backend.
 
-    ``modax_solve`` is the kernel solver (``solvers.tsit5.solve`` or
+    ``menodax_solve`` is the kernel solver (``solvers.tsit5.solve`` or
     ``solvers.rodas5P.solve``); ``diffrax_method`` names the Diffrax reference
     solver as its module suffix, ``"kvaerno5"`` or ``"tsit5"``. The three
     keyword dicts are what each solver is called with beyond
     ``(ode_fn, y0, t_span, params)``.
     """
 
-    modax_solve: Callable
-    modax_kwargs: dict[str, Any]
+    menodax_solve: Callable
+    menodax_kwargs: dict[str, Any]
     diffrax_method: str
     diffrax_kwargs: dict[str, Any]
     scipy_kwargs: dict[str, Any]
@@ -48,8 +48,8 @@ def make_solver(backend: str, backends: Backends):
     The reference solvers are imported here rather than at module load, so an
     example that only ever runs on the kernel solver never imports Diffrax.
     """
-    if backend == "modax":
-        return partial(backends.modax_solve, **backends.modax_kwargs)
+    if backend == "menodax":
+        return partial(backends.menodax_solve, **backends.menodax_kwargs)
     if backend == "diffrax":
         module = importlib.import_module(
             f"reference.solvers.python.diffrax_{backends.diffrax_method}"
@@ -68,7 +68,7 @@ def rhs_for(backend: str, rhs: Forms):
     The kernel solver compiles the ``device`` form with numba-cuda; the
     reference backends trace the ``jax`` one built from the same body.
     """
-    return rhs.device if backend == "modax" else rhs.jax
+    return rhs.device if backend == "menodax" else rhs.jax
 
 
 def time_solve(fn, repeats):

@@ -106,7 +106,7 @@ The fork carries changes that are not upstream:
 - **`jacfwd`** — forward-mode Jacobian of a tuple-returning primal. `jvp`
   differentiates a scalar-output primal, so a sweep yields a single Jacobian
   entry; a sweep of a multi-output one yields a whole column, and `jacfwd`
-  fills the whole matrix one sweep per column. modax does not use it: the
+  fills the whole matrix one sweep per column. menodax does not use it: the
   matrix would have to live in per-thread local memory. See `_make_kernel` in
   `solvers/rodas5P.py`.
 - **`jvp` for tuple-returning primals** — `jvp` used to be scalar-output only,
@@ -134,7 +134,7 @@ The fork carries changes that are not upstream:
   Enzyme preprocesses a callee before resolving a marker inside it, so those
   builds run Enzyme once per stage, feeding each output into the next link.
 - **reverse-mode multi-output APIs** — `vjp` and `jacrev`, the reverse
-  counterparts of `jvp` and `jacfwd`. modax does not use them; see "Derived
+  counterparts of `jvp` and `jacfwd`. menodax does not use them; see "Derived
   Jacobians" in `AGENTS.md` for why the solver is forward-mode.
 - **a compile-time direction folds, and the single-column and single-row
   endpoints are gone with it** — the fork briefly carried `jacfwd_column` and
@@ -152,7 +152,7 @@ The fork carries changes that are not upstream:
   call site; passing `signature` only constrains that. A call of more than 30
   positional arguments, which CPython compiles as a star call that numba's
   inliner rejects, is compiled as a separate function instead of inlined, and
-  nvJitLink's LTO recovers the cost: modax's derivative call at `n_vars=48`
+  nvJitLink's LTO recovers the cost: menodax's derivative call at `n_vars=48`
   carries 53 arguments and solves no slower than the earlier raw extern.
 - **LTO IR instead of PTX** — the derivative is emitted as NVVM LTO IR, which
   makes numba-cuda-mlir compile the calling kernel to LTO IR too, so nvJitLink

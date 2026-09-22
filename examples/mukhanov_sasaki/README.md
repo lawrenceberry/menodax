@@ -15,7 +15,7 @@ Run it with:
 uv run python examples/mukhanov_sasaki/main.py
 ```
 
-The modax solve runs as a Numba-CUDA kernel, so this needs a CUDA GPU.
+The menodax solve runs as a Numba-CUDA kernel, so this needs a CUDA GPU.
 The `scipy` backend below is the CPU-only path.
 
 The perturbation equations and slow-roll approximation follow the conventions in Daniel Baumann's TASI lectures on inflation.
@@ -24,14 +24,14 @@ The perturbation equations and slow-roll approximation follow the conventions in
 
 The mode solve can be timed across solver backends on identical right-hand-side
 code with the `--benchmark` flag. Because the mode equation is non-stiff and
-oscillatory, the comparison uses explicit solvers: modax Tsit5 (GPU), Diffrax
+oscillatory, the comparison uses explicit solvers: menodax Tsit5 (GPU), Diffrax
 Tsit5 (GPU), and `scipy.solve_ivp` RK45 (serial CPU baseline).
 
 ```bash
 # all three backends at 64 modes (scipy is the slow one)
 uv run python examples/mukhanov_sasaki/main.py --benchmark --n 64
 # GPU backends at a saturating ensemble size
-uv run python examples/mukhanov_sasaki/main.py --benchmark --backends modax diffrax --n 4096
+uv run python examples/mukhanov_sasaki/main.py --benchmark --backends menodax diffrax --n 4096
 ```
 
 ## Background Inflation

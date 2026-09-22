@@ -1,0 +1,50 @@
+name: publish
+
+# Every push to master, as asked. PyPI refuses a version it already has, so the
+# upload is `skip-existing`: a push that does not change `version` in
+# pyproject.toml uploads nothing and stays green, and the release happens on
+# the push that bumps it. (Tagging is the conventional trigger for this, and
+# `on: release` is a two-line change if that reads better later.)
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Build the sdist and wheel
+        run: uv build
+      - name: Check the metadata PyPI will read
+        run: uvx twine check --strict dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # Trusted publishing: PyPI mints a short-lived token for this workflow from
+    # the OIDC identity below, so there is no API token in the repository's
+    # secrets to leak or rotate. It needs a publisher configured on the PyPI
+    # side first -- project, owner, repository, this workflow's filename and
+    # this environment -- or the upload is rejected.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/menodax
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
