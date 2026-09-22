@@ -3,7 +3,7 @@ site_description: GPU-accelerated ODE solvers for massive ensembles of low-dimen
 site_url: https://lawrenceberry.github.io/modax/
 repo_url: https://github.com/lawrenceberry/modax
 repo_name: lawrenceberry/modax
-edit_uri: edit/master/docs/
+edit_uri: edit/main/docs/
 copyright: Copyright &copy; Lawrence Berry
 
 # The long-form prose lives in README.md and the examples' own READMEs, which

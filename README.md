@@ -2,13 +2,13 @@
 
 <!--
 The coverage badge reads a gist that the `tests` workflow rewrites on every
-push to master; the id below is the repository variable COVERAGE_GIST_ID.
+push to main; the id below is the repository variable COVERAGE_GIST_ID.
 These badges sit above the `overview` snippet marker, so the documentation
 site does not repeat them.
 -->
-[![tests](https://github.com/lawrenceberry/modax/actions/workflows/tests.yml/badge.svg?branch=master)](https://github.com/lawrenceberry/modax/actions/workflows/tests.yml)
+[![tests](https://github.com/lawrenceberry/modax/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/lawrenceberry/modax/actions/workflows/tests.yml)
 [![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Flawrenceberry%2Fb451e14a9620fabb0d49c345f13b5414%2Fraw%2Fmodax-coverage.json)](https://github.com/lawrenceberry/modax/actions/workflows/tests.yml)
-[![lint](https://github.com/lawrenceberry/modax/actions/workflows/lint.yml/badge.svg?branch=master)](https://github.com/lawrenceberry/modax/actions/workflows/lint.yml)
+[![lint](https://github.com/lawrenceberry/modax/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/lawrenceberry/modax/actions/workflows/lint.yml)
 [![PyPI](https://img.shields.io/pypi/v/modax-solvers)](https://pypi.org/project/modax-solvers/)
 [![Downloads](https://img.shields.io/pypi/dm/modax-solvers)](https://pypi.org/project/modax-solvers/)
 [![Python](https://img.shields.io/pypi/pyversions/modax-solvers)](https://pypi.org/project/modax-solvers/)

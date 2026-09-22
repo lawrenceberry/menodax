@@ -5,7 +5,7 @@ name: lint
 # README reports. Nothing here needs a GPU or the CUDA toolchain.
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Pinned so a ruff release cannot turn master red on its own. Keep in step
+  # Pinned so a ruff release cannot turn main red on its own. Keep in step
   # with the `rev` in .pre-commit-config.yaml and the floor in pyproject.toml.
   RUFF_VERSION: "0.15.5"
 

@@ -1,13 +1,13 @@
 name: publish
 
-# Every push to master, as asked. PyPI refuses a version it already has, so the
+# Every push to main, as asked. PyPI refuses a version it already has, so the
 # upload is `skip-existing`: a push that does not change `version` in
 # pyproject.toml uploads nothing and stays green, and the release happens on
 # the push that bumps it. (Tagging is the conventional trigger for this, and
 # `on: release` is a two-line change if that reads better later.)
 on:
   push:
-    branches: [master]
+    branches: [main]
   workflow_dispatch:
 
 jobs:

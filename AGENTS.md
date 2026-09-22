@@ -55,7 +55,7 @@ uv run --no-sync mkdocs serve      # or: mkdocs build --strict
 Four workflows, all in `.github/workflows/`:
 
 - **`lint.yml`** — `ruff format --check`, `ruff check` and `ty check`, on
-  every push to `master` and every pull request. Its own workflow rather than a
+  every push to `main` and every pull request. Its own workflow rather than a
   job in `tests.yml` because GitHub renders a status badge per *workflow*,
   and the README carries one for it. The ruff version is pinned in the
   workflow's `env` and again as the `rev` in `.pre-commit-config.yaml`; bump
@@ -67,7 +67,7 @@ Four workflows, all in `.github/workflows/`:
   group is created, so there is nothing to hard-code. Unset, the job falls
   back to `ubuntu-latest`, where everything needing a driver skips itself and
   only the host-side remainder runs — green, but saying little. On a push to
-  `master` it writes the coverage percentage to a gist for the README badge,
+  `main` it writes the coverage percentage to a gist for the README badge,
   which wants the variable `COVERAGE_GIST_ID` and a secret `GIST_TOKEN` with
   the `gist` scope; without them that step is skipped rather than failed, so a
   fork's pull request does not go red over a secret it cannot have. It is not
@@ -93,7 +93,7 @@ Coverage counts `modax/` only and `[tool.coverage.report]` excludes
 as unreached would measure the compiler rather than the tests.
 
 The site is `docs/` plus `mkdocs.yml`, and `.github/workflows/docs.yml`
-publishes it to GitHub Pages on every push to `master`. The long-form prose is
+publishes it to GitHub Pages on every push to `main`. The long-form prose is
 *not* duplicated there: the pages pull sections out of `README.md`, the
 examples' READMEs and `wheels/README.md` with `pymdownx.snippets`, so
 `<!-- --8<-- [start:name] -->` / `[end:name]` markers in those files are

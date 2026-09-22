@@ -2,7 +2,7 @@ name: docs
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -11,7 +11,7 @@ permissions:
   id-token: write
 
 # One deployment at a time; a push mid-run queues rather than cancelling, so
-# master always ends up published.
+# main always ends up published.
 concurrency:
   group: pages
   cancel-in-progress: false
