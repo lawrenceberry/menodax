@@ -19,10 +19,10 @@ jobs:
     # GitHub's GPU-enabled larger runners carry a label chosen when the runner
     # group is created, so there is no name that could be hard-coded here:
     # set the repository variable `GPU_RUNNER` to that label. Without it the
-    # job falls back to an ordinary runner, where everything that needs a
-    # device skips itself (`cuda.is_available()`) and what is left --
-    # `test_examples.py`, the sparsity colouring, the symbolic factorisation --
-    # still runs, so the workflow is meaningful either way.
+    # job falls back to an ordinary runner and skips everything that needs a
+    # driver, which is nearly all of it -- what survives is the host-side work,
+    # the sparsity colouring and the symbolic factorisation. That run is green
+    # but says little, which is why it is not allowed to write the badge.
     runs-on: ${{ vars.GPU_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 120
     steps:
@@ -67,14 +67,17 @@ jobs:
           if-no-files-found: ignore
 
       - name: Update the coverage badge
-        # Only from master, and only once the gist is set up: a pull request
-        # from a fork gets no secrets, and the badge is meant to report the
-        # state of master rather than of whatever was last proposed. Set the
-        # repository variable `COVERAGE_GIST_ID` to the gist's id and the
-        # secret `GIST_TOKEN` to a token with the `gist` scope.
+        # Only from master, only once the gist is set up, and only from a run
+        # that had a GPU. A pull request from a fork gets no secrets, and the
+        # badge is meant to report the state of master rather than of whatever
+        # was last proposed; the GPU condition matters just as much, because a
+        # fallback run skips the kernels and would overwrite the badge with the
+        # coverage of the host-side remainder. Set the repository variable
+        # `COVERAGE_GIST_ID` to the gist's id and the secret `GIST_TOKEN` to a
+        # token with the `gist` scope.
         if: >
           github.event_name == 'push' && github.ref == 'refs/heads/master'
-          && vars.COVERAGE_GIST_ID != ''
+          && vars.COVERAGE_GIST_ID != '' && vars.GPU_RUNNER != ''
         uses: schneegans/dynamic-badges-action@v1.9.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}

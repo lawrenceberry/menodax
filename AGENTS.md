@@ -65,13 +65,14 @@ Four workflows, all in `.github/workflows/`:
   runs on the runner named by the **repository variable `GPU_RUNNER`**:
   GitHub's GPU-enabled larger runners take a label chosen when the runner
   group is created, so there is nothing to hard-code. Unset, the job falls
-  back to `ubuntu-latest`, where everything needing a device skips itself
-  and the host-side tests still run — green, but measuring much less. On a
-  push to `master` it writes the coverage percentage to a gist for the README
-  badge, which wants the variable `COVERAGE_GIST_ID` and a secret
-  `GIST_TOKEN` with the `gist` scope; without them that step is skipped
-  rather than failed, so a fork's pull request does not go red over a secret
-  it cannot have.
+  back to `ubuntu-latest`, where everything needing a driver skips itself and
+  only the host-side remainder runs — green, but saying little. On a push to
+  `master` it writes the coverage percentage to a gist for the README badge,
+  which wants the variable `COVERAGE_GIST_ID` and a secret `GIST_TOKEN` with
+  the `gist` scope; without them that step is skipped rather than failed, so a
+  fork's pull request does not go red over a secret it cannot have. That step
+  also requires `GPU_RUNNER`, or a fallback run would overwrite the badge with
+  the coverage of the handful of tests that do not need a device.
 - **`docs.yml`** — the site, below.
 - **`publish.yml`** — the PyPI release.
 
@@ -97,10 +98,13 @@ examples' READMEs and `wheels/README.md` with `pymdownx.snippets`, so
 load-bearing. Docstrings are rendered by mkdocstrings, so a cross-reference in
 one is written ``[`modax._sparsity`][]`` rather than as a Sphinx role.
 
-Most solver tests need a GPU and are skipped when `numba_cuda_mlir` is unavailable.
-`tests/test_examples.py` runs anywhere: it compiles the examples' device
-callbacks with `cuda.compile_ptx`, which exercises the full numba typing and
-lowering pipeline without a device.
+Most solver tests need a GPU and are skipped when `numba_cuda_mlir` is
+unavailable, every test module guarding itself on `cuda.is_available()`.
+`tests/test_examples.py` compiles the examples' device callbacks with
+`cuda.compile_ptx`, which exercises the full numba typing and lowering pipeline
+for a named compute capability -- but it initialises the CUDA driver on the way
+and raises `CudaSupportError` where there is none, so `_compile_device` skips
+without one. Very little of the suite therefore runs on a machine with no GPU.
 
 ## Architecture
 

@@ -69,7 +69,16 @@ def _load_example(name: str):
 
 
 def _compile_device(fn):
-    """Compile a flat tuple-returning device callback -> ``(ptx, const_bytes)``."""
+    """Compile a flat tuple-returning device callback -> ``(ptx, const_bytes)``.
+
+    Skips rather than fails without a device: `compile_ptx` produces PTX for a
+    named compute capability and needs no GPU to do it, but it initialises the
+    CUDA driver on the way and raises `CudaSupportError` where there is none.
+    Guarding here rather than per test means any new PTX-compiling test
+    inherits it.
+    """
+    if not cuda.is_available():
+        pytest.skip("compile_ptx initialises the CUDA driver")
     ptx, _ = cuda.compile_ptx(fn, _DEVICE_SIG, device=True, cc=(8, 0))
     const_bytes = sum(int(n) for n in re.findall(r"\.const .*?\[(\d+)\]", ptx))
     return ptx, const_bytes
