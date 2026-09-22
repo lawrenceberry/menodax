@@ -2,8 +2,8 @@
 
 Two parts of the Rodas5P kernel are emitted as source rather than written: the
 sparse factorisation and triangular solves, with every slot a literal
-([`solvers._sparse_direct`][]), and the Jacobian writer, with every colour's
-seed row a literal (``solvers.rodas5P``). Both are load-bearing -- see the
+([`menodax._sparse_direct`][]), and the Jacobian writer, with every colour's
+seed row a literal (``menodax.rodas5P``). Both are load-bearing -- see the
 measurements in AGENTS.md -- and both need the same three things done to the
 text they produce, which is what this module does once.
 """

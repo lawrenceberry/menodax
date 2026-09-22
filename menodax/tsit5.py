@@ -11,9 +11,9 @@ import jax.numpy as jnp
 import numpy as np
 from numba_cuda_mlir import cuda
 
-from solvers._jax_common import make_custom_vmap_solver, normalize_y0_params
-from solvers._jax_numba_custom_call import make_launch
-from solvers._numba_common import (
+from menodax._jax_common import make_custom_vmap_solver, normalize_y0_params
+from menodax._jax_numba_custom_call import make_launch
+from menodax._numba_common import (
     SCRATCH_ARGTYPE,
     SOLVER_ARGTYPES,
     build_error_weights,
@@ -22,14 +22,14 @@ from solvers._numba_common import (
     make_cuda_transposed_vector_writer,
     solver_stats,
 )
-from solvers._sensitivity import (
+from menodax._sensitivity import (
     SensitivitySpec,
     augmented_error_weights,
     augmented_y0,
     make_augmented_transposed_writer,
     make_sensitivity_solver,
 )
-from solvers._sensitivity import (
+from menodax._sensitivity import (
     clear_caches as clear_sensitivity_caches,
 )
 
@@ -593,7 +593,7 @@ def solve(
     The solve is an XLA custom call into the numba-cuda kernel, so it carries a
     ``jax.custom_jvp`` rule rather than being differentiated by XLA: asking for
     a derivative integrates the continuous forward-sensitivity system alongside
-    the state (see ``solvers/_sensitivity.py``). ``jax.jvp``, ``jax.jacfwd``,
+    the state (see ``menodax/_sensitivity.py``). ``jax.jvp``, ``jax.jacfwd``,
     ``jax.grad``, ``jax.jacrev`` and ``jax.value_and_grad`` all work with
     respect to ``y0`` and ``params``; ``t_span`` is not differentiable. An
     undifferentiated call runs the plain kernel and pays nothing.

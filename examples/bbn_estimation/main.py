@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from examples._common import Backends, parse_args, run_benchmark
 from examples.dual_backend import build_fn, build_rhs
-from solvers.rodas5P import solve as rodas5P_solve
+from menodax.rodas5P import solve as rodas5P_solve
 
 jax.config.update("jax_enable_x64", True)
 

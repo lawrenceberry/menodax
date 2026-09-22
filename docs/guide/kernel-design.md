@@ -20,12 +20,12 @@ XLA custom call.
 
 1. `solve` normalises the ensemble shapes and builds (or fetches from cache)
    the kernel for this `ode_fn`, dimension and set of options.
-2. `solvers._jax_numba_custom_call` compiles a launcher for that kernel,
+2. `menodax._jax_numba_custom_call` compiles a launcher for that kernel,
    registers it as an XLA FFI target, and exposes it through `ffi_abi_call`.
-3. `solvers._numba_common.ensemble_ffi_call` makes the call, with the state and
+3. `menodax._numba_common.ensemble_ffi_call` makes the call, with the state and
    stage buffers transposed to `(n_vars, N)` so a warp's accesses are
    coalesced. XLA materialises that transpose.
-4. `solvers._jax_common.make_custom_vmap_solver` wraps the result, so an outer
+4. `menodax._jax_common.make_custom_vmap_solver` wraps the result, so an outer
    `jax.vmap` over a single solve lowers to one native ensemble launch rather
    than to a batched trace.
 

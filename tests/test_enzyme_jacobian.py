@@ -35,7 +35,7 @@ def evaluate_derivatives(ode_fn, y, t, params):
     """
     from numba_cuda_mlir import types
 
-    from solvers._sensitivity import make_tangent
+    from menodax._sensitivity import make_tangent
 
     y = np.ascontiguousarray(y, dtype=np.float64)
     params = np.ascontiguousarray(params, dtype=np.float64)

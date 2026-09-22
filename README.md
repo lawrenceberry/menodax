@@ -1,6 +1,6 @@
 # menodax
 
-**[Documentation](https://lawrenceberry.github.io/modax/)**
+**[Documentation](https://lawrenceberry.github.io/menodax/)**
 
 <!-- --8<-- [start:overview] -->
 
@@ -18,7 +18,7 @@ to one native ensemble launch.
 
 <!-- --8<-- [start:solvers] -->
 
-## Solvers (`solvers/`)
+## Solvers (`menodax/`)
 
 | Method      | Type                   | Use for           | File           |
 |-------------|------------------------|-------------------|----------------|
@@ -63,7 +63,7 @@ but the pattern.
 ### The choices behind it
 
 All of the analysis happens once, on the host, when the kernel is built
-(`solvers/_sparse_direct.py`).
+(`menodax/_sparse_direct.py`).
 
 **AMD for the ordering, not COLAMD.** The obvious alternative, COLAMD, orders
 the *columns* so that fill stays bounded whatever row permutation partial
@@ -159,7 +159,7 @@ All solvers expose a single `solve(...)` entry point that integrates an
 ensemble in one call:
 
 ```python
-from solvers.rodas5P import solve
+from menodax.rodas5P import solve
 
 # ode_fn is a CUDA-device callable: (y, t, p) -> tuple
 y = solve(
@@ -196,7 +196,7 @@ Calling conventions:
   which runs Enzyme over the callback's LLVM IR.
 - **Tsit5** (explicit) needs no derivatives at all.
 
-Importing `solvers` enables JAX float64.
+Importing `menodax` enables JAX float64.
 
 <!-- --8<-- [end:api] -->
 
@@ -208,7 +208,7 @@ Both solvers are differentiable with respect to `y0` and `params`:
 
 ```python
 import jax
-from solvers.rodas5P import solve
+from menodax.rodas5P import solve
 
 def loss(params):
     y = solve(ode_fn, y0, t_span, params)

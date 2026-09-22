@@ -28,8 +28,8 @@ BACKENDS = ("menodax", "diffrax", "scipy")
 class Backends(NamedTuple):
     """How one example runs its ensemble on each backend.
 
-    ``menodax_solve`` is the kernel solver (``solvers.tsit5.solve`` or
-    ``solvers.rodas5P.solve``); ``diffrax_method`` names the Diffrax reference
+    ``menodax_solve`` is the kernel solver (``menodax.tsit5.solve`` or
+    ``menodax.rodas5P.solve``); ``diffrax_method`` names the Diffrax reference
     solver as its module suffix, ``"kvaerno5"`` or ``"tsit5"``. The three
     keyword dicts are what each solver is called with beyond
     ``(ode_fn, y0, t_span, params)``.

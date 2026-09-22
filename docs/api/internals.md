@@ -6,11 +6,11 @@ they are documented here.
 
 ## Sparsity and colouring
 
-::: solvers._sparsity
+::: menodax._sparsity
 
 ## The compiled sparse direct solver
 
-::: solvers._sparse_direct
+::: menodax._sparse_direct
     options:
       members:
         - ORDERINGS
@@ -27,19 +27,19 @@ they are documented here.
 
 ## Forward sensitivities
 
-::: solvers._sensitivity
+::: menodax._sensitivity
 
 ## Host-side kernel support
 
-::: solvers._numba_common
+::: menodax._numba_common
 
 ## The JAX glue
 
-::: solvers._jax_common
+::: menodax._jax_common
 
 ## The XLA FFI shim
 
-::: solvers._jax_numba_custom_call
+::: menodax._jax_numba_custom_call
     options:
       members:
         - CudaLaunch
@@ -50,4 +50,4 @@ they are documented here.
 
 ## Generated device source
 
-::: solvers._codegen
+::: menodax._codegen

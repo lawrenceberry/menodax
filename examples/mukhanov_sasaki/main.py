@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from examples._common import Backends, make_solver, parse_args, rhs_for, run_benchmark
 from examples.dual_backend import Forms, build_fn, build_rhs
-from solvers.tsit5 import solve as tsit5_solve
+from menodax.tsit5 import solve as tsit5_solve
 
 jax.config.update("jax_enable_x64", True)
 

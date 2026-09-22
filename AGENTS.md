@@ -31,7 +31,7 @@ uv run ruff check --fix
 # Docs (mkdocs-material + mkdocstrings). Build them in their OWN environment:
 # `uv sync` with a group writes .venv, so syncing the docs group into the
 # default environment replaces the project's packages with the docs toolchain.
-# The group installs neither CUDA nor the project, since griffe reads solvers/
+# The group installs neither CUDA nor the project, since griffe reads menodax/
 # statically.
 export UV_PROJECT_ENVIRONMENT=.venv-docs
 uv sync --only-group docs --no-install-project
@@ -44,7 +44,7 @@ publishes it to GitHub Pages on every push to `master`. The long-form prose is
 examples' READMEs and `wheels/README.md` with `pymdownx.snippets`, so
 `<!-- --8<-- [start:name] -->` / `[end:name]` markers in those files are
 load-bearing. Docstrings are rendered by mkdocstrings, so a cross-reference in
-one is written ``[`solvers._sparsity`][]`` rather than as a Sphinx role.
+one is written ``[`menodax._sparsity`][]`` rather than as a Sphinx role.
 
 Most solver tests need a GPU and are skipped when `numba_cuda_mlir` is unavailable.
 `tests/test_examples.py` runs anywhere: it compiles the examples' device
@@ -53,7 +53,7 @@ lowering pipeline without a device.
 
 ## Architecture
 
-### Solvers (`solvers/`)
+### Solvers (`menodax/`)
 
 | Method   | Type                   | Use for           | File          |
 |----------|------------------------|-------------------|---------------|
@@ -135,7 +135,7 @@ local memory. Nothing is shared and nothing synchronises inside a step.
 returns `J v`, never `J`, so a column at a time costs `n_vars + 1` sweeps. But
 two columns sharing no row are *structurally orthogonal* — their contributions
 to `J v` cannot collide — so seeding both at once returns both intact. Colouring
-the column intersection graph (`solvers/_sparsity.py`, NetworkX greedy, best of
+the column intersection graph (`menodax/_sparsity.py`, NetworkX greedy, best of
 five strategies) finds the fewest such groups. DISCO-EB's 50-variable
 Einstein-Boltzmann system takes **12 colours**: 13 sweeps where a column at a
 time takes 51.
@@ -155,7 +155,7 @@ It need *not* cover the factorisation's fill-in, which gets slots of its own.
 **`sparsity` is the whole interface.** There is no `linear_solver` argument and
 no protocol to satisfy: the kernel builds the solver from the pattern itself.
 With none it is `dense_lu_solver` over the dense colour grid; with one it is
-`solvers/_sparse_direct.py`, which compiles a direct sparse LU and a pair of
+`menodax/_sparse_direct.py`, which compiles a direct sparse LU and a pair of
 sparse triangular solves for that exact structure — any pattern, no structure
 assumed, which is the win a hand-written solver bought without the hand-written
 solver. The two are the same `(factorize_local, solve_local)` shape, so the
@@ -390,7 +390,7 @@ halving the LU buffer's footprint.
 
 ### Forward sensitivities
 
-Both solvers carry a `jax.custom_jvp` rule (`solvers/_sensitivity.py`), so
+Both solvers carry a `jax.custom_jvp` rule (`menodax/_sensitivity.py`), so
 `jax.jvp`, `jax.jacfwd`, `jax.grad`, `jax.jacrev` and `jax.value_and_grad` work
 with respect to `y0` and `params`. Asking for a derivative integrates the
 continuous forward-sensitivity system jointly with the state,

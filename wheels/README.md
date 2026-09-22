@@ -108,7 +108,7 @@ The fork carries changes that are not upstream:
   entry; a sweep of a multi-output one yields a whole column, and `jacfwd`
   fills the whole matrix one sweep per column. menodax does not use it: the
   matrix would have to live in per-thread local memory. See `_make_kernel` in
-  `solvers/rodas5P.py`.
+  `menodax/rodas5P.py`.
 - **`jvp` for tuple-returning primals** — `jvp` used to be scalar-output only,
   so a directional derivative of a vector field had to be assembled from
   `n_vars + 1` unit columns. It now also takes the array call shape,

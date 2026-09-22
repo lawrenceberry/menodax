@@ -58,7 +58,7 @@ from jax.custom_derivatives import SymbolicZero
 from numba_cuda_mlir import cuda, types
 from numba_enzyme import jvp
 
-from solvers._numba_common import as_cuda_device
+from menodax._numba_common import as_cuda_device
 
 
 @dataclass(frozen=True)

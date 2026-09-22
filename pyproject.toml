@@ -5,6 +5,10 @@ description = "GPU-accelerated ODE solvers for massive ensembles of low-dimensio
 readme = "README.md"
 requires-python = ">=3.13"
 authors = [{ name = "Lawrence Berry", email = "lawrenceberry@outlook.com" }]
+# PEP 639: an SPDX expression and the files themselves, rather than the old
+# free-text field and License classifier. Needs the setuptools pinned below.
+license = "MIT"
+license-files = ["LICENSE"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: GPU :: NVIDIA CUDA",
@@ -13,7 +17,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Mathematics",
     "Topic :: Scientific/Engineering :: Physics",
 ]
-# Only what `solvers/` itself needs. The Diffrax and BlackJAX baselines the
+# Only what `menodax/` itself needs. The Diffrax and BlackJAX baselines the
 # examples compare against, and the matplotlib their figures use, moved to the
 # dev group: nothing here solves an ODE without them, and PyPI rejects a
 # distribution whose metadata carries a direct URL dependency, which the
@@ -35,7 +39,7 @@ dependencies = [
     "networkx>=3.4",
     "numpy>=2.4.3",
     # SuiteSparse's AMD, which orders a sparsity pattern for the compiled sparse
-    # direct solver (solvers/_sparse_direct.py). It builds against the CHOLMOD
+    # direct solver (menodax/_sparse_direct.py). It builds against the CHOLMOD
     # headers, so the machine needs `apt install libsuitesparse-dev` or the
     # equivalent first; `ordering="natural"` is the way round it if that is
     # not an option.
@@ -44,9 +48,9 @@ dependencies = [
 ]
 
 [project.urls]
-Documentation = "https://lawrenceberry.github.io/modax/"
-Source = "https://github.com/lawrenceberry/modax"
-Issues = "https://github.com/lawrenceberry/modax/issues"
+Documentation = "https://lawrenceberry.github.io/menodax/"
+Source = "https://github.com/lawrenceberry/menodax"
+Issues = "https://github.com/lawrenceberry/menodax/issues"
 
 [project.optional-dependencies]
 # scikit-sparse used to live behind this extra; it is a plain dependency now.
@@ -103,7 +107,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["solvers*"]
+include = ["menodax*"]
 exclude = ["reference*", "tests*"]
 
 [tool.ruff.lint]
