@@ -835,7 +835,7 @@ wheels = [
 
 [[package]]
 name = "menodax"
-version = "0.0.2"
+version = "0.0.3"
 source = { editable = "." }
 dependencies = [
     { name = "cvxopt" },
@@ -854,9 +854,6 @@ cuda12 = [
 ]
 cuda13 = [
     { name = "jax", extra = ["cuda13"] },
-]
-sparse = [
-    { name = "scikit-sparse" },
 ]
 
 [package.dev-dependencies]
@@ -887,7 +884,6 @@ requires-dist = [
     { name = "numba-cuda-mlir", extras = ["cu13"], specifier = ">=0.5.1" },
     { name = "numba-enzyme-cuda", specifier = ">=0.2.1" },
     { name = "numpy", specifier = ">=2.4.3" },
-    { name = "scikit-sparse", marker = "extra == 'sparse'", specifier = ">=0.5" },
     { name = "scipy", specifier = ">=1.17.1" },
 ]
 provides-extras = ["sparse", "cuda12", "cuda13"]
@@ -1830,17 +1826,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/b8/00/bf077a505b4e649bdd3c47ff8ec967735ce2544c8e4a43aba42ee9bf935d/ruff-0.15.5-py3-none-win_amd64.whl", hash = "sha256:821d41c5fa9e19117616c35eaa3f4b75046ec76c65e7ae20a333e9a8696bc7fe", size = 11678972, upload-time = "2026-03-05T20:06:45.379Z" },
     { url = "https://files.pythonhosted.org/packages/fe/4e/cd76eca6db6115604b7626668e891c9dd03330384082e33662fb0f113614/ruff-0.15.5-py3-none-win_arm64.whl", hash = "sha256:b498d1c60d2fe5c10c45ec3f698901065772730b411f164ae270bb6bfcc4740b", size = 10965572, upload-time = "2026-03-05T20:06:16.984Z" },
 ]
-
-[[package]]
-name = "scikit-sparse"
-version = "0.5.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-    { name = "packaging" },
-    { name = "scipy" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/4a/70/2351a8755de0b3d9821864299d6bba3feafb91e106b9b762a2675910392e/scikit_sparse-0.5.0.tar.gz", hash = "sha256:217579251b1d91dcfeab5a16d6408f462dc353939f9e5dfa65ec0b41f0b603dc", size = 106285, upload-time = "2026-03-03T19:18:41.586Z" }
 
 [[package]]
 name = "scipy"

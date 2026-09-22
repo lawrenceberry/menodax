@@ -77,13 +77,14 @@ fill of an unpivoted `LU` of `S`, and it does so with a *symmetric* permutation
 `P S Pᵀ` that leaves every diagonal entry on the diagonal. It is what UMFPACK
 and SuperLU use in their "symmetric mode", for these reasons, and an iteration
 matrix is about as close to structurally symmetric as an unsymmetric matrix
-gets. It comes from SuiteSparse, through
-[cvxopt](https://cvxopt.org), whose wheel carries AMD itself, or through
-[scikit-sparse](https://scikit-sparse.readthedocs.io) when that is installed —
-which is the only route to CHOLMOD's other orderings, and needs
-`libsuitesparse-dev` or equivalent on the machine, so it lives behind the
-`sparse` extra. Both leave exactly the same fill; they differ only in how they
-break ties between equally good orders. `ordering="natural"` needs neither.
+gets. It comes from SuiteSparse through [cvxopt](https://cvxopt.org), whose
+wheel carries AMD itself, so no system library is involved;
+`ordering="natural"` skips the ordering and those two are the whole of the
+choice. CHOLMOD's other orderings were on offer while scikit-sparse was a
+dependency, and measuring them is what retired it: `colamd`, `nesdis` and
+`best` each returned AMD's own fill to the entry, and `metis` was strictly
+worse where it differed — 660 nonzeros against 484 on the Einstein-Boltzmann
+structure below, losing the perfect elimination order.
 
 **No pivoting at all.** The pattern has to be fixed at compile time and the same
 in every thread, so rows cannot be swapped on the numbers — which would also
@@ -543,10 +544,9 @@ and no system LLVM is involved. It provides the `numba_enzyme` import package,
 so upstream `numba-enzyme` must not be installed alongside it. See
 [wheels/README.md](wheels/README.md) for what is in the wheel and why.
 
-`pip install menodax` gets the same set, with no system library to install
-first — the AMD ordering comes from cvxopt's wheel. A GPU is needed to run a
-solve. `menodax[sparse]` adds scikit-sparse for CHOLMOD's other orderings and
-is the one thing here that wants `apt install libsuitesparse-dev`.
+`pip install menodax` gets the same set, and there is no system library to
+install first: every dependency ships wheels, the AMD ordering included. A GPU
+is needed to run a solve.
 
 <!-- --8<-- [end:install] -->
 

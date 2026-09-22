@@ -1,6 +1,6 @@
 [project]
 name = "menodax"
-version = "0.0.2"
+version = "0.0.3"
 description = "GPU-accelerated ODE solvers for massive ensembles of low-dimensional trajectories"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -41,12 +41,10 @@ dependencies = [
     "networkx>=3.4",
     "numpy>=2.4.3",
     # SuiteSparse's AMD, which orders a sparsity pattern for the compiled
-    # sparse direct solver (menodax/_sparse_direct.py). cvxopt rather than
-    # scikit-sparse because it ships the same AMD in a manylinux wheel:
-    # scikit-sparse builds against SuiteSparse's headers, which `pip install`
-    # cannot put on the machine, and a default `ordering="amd"` that only works
-    # after an apt install is not a default. The `sparse` extra adds
-    # scikit-sparse for CHOLMOD's other orderings.
+    # sparse direct solver (menodax/_sparse_direct.py). cvxopt ships it in a
+    # manylinux wheel; scikit-sparse, which used to supply it, has none and
+    # compiles against SuiteSparse's headers that `pip install` cannot put on
+    # the machine.
     "cvxopt>=1.3",
     "scipy>=1.17.1",
 ]
@@ -57,11 +55,11 @@ Source = "https://github.com/lawrenceberry/menodax"
 Issues = "https://github.com/lawrenceberry/menodax/issues"
 
 [project.optional-dependencies]
-# CHOLMOD's colamd/metis/nesdis/best orderings, which only scikit-sparse
-# reaches. It has no wheels and compiles against SuiteSparse's headers, so this
-# extra needs `apt install libsuitesparse-dev` (or the equivalent) first --
-# which is exactly why the default ordering does not depend on it.
-sparse = ["scikit-sparse>=0.5"]
+# scikit-sparse lived here, and before that in the dependencies. Nothing needs
+# it now: cvxopt's wheel carries the AMD, and CHOLMOD's other orderings were
+# measured to be AMD's own fill or worse. The name stays so that `menodax[sparse]`
+# in a consumer's pyproject keeps resolving.
+sparse = []
 
 cuda12 = [
     "jax[cuda12]>=0.9.1",

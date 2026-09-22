@@ -1131,10 +1131,9 @@ def solve(
     factorisation's fill-in, which the symbolic pass works out and gives slots
     of its own.
 
-    ``ordering`` picks the fill-reducing permutation, ``"amd"`` by default,
-    which needs ``scikit-sparse`` and SuiteSparse on the machine;
-    ``"natural"`` skips the ordering and needs neither. It is ignored without a
-    pattern.
+    ``ordering`` picks the fill-reducing permutation: ``"amd"`` by default,
+    SuiteSparse's approximate minimum degree out of ``cvxopt``, or
+    ``"natural"`` to skip the ordering. It is ignored without a pattern.
 
     Forward sensitivities work with either solver: the joint iteration matrix is
     block lower triangular with the same ``M0`` on every diagonal block, so only
