@@ -10,7 +10,7 @@ without a device (`tests/test_examples.py`), and for building these docs.
 
 ```python
 import jax.numpy as jnp
-from menodax.rodas5P import solve
+from modax.rodas5P import solve
 
 
 # A CUDA-device callback: fixed-size tuples of scalars in and out, `math`

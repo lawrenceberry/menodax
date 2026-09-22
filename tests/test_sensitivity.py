@@ -15,9 +15,9 @@ import numpy as np
 import pytest
 from numba_cuda_mlir import cuda
 
-from menodax._sensitivity import SensitivitySpec, augmented_y0, split_augmented
-from menodax.rodas5P import solve as rodas5P_solve
-from menodax.tsit5 import solve as tsit5_solve
+from modax._sensitivity import SensitivitySpec, augmented_y0, split_augmented
+from modax.rodas5P import solve as rodas5P_solve
+from modax.tsit5 import solve as tsit5_solve
 
 jax.config.update("jax_enable_x64", True)
 

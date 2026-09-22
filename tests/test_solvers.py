@@ -2,8 +2,8 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from menodax.rodas5P import solve as rodas5Pnumba_solve
-from menodax.tsit5 import solve as tsit5numba_solve
+from modax.rodas5P import solve as rodas5Pnumba_solve
+from modax.tsit5 import solve as tsit5numba_solve
 from tests.benchmark_helpers import (
     assert_case_output,
     benchmark_solve,

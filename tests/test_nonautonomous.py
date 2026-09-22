@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 from numba_cuda_mlir import cuda
 
-from menodax.rodas5P import solve as rodas5Pnumba_solve
+from modax.rodas5P import solve as rodas5Pnumba_solve
 
 jax.config.update("jax_enable_x64", True)
 

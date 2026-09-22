@@ -2,8 +2,8 @@
 
 Two parts of the Rodas5P kernel are emitted as source rather than written: the
 sparse factorisation and triangular solves, with every slot a literal
-([`menodax._sparse_direct`][]), and the Jacobian writer, with every colour's
-seed row a literal (``menodax.rodas5P``). Both are load-bearing -- see the
+([`modax._sparse_direct`][]), and the Jacobian writer, with every colour's
+seed row a literal (``modax.rodas5P``). Both are load-bearing -- see the
 measurements in AGENTS.md -- and both need the same three things done to the
 text they produce, which is what this module does once.
 """
@@ -28,7 +28,7 @@ def compile_device_source(name: str, lines: list[str], namespace: dict | None = 
     refers to by name.
     """
     source = "\n".join(lines) + "\n"
-    filename = f"<menodax generated {name} {next(_SOURCES)}>"
+    filename = f"<modax generated {name} {next(_SOURCES)}>"
     linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)
     scope: dict = {}
     exec(compile(source, filename, "exec"), dict(namespace or {}), scope)  # noqa: S102

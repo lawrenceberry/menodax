@@ -10,7 +10,7 @@ import numpy as np
 from numba_cuda_mlir import cuda, types
 from numba_cuda_mlir.descriptor import MLIRDispatcher
 
-from menodax._jax_numba_custom_call import (
+from modax._jax_numba_custom_call import (
     ABI_ARRAY,
     ABI_SCALAR_F64,
     ABI_SCALAR_I32,

@@ -37,7 +37,7 @@ jobs:
     # this environment -- or the upload is rejected.
     environment:
       name: pypi
-      url: https://pypi.org/p/menodax
+      url: https://pypi.org/p/modax-solvers
     permissions:
       id-token: write
     steps:

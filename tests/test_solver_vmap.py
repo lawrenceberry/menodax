@@ -32,8 +32,8 @@ def _solver_cases():
     if not _have_cuda():
         return []
 
-    from menodax.rodas5P import solve as rodas5Pnumba_solve
-    from menodax.tsit5 import solve as tsit5numba_solve
+    from modax.rodas5P import solve as rodas5Pnumba_solve
+    from modax.tsit5 import solve as tsit5numba_solve
 
     decay = _build_numba_callbacks()
     return [
@@ -99,8 +99,8 @@ def test_solver_vmap_over_y0_and_params_matches_native_ensemble(
 
 @pytest.mark.skipif(not _have_cuda(), reason="numba_cuda_mlir unavailable")
 def test_solvers_auto_jit_plain_python_callbacks():
-    from menodax.rodas5P import solve as rodas5Pnumba_solve
-    from menodax.tsit5 import solve as tsit5numba_solve
+    from modax.rodas5P import solve as rodas5Pnumba_solve
+    from modax.tsit5 import solve as tsit5numba_solve
 
     y0 = np.array([1.0], dtype=np.float64)
     t_span = np.array([0.0, 0.5, 1.0], dtype=np.float64)
@@ -127,7 +127,7 @@ def test_solvers_auto_jit_plain_python_callbacks():
 
 @pytest.mark.skipif(not _have_cuda(), reason="numba_cuda_mlir unavailable")
 def test_solver_vmap_return_stats_shapes():
-    from menodax.rodas5P import solve as rodas5Pnumba_solve
+    from modax.rodas5P import solve as rodas5Pnumba_solve
 
     decay = _build_numba_callbacks()
 

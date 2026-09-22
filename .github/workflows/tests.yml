@@ -45,7 +45,7 @@ jobs:
 
       - name: Tests
         # `tests/` explicitly, not the whole tree: a bare `pytest` also
-        # collects `reference/tests/`, which benchmarks menodax against Julia's
+        # collects `reference/tests/`, which benchmarks modax against Julia's
         # DiffEqGPU and so wants a Julia install no runner has. `-m 'not slow'`
         # comes from `addopts` in pyproject.toml.
         run: >
@@ -79,7 +79,7 @@ jobs:
         with:
           auth: ${{ secrets.GIST_TOKEN }}
           gistID: ${{ vars.COVERAGE_GIST_ID }}
-          filename: menodax-coverage.json
+          filename: modax-coverage.json
           label: coverage
           message: ${{ steps.coverage.outputs.percent }}%
           valColorRange: ${{ steps.coverage.outputs.percent }}

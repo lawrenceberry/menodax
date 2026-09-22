@@ -32,7 +32,7 @@ uv run pytest tests/test_examples.py -v
 uv run ruff format
 uv run ruff check --fix
 
-# Type check (scoped to menodax/ by [tool.ty.src] in pyproject.toml)
+# Type check (scoped to modax/ by [tool.ty.src] in pyproject.toml)
 uv run ty check
 
 # Install the pre-commit hooks once; they then run the three checks above on
@@ -43,7 +43,7 @@ uv run pre-commit run --all-files
 # Docs (mkdocs-material + mkdocstrings). Build them in their OWN environment:
 # `uv sync` with a group writes .venv, so syncing the docs group into the
 # default environment replaces the project's packages with the docs toolchain.
-# The group installs neither CUDA nor the project, since griffe reads menodax/
+# The group installs neither CUDA nor the project, since griffe reads modax/
 # statically.
 export UV_PROJECT_ENVIRONMENT=.venv-docs
 uv sync --only-group docs --no-install-project
@@ -75,17 +75,17 @@ Four workflows, all in `.github/workflows/`:
 - **`docs.yml`** — the site, below.
 - **`publish.yml`** — the PyPI release.
 
-`ty` is scoped to `menodax/` by `[tool.ty.src]` in `pyproject.toml`, which is
+`ty` is scoped to `modax/` by `[tool.ty.src]` in `pyproject.toml`, which is
 what both CI and the pre-commit hook read (the hook is deliberately passed no
 filenames — checking a file alone would report imports it cannot see). The
 exclusion is not tidiness: `tests/`, `examples/` and `reference/` splat
 `**kwargs` dicts into `solve`, which ty resolves against every keyword in turn,
 and lean on blackjax and diffrax, neither of which ships type information.
-Inside `menodax/` the check is clean and the few suppressions are narrow and
+Inside `modax/` the check is clean and the few suppressions are narrow and
 in-line — CUDA intrinsics (`cuda.grid`, `cuda.threadIdx`) that numba only
 materialises during lowering, and cvxopt's untyped `amd`.
 
-Coverage counts `menodax/` only and `[tool.coverage.report]` excludes
+Coverage counts `modax/` only and `[tool.coverage.report]` excludes
 `cuda.jit` bodies: CPython never executes a line of device code, so counting it
 as unreached would measure the compiler rather than the tests.
 
@@ -95,7 +95,7 @@ publishes it to GitHub Pages on every push to `master`. The long-form prose is
 examples' READMEs and `wheels/README.md` with `pymdownx.snippets`, so
 `<!-- --8<-- [start:name] -->` / `[end:name]` markers in those files are
 load-bearing. Docstrings are rendered by mkdocstrings, so a cross-reference in
-one is written ``[`menodax._sparsity`][]`` rather than as a Sphinx role.
+one is written ``[`modax._sparsity`][]`` rather than as a Sphinx role.
 
 Most solver tests need a GPU and are skipped when `numba_cuda_mlir` is unavailable.
 `tests/test_examples.py` runs anywhere: it compiles the examples' device
@@ -104,7 +104,7 @@ lowering pipeline without a device.
 
 ## Architecture
 
-### Solvers (`menodax/`)
+### Solvers (`modax/`)
 
 | Method   | Type                   | Use for           | File          |
 |----------|------------------------|-------------------|---------------|
@@ -192,7 +192,7 @@ local memory. Nothing is shared and nothing synchronises inside a step.
 returns `J v`, never `J`, so a column at a time costs `n_vars + 1` sweeps. But
 two columns sharing no row are *structurally orthogonal* — their contributions
 to `J v` cannot collide — so seeding both at once returns both intact. Colouring
-the column intersection graph (`menodax/_sparsity.py`, NetworkX greedy, best of
+the column intersection graph (`modax/_sparsity.py`, NetworkX greedy, best of
 five strategies) finds the fewest such groups. DISCO-EB's 50-variable
 Einstein-Boltzmann system takes **12 colours**: 13 sweeps where a column at a
 time takes 51.
@@ -212,7 +212,7 @@ It need *not* cover the factorisation's fill-in, which gets slots of its own.
 **`sparsity` is the whole interface.** There is no `linear_solver` argument and
 no protocol to satisfy: the kernel builds the solver from the pattern itself.
 With none it is `dense_lu_solver` over the dense colour grid; with one it is
-`menodax/_sparse_direct.py`, which compiles a direct sparse LU and a pair of
+`modax/_sparse_direct.py`, which compiles a direct sparse LU and a pair of
 sparse triangular solves for that exact structure — any pattern, no structure
 assumed, which is the win a hand-written solver bought without the hand-written
 solver. The two are the same `(factorize_local, solve_local)` shape, so the
@@ -449,7 +449,7 @@ halving the LU buffer's footprint.
 
 ### Forward sensitivities
 
-Both solvers carry a `jax.custom_jvp` rule (`menodax/_sensitivity.py`), so
+Both solvers carry a `jax.custom_jvp` rule (`modax/_sensitivity.py`), so
 `jax.jvp`, `jax.jacfwd`, `jax.grad`, `jax.jacrev` and `jax.value_and_grad` work
 with respect to `y0` and `params`. Asking for a derivative integrates the
 continuous forward-sensitivity system jointly with the state,
@@ -481,7 +481,7 @@ touching the code.
   the whole tangent map, so the call carries a fourth direction for the inner
   one's own variation; the solver passes zero for it, which leaves the plain
   bilinear form. Both the tuple-shaped `jvp` and its composability are
-  menodax-driven additions to the numba-enzyme fork, where every endpoint now
+  modax-driven additions to the numba-enzyme fork, where every endpoint now
   composes over a `jvp`; see `wheels/README.md`.
 - **The unit and zero directions are windows into one constant-memory table**,
   `seed_table`: `2L` zeros with a single `1.0` at `L`, so the window starting at

@@ -12,21 +12,21 @@ The analysis happens once, on the host, when the kernel is built:
 
 1. **Order.** The pattern is symmetrised and handed to SuiteSparse's AMD, which
    returns a fill-reducing permutation (see
-   [`fill_reducing_order`][menodax._sparse_direct.fill_reducing_order] for
+   [`fill_reducing_order`][modax._sparse_direct.fill_reducing_order] for
    why AMD and not COLAMD).
 2. **Factor symbolically.** The exact pattern of ``L + U`` for the permuted
    matrix, fill-in included, falls out of a pure-pattern Gaussian elimination
-   ([`fill_pattern`][menodax._sparse_direct.fill_pattern]) -- no numbers, no
+   ([`fill_pattern`][modax._sparse_direct.fill_pattern]) -- no numbers, no
    device, no sample matrix.
 3. **Lay out.** That pattern becomes one CSR image of ``L + U``, and the
    ``(row, col) -> slot`` map it defines becomes the
-   [`CompressedJacobian`][menodax._sparsity.CompressedJacobian] the AD sweeps
+   [`CompressedJacobian`][modax._sparsity.CompressedJacobian] the AD sweeps
    write into. The buffer is exactly ``nnz(L + U)`` elements: the
    symbolic pass *is* the memory footprint.
 4. **Compile.** The factorisation and the two triangular solves become
    ``cuda.jit(device=True)`` functions, in the same
    ``factorize_local(lu, ipiv)`` / ``solve_local(lu, ipiv, rhs)`` shape
-   [`menodax.rodas5P.dense_lu_solver`][] has, so the kernel calls one or the
+   [`modax.rodas5P.dense_lu_solver`][] has, so the kernel calls one or the
    other and has no branch. Where the structure is small enough they are emitted
    as straight-line code with every slot a literal; above that they fall back to
    loops over index tables in constant memory.
@@ -69,8 +69,8 @@ from dataclasses import dataclass, replace
 import numpy as np
 from numba_cuda_mlir import cuda
 
-from menodax._codegen import compile_device_source
-from menodax._sparsity import (
+from modax._codegen import compile_device_source
+from modax._sparsity import (
     CompressedJacobian,
     colour_sparsity,
     normalize_sparsity,
@@ -118,7 +118,7 @@ def fill_reducing_order(pattern: tuple[tuple[int, ...], ...], ordering: str = "a
     manylinux wheel. It used to come through scikit-sparse's CHOLMOD bindings,
     which have no wheels and compile against SuiteSparse's headers -- so the
     default ordering worked only where someone had already run an `apt install`,
-    and `pip install menodax` failed at that build. The two give the same fill
+    and `pip install modax` failed at that build. The two give the same fill
     on every pattern measured; where they differ it is in how they break ties
     between orders that are equally good.
 
@@ -310,7 +310,7 @@ def analyse(
     """Order, factorise symbolically, and lay out ``L + U`` in CSR.
 
     ``pattern`` is the normalised form, one tuple of column indices per row, as
-    [`menodax._sparsity.normalize_sparsity`][] returns it.
+    [`modax._sparsity.normalize_sparsity`][] returns it.
     """
     n_vars = len(pattern)
     order = fill_reducing_order(pattern, ordering)

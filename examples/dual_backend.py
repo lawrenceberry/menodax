@@ -1,6 +1,6 @@
 """Write an ODE right-hand side once, run it on both backends.
 
-The menodax kernel solvers compile their callback with ``numba_cuda_mlir``,
+The modax kernel solvers compile their callback with ``numba_cuda_mlir``,
 which wants ``math`` scalars and a fixed-size tuple; the Diffrax reference
 backends trace the same equations as ``jnp`` arrays. Each example here needs
 both, and writing the two by hand is how they drift apart.
@@ -58,7 +58,7 @@ from numba_cuda_mlir import cuda
 class Forms(NamedTuple):
     """One body in its three forms.
 
-    ``device`` is what a menodax solver takes: ``math`` scalars, and any helper
+    ``device`` is what a modax solver takes: ``math`` scalars, and any helper
     it calls compiled as a CUDA device function. ``jax`` is the traced form, a
     :class:`Traced`. ``host`` is the device body with those helpers left as
     plain Python, which is the same arithmetic runnable without a GPU -- how

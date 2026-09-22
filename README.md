@@ -1,4 +1,4 @@
-# menodax
+# modax
 
 <!--
 The coverage badge reads a gist that the `tests` workflow rewrites on every push
@@ -7,11 +7,11 @@ repository variable COVERAGE_GIST_ID). These badges sit above the `overview`
 snippet marker, so the documentation site does not repeat them.
 -->
 [![tests](https://github.com/lawrenceberry/menodax/actions/workflows/tests.yml/badge.svg?branch=master)](https://github.com/lawrenceberry/menodax/actions/workflows/tests.yml)
-[![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Flawrenceberry%2FGIST_ID%2Fraw%2Fmenodax-coverage.json)](https://github.com/lawrenceberry/menodax/actions/workflows/tests.yml)
+[![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Flawrenceberry%2FGIST_ID%2Fraw%2Fmodax-coverage.json)](https://github.com/lawrenceberry/menodax/actions/workflows/tests.yml)
 [![lint](https://github.com/lawrenceberry/menodax/actions/workflows/lint.yml/badge.svg?branch=master)](https://github.com/lawrenceberry/menodax/actions/workflows/lint.yml)
-[![PyPI](https://img.shields.io/pypi/v/menodax)](https://pypi.org/project/menodax/)
-[![Downloads](https://img.shields.io/pypi/dm/menodax)](https://pypi.org/project/menodax/)
-[![Python](https://img.shields.io/pypi/pyversions/menodax)](https://pypi.org/project/menodax/)
+[![PyPI](https://img.shields.io/pypi/v/modax-solvers)](https://pypi.org/project/modax-solvers/)
+[![Downloads](https://img.shields.io/pypi/dm/modax-solvers)](https://pypi.org/project/modax-solvers/)
+[![Python](https://img.shields.io/pypi/pyversions/modax-solvers)](https://pypi.org/project/modax-solvers/)
 [![JAX](https://img.shields.io/badge/JAX-compatible-3f51b5)](https://docs.jax.dev/)
 
 **[Documentation](https://lawrenceberry.github.io/menodax/)**
@@ -32,7 +32,7 @@ to one native ensemble launch.
 
 <!-- --8<-- [start:solvers] -->
 
-## Solvers (`menodax/`)
+## Solvers (`modax/`)
 
 | Method      | Type                   | Use for           | File           |
 |-------------|------------------------|-------------------|----------------|
@@ -77,7 +77,7 @@ but the pattern.
 ### The choices behind it
 
 All of the analysis happens once, on the host, when the kernel is built
-(`menodax/_sparse_direct.py`).
+(`modax/_sparse_direct.py`).
 
 **AMD for the ordering, not COLAMD.** The obvious alternative, COLAMD, orders
 the *columns* so that fill stays bounded whatever row permutation partial
@@ -177,7 +177,7 @@ All solvers expose a single `solve(...)` entry point that integrates an
 ensemble in one call:
 
 ```python
-from menodax.rodas5P import solve
+from modax.rodas5P import solve
 
 # ode_fn is a CUDA-device callable: (y, t, p) -> tuple
 y = solve(
@@ -214,7 +214,7 @@ Calling conventions:
   which runs Enzyme over the callback's LLVM IR.
 - **Tsit5** (explicit) needs no derivatives at all.
 
-Importing `menodax` enables JAX float64.
+Importing `modax` enables JAX float64.
 
 <!-- --8<-- [end:api] -->
 
@@ -226,7 +226,7 @@ Both solvers are differentiable with respect to `y0` and `params`:
 
 ```python
 import jax
-from menodax.rodas5P import solve
+from modax.rodas5P import solve
 
 def loss(params):
     y = solve(ode_fn, y0, t_span, params)
@@ -275,7 +275,7 @@ and Rosenbrock's $\partial F/\partial t$ term picks it straight back up by the
 chain rule. It costs a second pass through the tableau and the state's stage
 values kept alive, for the same derivatives.
 
-**(c) Jointly — what menodax does.** One Rosenbrock step on $[y, S]$, exploiting
+**(c) Jointly — what modax does.** One Rosenbrock step on $[y, S]$, exploiting
 the fact that the joint Jacobian is *exactly* block lower triangular, because
 `f` does not depend on `S`:
 
@@ -313,7 +313,7 @@ could treat $J_y$ as a mere preconditioner and converge regardless, but Rodas5P
 is linearly implicit — its Jacobian is inside the formula, so an approximate one
 lands in the answer.
 
-menodax gets them from [numba-enzyme](https://github.com/Qruise-ai/numba-enzyme),
+modax gets them from [numba-enzyme](https://github.com/Qruise-ai/numba-enzyme),
 whose `jvp` composes with itself: `jvp(jvp(f))` is a forward-over-forward
 directional derivative, giving $D^2 f(x)[u,v]$. Seeding $u = (S_k, 0, e_k)$ and
 $v = (k_y, 0, 0)$ returns $L_k k_y$ directly — the matrix $L_k$ is never formed.
@@ -429,14 +429,14 @@ scales further in `n_sens` — at the usual cost of needing a non-stiff problem.
 
 ### Why continuous forward sensitivities
 
-menodax is built for **massive ensembles of low-dimensional systems with few
+modax is built for **massive ensembles of low-dimensional systems with few
 parameters**, and that regime picks the method. The three candidates scale
 differently in the state dimension `n_vars` and the parameter count
 `n_params`:
 
 | approach | work per step | extra memory | grows with |
 |---|---|---|---|
-| **Continuous forward sensitivity** (menodax) | $O(n_\text{vars}^3 + n_\text{params}\,n_\text{vars}^2)$ | $O(n_\text{vars}\,(1 + n_\text{params}))$ | `n_params` |
+| **Continuous forward sensitivity** (modax) | $O(n_\text{vars}^3 + n_\text{params}\,n_\text{vars}^2)$ | $O(n_\text{vars}\,(1 + n_\text{params}))$ | `n_params` |
 | **Continuous adjoint** (backward) | $O(n_\text{vars}^3)$ backward, plus the forward solve and its checkpoint re-solves | $O(n_\text{vars} + n_\text{params})$ plus checkpoints | number of output cotangents — *not* `n_params` |
 | **Direct auto-diff through the solver** | $O(n_\text{params}\,n_\text{vars}^3)$ | $O(n_\text{vars}\,(1 + n_\text{params}))$ forward; a full tape in reverse | `n_params`, **on the cubic term** |
 
@@ -451,7 +451,7 @@ Direct auto-diff has no way to know that. Handed the kernel's hand-written LU as
 ordinary scalar code, Enzyme differentiates the factorisation *itself* —
 propagating a tangent through every one of its $O(n_\text{vars}^3)$ operations,
 once per direction. That is a factor of `n_params` on the dominant term, and it
-is structure no differentiator can recover on its own: what menodax does by hand
+is structure no differentiator can recover on its own: what modax does by hand
 is apply the differentiation rule for a linear solve, `M dk = dr - dM k`, which
 reuses `M`'s factors. An auto-diff system that treats the solve as a primitive
 *with* that rule attached would recover the same scaling; one differentiating
@@ -459,7 +459,7 @@ the scalar code beneath it would not.
 
 Against the adjoint, the trade is the usual one: its cost is independent of
 `n_params` and instead proportional to the number of outputs differentiated, so
-it wins once parameters outnumber state dimensions. menodax targets the opposite
+it wins once parameters outnumber state dimensions. modax targets the opposite
 corner — the BBN example fits 2 parameters to a 4-species network — and the
 adjoint would additionally need either a backwards solve, which is unstable for
 the stiff, dissipative systems Rodas5P exists to handle, or a checkpointed
@@ -558,7 +558,7 @@ and no system LLVM is involved. It provides the `numba_enzyme` import package,
 so upstream `numba-enzyme` must not be installed alongside it. See
 [wheels/README.md](wheels/README.md) for what is in the wheel and why.
 
-`pip install menodax` gets the same set, and there is no system library to
+`pip install modax-solvers` gets the same set, and there is no system library to
 install first: every dependency ships wheels, the AMD ordering included. A GPU
 is needed to run a solve.
 
@@ -571,7 +571,7 @@ is needed to run a solve.
 Worked end-to-end problems live in `examples/` (each with its own README):
 
 - `bbn_estimation/` — toy Big Bang Nucleosynthesis network with nested-sampling
-  parameter estimation and a menodax/Diffrax/scipy solver benchmark;
+  parameter estimation and a modax/Diffrax/scipy solver benchmark;
 - `21cm_igm_evolution/` — toy global 21cm IGM thermal/ionisation history;
 - `mukhanov_sasaki/` — Mukhanov–Sasaki mode evolution.
 

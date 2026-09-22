@@ -1,4 +1,4 @@
-# menodax
+# modax
 
 --8<-- "README.md:overview"
 

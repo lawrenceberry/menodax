@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from examples._common import Backends, make_solver, parse_args, rhs_for, run_benchmark
 from examples.dual_backend import Forms, build_fn, build_rhs
-from menodax.tsit5 import solve as tsit5_solve
+from modax.tsit5 import solve as tsit5_solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -53,7 +53,7 @@ MODE_FIRST_STEP = 1.0e-5  # Initial step in normalised time s for the mode solve
 MODE_MAX_STEPS = 200000  # Step cap per mode trajectory.
 
 # The mode equation is non-stiff and oscillatory, so the science uses the
-# explicit menodax Tsit5 solver. For a like-for-like timing, ``--benchmark``
+# explicit modax Tsit5 solver. For a like-for-like timing, ``--benchmark``
 # also runs the identical complex mode equation on Diffrax Tsit5 (GPU,
 # jax.vmap) -- the explicit analogue of the Kvaerno5 baseline the stiff
 # examples use, which as an implicit method is a poor match here -- and on
@@ -65,8 +65,8 @@ _MODE_KWARGS = dict(
     max_steps=MODE_MAX_STEPS,
 )
 BACKENDS = Backends(
-    menodax_solve=tsit5_solve,
-    menodax_kwargs=_MODE_KWARGS,
+    modax_solve=tsit5_solve,
+    modax_kwargs=_MODE_KWARGS,
     diffrax_method="tsit5",
     diffrax_kwargs=_MODE_KWARGS,
     scipy_kwargs=dict(
@@ -312,7 +312,7 @@ def make_mode_ode(tables):
 S_SPAN = jnp.array([0.0, 1.0], dtype=jnp.float64)  # normalised per-mode time
 
 
-def solve_modes(tables, backend="menodax", n_modes=N_MODES):
+def solve_modes(tables, backend="modax", n_modes=N_MODES):
     """Solve all uncoupled Mukhanov-Sasaki Fourier modes as one ensemble."""
     physical_k, code_k, y0, params = prepare_mode_problem(tables, n_modes)
     solution = make_solver(backend, BACKENDS)(

@@ -1,5 +1,5 @@
 [project]
-name = "menodax"
+name = "modax-solvers"
 version = "0.0.3"
 description = "GPU-accelerated ODE solvers for massive ensembles of low-dimensional trajectories"
 readme = "README.md"
@@ -17,7 +17,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Mathematics",
     "Topic :: Scientific/Engineering :: Physics",
 ]
-# Only what `menodax/` itself needs. The Diffrax and BlackJAX baselines the
+# Only what `modax/` itself needs. The Diffrax and BlackJAX baselines the
 # examples compare against, and the matplotlib their figures use, moved to the
 # dev group: nothing here solves an ODE without them, and PyPI rejects a
 # distribution whose metadata carries a direct URL dependency, which the
@@ -41,7 +41,7 @@ dependencies = [
     "networkx>=3.4",
     "numpy>=2.4.3",
     # SuiteSparse's AMD, which orders a sparsity pattern for the compiled
-    # sparse direct solver (menodax/_sparse_direct.py). cvxopt ships it in a
+    # sparse direct solver (modax/_sparse_direct.py). cvxopt ships it in a
     # manylinux wheel; scikit-sparse, which used to supply it, has none and
     # compiles against SuiteSparse's headers that `pip install` cannot put on
     # the machine.
@@ -57,7 +57,7 @@ Issues = "https://github.com/lawrenceberry/menodax/issues"
 [project.optional-dependencies]
 # scikit-sparse lived here, and before that in the dependencies. Nothing needs
 # it now: cvxopt's wheel carries the AMD, and CHOLMOD's other orderings were
-# measured to be AMD's own fill or worse. The name stays so that `menodax[sparse]`
+# measured to be AMD's own fill or worse. The name stays so that `modax-solvers[sparse]`
 # in a consumer's pyproject keeps resolving.
 sparse = []
 
@@ -106,7 +106,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["menodax*"]
+include = ["modax*"]
 exclude = ["reference*", "tests*"]
 
 [tool.ruff.lint]
@@ -116,7 +116,7 @@ extend-select = ["I"]
 [tool.coverage.run]
 # The package only. `reference/` and `examples/` are exercised by the suite but
 # are baselines and worked problems, not the thing under test.
-source = ["menodax"]
+source = ["modax"]
 branch = true
 
 [tool.coverage.report]
@@ -136,7 +136,7 @@ exclude_also = [
 # ty resolves against every keyword in turn) and lean on blackjax and diffrax,
 # neither of which ships type information, so the diagnostics there are about
 # the type checker's view of other people's libraries rather than this code.
-include = ["menodax"]
+include = ["modax"]
 
 [tool.ty.rules]
 # numba-cuda-mlir assembles `cuda.local`, `cuda.const` and `cuda.shared` onto

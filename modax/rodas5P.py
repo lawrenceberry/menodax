@@ -11,10 +11,10 @@ import jax.numpy as jnp
 import numpy as np
 from numba_cuda_mlir import cuda, types
 
-from menodax._codegen import compile_device_source
-from menodax._jax_common import make_custom_vmap_solver, normalize_y0_params
-from menodax._jax_numba_custom_call import make_launch
-from menodax._numba_common import (
+from modax._codegen import compile_device_source
+from modax._jax_common import make_custom_vmap_solver, normalize_y0_params
+from modax._jax_numba_custom_call import make_launch
+from modax._numba_common import (
     HOOK_OUT_ARGTYPE,
     SOLVER_ARGTYPES,
     as_cuda_device,
@@ -24,7 +24,7 @@ from menodax._numba_common import (
     make_cuda_local_vector_writer,
     solver_stats,
 )
-from menodax._sensitivity import (
+from modax._sensitivity import (
     SensitivitySpec,
     augmented_error_weights,
     augmented_y0,
@@ -34,8 +34,8 @@ from menodax._sensitivity import (
     make_tangent,
     seed_table,
 )
-from menodax._sparse_direct import sparse_direct_solver_for
-from menodax._sparsity import dense_jacobian, normalize_sparsity
+from modax._sparse_direct import sparse_direct_solver_for
+from modax._sparsity import dense_jacobian, normalize_sparsity
 
 # fmt: off
 # Rodas5P W-transformed coefficients (Steinebach 2023, BIT 63:27).
@@ -172,7 +172,7 @@ def dense_lu_solver(n_vars: int):
     right-looking LU over the thread's own row-major buffer, then the two
     triangular solves in place. Returned as the same
     ``(factorize_local, solve_local)`` pair
-    [`sparse_direct_solver`][menodax._sparse_direct.sparse_direct_solver]
+    [`sparse_direct_solver`][modax._sparse_direct.sparse_direct_solver]
     builds from a pattern, so the kernel calls one or the other and has no branch.
 
     It replaced nvmath's ``LUPivotSolver``, whose block-collective API was the
@@ -317,7 +317,7 @@ def _make_kernel(ode_fn, n_vars: int, n_params: int, options: KernelOptions):
 
     The linear solve is one code path over a buffer the layout describes. With
     no pattern that layout is the dense row-major matrix and the solver is
-    [`dense_lu_solver`][menodax.rodas5P.dense_lu_solver]; with one it is the
+    [`dense_lu_solver`][modax.rodas5P.dense_lu_solver]; with one it is the
     sparse factorisation's own CSR image and the solver is compiled for it.
     The two differ in what they were built from and in nothing else the kernel
     can see.
@@ -1080,7 +1080,7 @@ def solve(
     The solve is an XLA custom call into the numba-cuda kernel, so it carries a
     ``jax.custom_jvp`` rule rather than being differentiated by XLA: asking for
     a derivative integrates the continuous forward-sensitivity system alongside
-    the state (see ``menodax/_sensitivity.py``). ``jax.jvp``, ``jax.jacfwd``,
+    the state (see ``modax/_sensitivity.py``). ``jax.jvp``, ``jax.jacfwd``,
     ``jax.grad``, ``jax.jacrev`` and ``jax.value_and_grad`` all work with
     respect to ``y0`` and ``params``; ``t_span`` is not differentiable. An
     undifferentiated call runs the plain kernel and pays nothing.
@@ -1126,10 +1126,10 @@ def solve(
     follow. The Jacobian costs one Enzyme sweep per *colour* of the pattern's
     column intersection graph rather than one per column, since columns sharing
     no row can be seeded together and the pattern says which output component
-    belongs to which ([`menodax._sparsity`][]). And the iteration matrix is
+    belongs to which ([`modax._sparsity`][]). And the iteration matrix is
     ordered, factorised symbolically and given an in-kernel sparse LU and sparse
     triangular solves compiled for that exact structure
-    ([`menodax._sparse_direct`][]). The default -- no pattern -- colours every
+    ([`modax._sparse_direct`][]). The default -- no pattern -- colours every
     column apart and factorises densely, which is the same mechanism at its
     uninformative end rather than a second path.
 

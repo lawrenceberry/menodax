@@ -46,6 +46,6 @@ jobs:
         # GPU is present. The default (CPU) extra is enough for that.
         run: uv sync --frozen
       - name: Type check
-        # Scoped to `menodax/` by `[tool.ty.src]` in pyproject.toml, which is
+        # Scoped to `modax/` by `[tool.ty.src]` in pyproject.toml, which is
         # also what the pre-commit hook obeys.
         run: uv run --no-sync ty check --output-format concise

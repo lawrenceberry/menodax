@@ -58,7 +58,7 @@ from jax.custom_derivatives import SymbolicZero
 from numba_cuda_mlir import cuda, types
 from numba_enzyme import jvp
 
-from menodax._numba_common import as_cuda_device
+from modax._numba_common import as_cuda_device
 
 
 @dataclass(frozen=True)
@@ -423,7 +423,7 @@ def make_sensitivity_solver(
 
         if not isinstance(dt_span, SymbolicZero):
             raise NotImplementedError(
-                "differentiating a menodax solve with respect to t_span is not "
+                "differentiating a modax solve with respect to t_span is not "
                 "supported; wrap the save times in jax.lax.stop_gradient, or "
                 "differentiate with respect to y0 and/or params only"
             )

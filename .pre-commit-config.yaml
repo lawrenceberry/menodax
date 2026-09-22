@@ -19,6 +19,6 @@ repos:
     rev: v0.0.83
     hooks:
       # Deliberately passed no filenames: ty checks the project as configured
-      # by `[tool.ty.src]` in pyproject.toml, which scopes it to `menodax/`.
+      # by `[tool.ty.src]` in pyproject.toml, which scopes it to `modax/`.
       # Checking a file in isolation would report imports it cannot see.
       - id: ty

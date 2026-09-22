@@ -1,6 +1,6 @@
 """The compiled sparse direct solver: the analysis, and what the kernel does with it.
 
-``menodax/_sparse_direct.py`` turns a sparsity pattern into a fill-reducing
+``modax/_sparse_direct.py`` turns a sparsity pattern into a fill-reducing
 order, an exact symbolic factorisation, a CSR layout and two ``cuda.jit`` device
 functions. Most of that is host-side and testable without a GPU, so most of these
 tests are: the ordering, the fill, the footprint, and a replay of the compiled
@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 from numba_cuda_mlir import cuda
 
-from menodax._sparse_direct import (
+from modax._sparse_direct import (
     ORDERINGS,
     SparseDirectSolver,
     analyse,
@@ -24,8 +24,8 @@ from menodax._sparse_direct import (
     fill_pattern,
     sparse_direct_solver,
 )
-from menodax._sparsity import normalize_sparsity
-from menodax.rodas5P import solve as rodas5P_solve
+from modax._sparsity import normalize_sparsity
+from modax.rodas5P import solve as rodas5P_solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -391,8 +391,8 @@ def test_the_table_driven_form_solves_what_the_unrolled_one_does(monkeypatch):
     structure in this file; the thresholds are lowered here so the loops over the
     index tables are exercised at all.
     """
-    import menodax._sparse_direct as module
-    import menodax.rodas5P as rodas5P
+    import modax._sparse_direct as module
+    import modax.rodas5P as rodas5P
 
     y0 = np.zeros((64, 6))
     y0[:, 0] = 1.0

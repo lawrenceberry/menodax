@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from examples._common import Backends, parse_args, run_benchmark
 from examples.dual_backend import build_fn, build_rhs
-from menodax.rodas5P import solve as rodas5P_solve
+from modax.rodas5P import solve as rodas5P_solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -158,7 +158,7 @@ def _make_bbn_ode(*, exp, hubble, n_photon, weak_rate_np, deuterium_eq_ratio):
     return bbn_ode
 
 
-# dY/dx: ``.device`` is the 4-tuple for the menodax kernel, ``.jax`` the array
+# dY/dx: ``.device`` is the 4-tuple for the modax kernel, ``.jax`` the array
 # for the Diffrax and scipy backends.
 BBN_ODE = build_rhs(
     _make_bbn_ode,
@@ -181,13 +181,13 @@ SOLVER_ATOL = 1e-7
 SOLVER_FIRST_STEP = 0.1
 SOLVER_MAX_STEPS = 256
 
-# The science uses the GPU-batched menodax Rodas5P solver. For a like-for-like
+# The science uses the GPU-batched modax Rodas5P solver. For a like-for-like
 # timing, ``--benchmark`` also runs the identical four-species stiff network
 # on Diffrax Kvaerno5 (GPU, jax.vmap) and on serial scipy.solve_ivp LSODA, the
 # no-GPU baseline used by codes such as the original ECHO21. LSODA runs with an
 # automatic initial step, as those serial codes do; an imposed first_step of
 # 0.1 destabilises it here.
-MENODAX_KWARGS = dict(
+MODAX_KWARGS = dict(
     lu_precision="fp32",
     rtol=SOLVER_RTOL,
     atol=SOLVER_ATOL,
@@ -195,8 +195,8 @@ MENODAX_KWARGS = dict(
     max_steps=SOLVER_MAX_STEPS,
 )
 BACKENDS = Backends(
-    menodax_solve=rodas5P_solve,
-    menodax_kwargs=MENODAX_KWARGS,
+    modax_solve=rodas5P_solve,
+    modax_kwargs=MODAX_KWARGS,
     diffrax_method="kvaerno5",
     diffrax_kwargs=dict(
         rtol=SOLVER_RTOL,
@@ -221,7 +221,7 @@ def initial_conditions():
 def predict_abundances(params):
     """Integrate BBN network and return [Y_P, D/H] for given params."""
     sol = rodas5P_solve(
-        BBN_ODE.device, initial_conditions(), X_SAVE, params, **MENODAX_KWARGS
+        BBN_ODE.device, initial_conditions(), X_SAVE, params, **MODAX_KWARGS
     )
     _, Yp, Yd, YHe = sol[0, -1]
     Y_P = 4.0 * YHe  # helium mass fraction

@@ -2,5 +2,5 @@
 
 ## Where the pieces live
 
-The rule itself is [`menodax._sensitivity`][], documented under
+The rule itself is [`modax._sensitivity`][], documented under
 [API reference / Internals](../api/internals.md).

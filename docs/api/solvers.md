@@ -1,20 +1,20 @@
 # Solvers
 
-Both solvers expose the same `solve(...)` entry point. Importing `menodax`
+Both solvers expose the same `solve(...)` entry point. Importing `modax`
 enables JAX float64.
 
 ## Rodas5P
 
-::: menodax.rodas5P.solve
+::: modax.rodas5P.solve
 
-::: menodax.rodas5P.KernelOptions
+::: modax.rodas5P.KernelOptions
 
-::: menodax.rodas5P.trajectories_per_block_or_default
+::: modax.rodas5P.trajectories_per_block_or_default
 
-::: menodax.rodas5P.dense_lu_solver
+::: modax.rodas5P.dense_lu_solver
 
 ## Tsit5
 
-::: menodax.tsit5.solve
+::: modax.tsit5.solve
 
-::: menodax.tsit5.clear_caches
+::: modax.tsit5.clear_caches

@@ -10,11 +10,11 @@ import numpy as np
 import pytest
 from numba_cuda_mlir import cuda
 
-from menodax.rodas5P import (
+from modax.rodas5P import (
     _DEFAULT_TRAJECTORIES_PER_BLOCK,
     trajectories_per_block_or_default,
 )
-from menodax.rodas5P import solve as rodas5P_solve
+from modax.rodas5P import solve as rodas5P_solve
 
 requires_cuda = pytest.mark.skipif(not cuda.is_available(), reason="CUDA required")
 

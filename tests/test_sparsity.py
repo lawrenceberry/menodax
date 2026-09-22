@@ -11,13 +11,13 @@ import numpy as np
 import pytest
 from numba_cuda_mlir import cuda
 
-from menodax._sparsity import (
+from modax._sparsity import (
     CompressedJacobian,
     colour_sparsity,
     dense_jacobian,
     normalize_sparsity,
 )
-from menodax.rodas5P import solve
+from modax.rodas5P import solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -82,7 +82,7 @@ def test_no_pattern_is_the_dense_matrix():
 def test_colouring_is_checked_for_structural_orthogonality():
     """Two columns of one colour sharing a row would silently share a slot."""
     bad = CompressedJacobian(n_vars=2, n_colours=1, colour=(0, 0))
-    from menodax._sparsity import _check_orthogonal
+    from modax._sparsity import _check_orthogonal
 
     with pytest.raises(ValueError, match="not structurally orthogonal"):
         _check_orthogonal(((0, 1), ()), bad)
