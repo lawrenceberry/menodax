@@ -50,9 +50,9 @@ dependencies = [
 ]
 
 [project.urls]
-Documentation = "https://lawrenceberry.github.io/menodax/"
-Source = "https://github.com/lawrenceberry/menodax"
-Issues = "https://github.com/lawrenceberry/menodax/issues"
+Documentation = "https://lawrenceberry.github.io/modax/"
+Source = "https://github.com/lawrenceberry/modax"
+Issues = "https://github.com/lawrenceberry/modax/issues"
 
 [project.optional-dependencies]
 # scikit-sparse lived here, and before that in the dependencies. Nothing needs

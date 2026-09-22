@@ -6,15 +6,15 @@ to master; replace GIST_ID below with that gist's id (the same value as the
 repository variable COVERAGE_GIST_ID). These badges sit above the `overview`
 snippet marker, so the documentation site does not repeat them.
 -->
-[![tests](https://github.com/lawrenceberry/menodax/actions/workflows/tests.yml/badge.svg?branch=master)](https://github.com/lawrenceberry/menodax/actions/workflows/tests.yml)
-[![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Flawrenceberry%2FGIST_ID%2Fraw%2Fmodax-coverage.json)](https://github.com/lawrenceberry/menodax/actions/workflows/tests.yml)
-[![lint](https://github.com/lawrenceberry/menodax/actions/workflows/lint.yml/badge.svg?branch=master)](https://github.com/lawrenceberry/menodax/actions/workflows/lint.yml)
+[![tests](https://github.com/lawrenceberry/modax/actions/workflows/tests.yml/badge.svg?branch=master)](https://github.com/lawrenceberry/modax/actions/workflows/tests.yml)
+[![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Flawrenceberry%2FGIST_ID%2Fraw%2Fmodax-coverage.json)](https://github.com/lawrenceberry/modax/actions/workflows/tests.yml)
+[![lint](https://github.com/lawrenceberry/modax/actions/workflows/lint.yml/badge.svg?branch=master)](https://github.com/lawrenceberry/modax/actions/workflows/lint.yml)
 [![PyPI](https://img.shields.io/pypi/v/modax-solvers)](https://pypi.org/project/modax-solvers/)
 [![Downloads](https://img.shields.io/pypi/dm/modax-solvers)](https://pypi.org/project/modax-solvers/)
 [![Python](https://img.shields.io/pypi/pyversions/modax-solvers)](https://pypi.org/project/modax-solvers/)
 [![JAX](https://img.shields.io/badge/JAX-compatible-3f51b5)](https://docs.jax.dev/)
 
-**[Documentation](https://lawrenceberry.github.io/menodax/)**
+**[Documentation](https://lawrenceberry.github.io/modax/)**
 
 <!-- --8<-- [start:overview] -->
 
