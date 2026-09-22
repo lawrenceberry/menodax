@@ -814,7 +814,7 @@ dependencies = [
     { name = "networkx" },
     { name = "numba" },
     { name = "numba-cuda-mlir", extra = ["cu13"] },
-    { name = "numba-enzyme", extra = ["cuda"] },
+    { name = "numba-enzyme-cuda" },
     { name = "numpy" },
     { name = "scikit-sparse" },
     { name = "scipy" },
@@ -853,7 +853,7 @@ requires-dist = [
     { name = "networkx", specifier = ">=3.4" },
     { name = "numba", specifier = ">=0.61" },
     { name = "numba-cuda-mlir", extras = ["cu13"], specifier = ">=0.5.1" },
-    { name = "numba-enzyme", extras = ["cuda"], url = "https://github.com/lawrenceberry/numba-enzyme/releases/download/v0.1.3-cuda.2/numba_enzyme-0.1.3-py3-none-linux_x86_64.whl" },
+    { name = "numba-enzyme-cuda", specifier = ">=0.2.1" },
     { name = "numpy", specifier = ">=2.4.3" },
     { name = "scikit-sparse", specifier = ">=0.5" },
     { name = "scipy", specifier = ">=1.17.1" },
@@ -1098,29 +1098,17 @@ cu13 = [
 ]
 
 [[package]]
-name = "numba-enzyme"
-version = "0.1.3"
-source = { url = "https://github.com/lawrenceberry/numba-enzyme/releases/download/v0.1.3-cuda.2/numba_enzyme-0.1.3-py3-none-linux_x86_64.whl" }
+name = "numba-enzyme-cuda"
+version = "0.2.1"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "llvmlite" },
     { name = "numba" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/7c/a8/990883ed9b8fe4823cec956eba7919db659d9dd58f43e7eba14b000fe32e/numba_enzyme_cuda-0.2.1.tar.gz", hash = "sha256:b0ee7975ee4ecfd384992f77b770cc13c55569b327660f7d425903d71211f4fa", size = 132116, upload-time = "2026-09-22T11:26:05.399Z" }
 wheels = [
-    { url = "https://github.com/lawrenceberry/numba-enzyme/releases/download/v0.1.3-cuda.2/numba_enzyme-0.1.3-py3-none-linux_x86_64.whl", hash = "sha256:320aa33622077748e593126f952555e3091901379884f5f5a93ea4b2cd01af2c" },
+    { url = "https://files.pythonhosted.org/packages/1a/2a/532c49811ab842e2cbb4122a5e87a74611ef6a7b5104412926b15ceebecf/numba_enzyme_cuda-0.2.1-py3-none-manylinux_2_38_x86_64.whl", hash = "sha256:96051b13d50f13d31dd361bacf66b553948de0980ff146d8ac55546f25bc762c", size = 73451563, upload-time = "2026-09-22T11:26:02.665Z" },
 ]
-
-[package.optional-dependencies]
-cuda = [
-    { name = "numba-cuda-mlir" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "llvmlite", specifier = ">=0.44" },
-    { name = "numba", specifier = ">=0.61" },
-    { name = "numba-cuda-mlir", marker = "extra == 'cuda'", specifier = ">=0.5.1,<0.6" },
-]
-provides-extras = ["cuda"]
 
 [[package]]
 name = "numpy"

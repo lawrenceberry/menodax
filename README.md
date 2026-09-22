@@ -532,9 +532,17 @@ uv run pytest
 uv run ruff format && uv run ruff check --fix
 ```
 
-`uv sync` resolves `numba-enzyme` from a prebuilt wheel published as a GitHub
-release asset, hash-pinned in `uv.lock`; nothing has to be built by hand. See
-[wheels/README.md](wheels/README.md) for what is in it and why.
+The Enzyme-derived Jacobians come from
+[numba-enzyme-cuda](https://pypi.org/project/numba-enzyme-cuda/), the
+CUDA-enabled fork of numba-enzyme, which is an ordinary PyPI dependency and
+carries its own LLVM 15 and Enzyme binaries — nothing has to be built by hand,
+and no system LLVM is involved. It provides the `numba_enzyme` import package,
+so upstream `numba-enzyme` must not be installed alongside it. See
+[wheels/README.md](wheels/README.md) for what is in the wheel and why.
+
+`pip install menodax` gets the same set. A GPU is needed to run a solve, and
+`scikit-sparse` builds against SuiteSparse's headers (`apt install
+libsuitesparse-dev`) unless `ordering="natural"` is used.
 
 <!-- --8<-- [end:install] -->
 

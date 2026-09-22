@@ -378,8 +378,9 @@ Things to know when touching this:
   an `id()` that changes every process — that cost 13.0 s a warm compile
   against 10.1 s here.
 
-The wheel this depends on is not on PyPI — see `wheels/README.md`, which lists
-every local change made to numba-enzyme.
+The dependency is `numba-enzyme-cuda`, the fork published under its own name
+because upstream's PyPI release has no CUDA backend — see `wheels/README.md`,
+which lists every local change made to numba-enzyme and how a new one is cut.
 
 [ne]: https://github.com/Qruise-ai/numba-enzyme
 

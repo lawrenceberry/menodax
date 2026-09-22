@@ -54,7 +54,7 @@ theme:
 nav:
   - Home: index.md
   - Getting started: getting-started.md
-  - The numba-enzyme wheel: wheels/README.md
+  - The numba-enzyme-cuda wheel: wheels/README.md
   - Guide:
       - Calling a solver: guide/api.md
       - Writing ODE callbacks: guide/callbacks.md

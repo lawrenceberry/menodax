@@ -1,46 +1,59 @@
-# The numba-enzyme wheel
+# The numba-enzyme-cuda wheel
 
-`rodas5P` derives its Jacobian with [numba-enzyme][ne]. The release on PyPI has
-no CUDA backend, so `pyproject.toml` resolves the dependency to a wheel built
-from the [`cuda` branch of a fork][fork] and published as a GitHub release
-asset:
+`rodas5P` derives its Jacobian with [numba-enzyme][ne]. The release upstream
+publishes on PyPI has no CUDA backend, so the dependency is
+[**numba-enzyme-cuda**][cuda], the [`cuda` branch of a fork][fork] published
+under its own distribution name:
 
 ```toml
-[tool.uv.sources]
-numba-enzyme = { url = "https://github.com/lawrenceberry/numba-enzyme/releases/download/v0.1.3-cuda.2/numba_enzyme-0.1.3-py3-none-linux_x86_64.whl" }
+dependencies = ["numba-enzyme-cuda>=0.2.1"]
 ```
 
-Nothing has to be built or staged by hand: `uv sync` downloads that wheel and
-`uv.lock` pins its sha256. The `wheels/` directory now holds only this file.
+An ordinary dependency, with no `[tool.uv.sources]` entry behind it. It used to
+be one: the fork was a wheel attached to a GitHub release, and
+`pyproject.toml` pinned that URL. That could never work for anyone installing
+*this* package, because PyPI rejects a distribution whose metadata carries a
+direct URL dependency — a uv source is the consuming project's own mechanism
+and is not inherited — so every consumer would have had to write the same pin
+by hand, and `pip install menodax` would have resolved upstream's CUDA-less
+wheel and failed at the first differentiation.
+
+It provides the `numba_enzyme` import package, so it is a drop-in replacement
+and **upstream must not be installed alongside it** — the two would fight over
+the same directory.
 
 The wheel is self-contained. The derivative pipeline shells out to `clang`,
 `llvm-link` and `opt` from LLVM 15 and loads the standalone Enzyme plugin, none
 of which are in numba-enzyme's source tree, so all of them ship inside the
-wheel under `numba_enzyme/_vendor/` — 237 MB installed, 73 MB compressed. No
-system LLVM is involved, and `toolchain.py` resolves `_vendor/` ahead of
-`PATH`. It is tagged `py3-none-linux_x86_64` rather than a CPython tag: the
-package has no extension modules, so it installs on any Python ≥ 3.11.
+wheel under `numba_enzyme/_vendor/` — 237 MB installed, 73.5 MB compressed, and
+PyPI's per-file limit is 100 MB. No system LLVM is involved, and
+`toolchain.py` resolves `_vendor/` ahead of `PATH`. It is tagged
+`py3-none-manylinux_2_38_x86_64`: no CPython tag, because the package has no
+extension modules and so installs on any Python ≥ 3.11, and 2.38 because that
+is the highest `GLIBC_` symbol version any of the nineteen ELF files under
+`_vendor/` references, which is what auditwheel would derive from the contents.
+A bare `linux_x86_64`, which the release asset carried, PyPI refuses outright.
 
 [ne]: https://github.com/Qruise-ai/numba-enzyme
+[cuda]: https://pypi.org/project/numba-enzyme-cuda/
 [fork]: https://github.com/lawrenceberry/numba-enzyme/tree/cuda
 
 ## Installing from the branch instead
 
 ```toml
-numba-enzyme = { git = "https://github.com/lawrenceberry/numba-enzyme", branch = "cuda" }
+[tool.uv.sources]
+numba-enzyme-cuda = { git = "https://github.com/lawrenceberry/numba-enzyme", branch = "cuda" }
 ```
 
-This is equally self-contained. When `src/numba_enzyme/_vendor/` is absent —
+Worth it when tracking unreleased fork changes matters more than resolve time.
+It is equally self-contained: when `src/numba_enzyme/_vendor/` is absent —
 which it is for any build that is not a cibuildwheel run — the fork's
-`hatch_build.py` downloads the released PyPI wheel and restages the LLVM and
-Enzyme binaries it already carries, so the branch builds into the same wheel
-the release asset holds. Before that hook existed, a git install produced a
+`hatch_build.py` downloads upstream's released PyPI wheel and restages the LLVM
+and Enzyme binaries it already carries, so the branch builds into the same
+wheel the release does. Before that hook existed, a git install produced a
 196 KB package that imported cleanly and then failed at the first
-differentiation.
-
-The release asset is the default only because it skips that build: a git
-source re-downloads and re-stages ~73 MB on every fresh resolve. Prefer the
-branch when tracking fork changes matters more than resolve time, and set
+differentiation. A git source re-downloads and re-stages ~73 MB on every fresh
+resolve, which is the reason it is not the default; set
 `NUMBA_ENZYME_VENDOR_FROM_PYPI=0` to suppress the staging deliberately.
 
 > **Do not symlink `site-packages/numba_enzyme` at the fork's working tree.**
@@ -55,24 +68,34 @@ branch when tracking fork changes matters more than resolve time, and set
 
 ## Cutting a new release
 
-After pushing a change to the fork's `cuda` branch:
+Bump `version` in the fork's `pyproject.toml`, then tag it:
 
 ```bash
 cd ../numba-enzyme
-uv build --wheel          # hatch_build.py stages _vendor/ from PyPI if absent
-
-gh release create v0.1.3-cuda.3 \
-    dist/numba_enzyme-0.1.3-py3-none-linux_x86_64.whl \
-    --repo lawrenceberry/numba-enzyme --target cuda \
-    --title "v0.1.3-cuda.3"
+git tag -a v0.2.2 -m "numba-enzyme-cuda 0.2.2" && git push origin cuda v0.2.2
 ```
 
-Then point this repository at the new asset:
+`.github/workflows/release.yml` does the rest: `uv build` (whose hook stages
+`_vendor/` from PyPI if absent), `twine check --strict`, an install of the
+built wheel into a throwaway environment that imports it and the five
+endpoints, a check that the vendored `clang` and `opt` still run out of it, and
+a trusted-publishing upload — no API token, and no Docker, since the binaries
+come from upstream's wheel either way. `wheels.yml` still builds the toolchain
+from source in the manylinux image, but is `workflow_dispatch`-only: two
+workflows uploading one version would race.
+
+That install-and-import step exists because 0.2.0 shipped **unimportable**.
+`__init__` read its own version from `importlib.metadata` under
+`"numba-enzyme"`, the name the fork had just stopped using, so the first line
+of `import numba_enzyme` raised `PackageNotFoundError`. Unpacking the wheel and
+running the binaries — which was the whole check — never touches Python's view
+of the package.
+
+Then point this repository at it:
 
 ```bash
-# edit the URL in pyproject.toml's [tool.uv.sources]
-uv lock --upgrade-package numba-enzyme   # the lock pins the wheel's sha256
-uv sync --extra cuda13
+uv lock --refresh    # --refresh-package is not enough; the index listing is cached too
+uv pip install --no-deps "numba-enzyme-cuda==0.2.2"   # or a full uv sync
 ```
 
 The build leaves `src/numba_enzyme/_vendor/` behind in the fork, 237 MB that
