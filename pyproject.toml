@@ -55,6 +55,16 @@ cuda13 = [
 numba-enzyme = { url = "https://github.com/lawrenceberry/numba-enzyme/releases/download/v0.1.3-cuda.2/numba_enzyme-0.1.3-py3-none-linux_x86_64.whl" }
 
 [dependency-groups]
+# The docs build reads the package with griffe, which parses the source rather
+# than importing it, so `uv sync --only-group docs` is all the site needs -- no
+# CUDA toolchain, no SuiteSparse, no GPU.
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.27",
+    # mkdocstrings formats the signatures it renders with it.
+    "ruff>=0.15.5",
+]
 dev = [
     "pytest>=9.0.2",
     "pytest-benchmark>=5.2.3",

@@ -170,8 +170,9 @@ def dense_lu_solver(n_vars: int):
     This is what the kernel uses when it is given no sparsity pattern:
     right-looking LU over the thread's own row-major buffer, then the two
     triangular solves in place. Returned as the same
-    ``(factorize_local, solve_local)`` pair :func:`sparse_direct_solver` builds
-    from a pattern, so the kernel calls one or the other and has no branch.
+    ``(factorize_local, solve_local)`` pair
+    [`sparse_direct_solver`][solvers._sparse_direct.sparse_direct_solver]
+    builds from a pattern, so the kernel calls one or the other and has no branch.
 
     It replaced nvmath's ``LUPivotSolver``, whose block-collective API was the
     only reason the kernel ever put a matrix in shared memory. That cost a
@@ -315,9 +316,10 @@ def _make_kernel(ode_fn, n_vars: int, n_params: int, options: KernelOptions):
 
     The linear solve is one code path over a buffer the layout describes. With
     no pattern that layout is the dense row-major matrix and the solver is
-    :func:`dense_lu_solver`; with one it is the sparse factorisation's own CSR
-    image and the solver is compiled for it. The two differ in what they were
-    built from and in nothing else the kernel can see.
+    [`dense_lu_solver`][solvers.rodas5P.dense_lu_solver]; with one it is the
+    sparse factorisation's own CSR image and the solver is compiled for it.
+    The two differ in what they were built from and in nothing else the kernel
+    can see.
     """
     spec, sparsity, lu_precision = options.spec, options.sparsity, options.lu_precision
     tf_index, array_rhs = options.tf_index, options.array_rhs
@@ -1116,10 +1118,10 @@ def solve(
     follow. The Jacobian costs one Enzyme sweep per *colour* of the pattern's
     column intersection graph rather than one per column, since columns sharing
     no row can be seeded together and the pattern says which output component
-    belongs to which (:mod:`solvers._sparsity`). And the iteration matrix is
+    belongs to which ([`solvers._sparsity`][]). And the iteration matrix is
     ordered, factorised symbolically and given an in-kernel sparse LU and sparse
     triangular solves compiled for that exact structure
-    (:mod:`solvers._sparse_direct`). The default -- no pattern -- colours every
+    ([`solvers._sparse_direct`][]). The default -- no pattern -- colours every
     column apart and factorises densely, which is the same mechanism at its
     uninformative end rather than a second path.
 

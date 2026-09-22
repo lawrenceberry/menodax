@@ -11,3 +11,6 @@ wheels/*.whl
 
 # Claude Code local settings
 .claude/settings.json
+
+# mkdocs build output
+site/

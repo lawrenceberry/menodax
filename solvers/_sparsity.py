@@ -17,7 +17,7 @@ The pattern a caller supplies must be a *superset* of the true nonzeros --
 colouring a superset is conservative, colouring a subset silently corrupts
 entries where two columns in a group turn out to overlap after all. It need not
 cover the factorisation's fill-in: that has slots of its own, laid out by
-:mod:`solvers._sparse_direct`, and no column of ``J`` writes them.
+[`solvers._sparse_direct`][], and no column of ``J`` writes them.
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ class CompressedJacobian:
     row-major matrix -- so the dense path is not a special case in the kernel,
     just the uninformative end of the same mechanism.
 
-    :mod:`solvers._sparse_direct` overrides the grid with ``packed``: the slot
+    [`solvers._sparse_direct`][] overrides the grid with ``packed``: the slot
     of each entry in its own CSR image of ``L + U``, so the sweeps deposit ``-J``
     straight into the buffer the factorisation will work in.
     """
@@ -62,7 +62,7 @@ class CompressedJacobian:
     n_vars: int
     n_colours: int
     colour: tuple[int, ...]
-    # Set by :func:`solvers._sparse_direct.compressed_jacobian`: the slot each
+    # Set by `solvers._sparse_direct.compressed_jacobian`: the slot each
     # ``(row, colour)`` grid position collapses to, ``-1`` where the group has
     # nothing in that row. ``None`` leaves the layout on the grid, where a slot
     # exists for every position.

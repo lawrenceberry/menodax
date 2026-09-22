@@ -1,0 +1,49 @@
+name: docs
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; a push mid-run queues rather than cancelling, so
+# master always ends up published.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The revision date material shows comes from git, which needs more
+          # than the default shallow clone.
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install the docs toolchain
+        # Only the docs group: mkdocstrings reads solvers/ statically, so none
+        # of the CUDA or SuiteSparse dependencies have to resolve here.
+        run: uv sync --frozen --only-group docs --no-install-project
+      - name: Build the site
+        run: uv run --no-sync mkdocs build --strict
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

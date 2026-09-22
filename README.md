@@ -1,5 +1,9 @@
 # modax
 
+**[Documentation](https://lawrenceberry.github.io/modax/)**
+
+<!-- --8<-- [start:overview] -->
+
 GPU-accelerated ODE solvers for **massive ensembles** (1-100k) of low-dimensional (<200D) ODE trajectories, built on
 JAX and Numba-CUDA-MLIR. Applications include: Bayesian parameter inference, uncertainty quantification and the integration of physically uncoupled systems.
 
@@ -9,6 +13,10 @@ per trajectory, hand-written step kernels with in-kernel LU factorisation,
 exposed to JAX as an XLA FFI custom call. That binding makes each solver an
 ordinary JAX primitive — `jit`-traceable, and `vmap` over a single solve lowers
 to one native ensemble launch.
+
+<!-- --8<-- [end:overview] -->
+
+<!-- --8<-- [start:solvers] -->
 
 ## Solvers (`solvers/`)
 
@@ -21,7 +29,11 @@ Rodas5P supports an `lu_precision` (`"fp32"`/`"fp64"`) knob: the FP32
 factorisation halves shared-memory use without lowering method order, since the
 Rosenbrock order conditions hold under an approximate Jacobian.
 
-### Sparse systems
+<!-- --8<-- [end:solvers] -->
+
+<!-- --8<-- [start:sparse] -->
+
+## Sparse systems
 
 Rodas5P takes a `sparsity` pattern, and that one argument is the whole
 interface — there is no linear solver to write or to pass:
@@ -48,7 +60,7 @@ On DISCO-EB's 50-variable Einstein-Boltzmann system this is **22% faster** than
 the hand-written Schur block-LU it replaced, and it asks nothing of the caller
 but the pattern.
 
-#### The choices behind it
+### The choices behind it
 
 All of the analysis happens once, on the host, when the kernel is built
 (`solvers/_sparse_direct.py`).
@@ -137,6 +149,10 @@ and the order it finds is the hand-written Schur solver's: peel each hierarchy
 from its truncated end inwards, where every variable has degree two, then
 eliminate the dense core last.
 
+<!-- --8<-- [end:sparse] -->
+
+<!-- --8<-- [start:api] -->
+
 ## API
 
 All solvers expose a single `solve(...)` entry point that integrates an
@@ -181,6 +197,10 @@ Calling conventions:
 - **Tsit5** (explicit) needs no derivatives at all.
 
 Importing `solvers` enables JAX float64.
+
+<!-- --8<-- [end:api] -->
+
+<!-- --8<-- [start:gradients] -->
 
 ## Gradients
 
@@ -498,6 +518,10 @@ can show larger transient growth than the state alone even though its eigenvalue
 are unchanged. Stiffness in the spectral sense is identical; conditioning need
 not be.
 
+<!-- --8<-- [end:gradients] -->
+
+<!-- --8<-- [start:install] -->
+
 ## Install & run
 
 ```bash
@@ -508,8 +532,13 @@ uv run pytest
 uv run ruff format && uv run ruff check --fix
 ```
 
-`uv sync` resolves `numba-enzyme` from a wheel in `wheels/`, which is too large
-to commit. Build it first — see [wheels/README.md](wheels/README.md).
+`uv sync` resolves `numba-enzyme` from a prebuilt wheel published as a GitHub
+release asset, hash-pinned in `uv.lock`; nothing has to be built by hand. See
+[wheels/README.md](wheels/README.md) for what is in it and why.
+
+<!-- --8<-- [end:install] -->
+
+<!-- --8<-- [start:examples] -->
 
 ## Examples
 
@@ -520,3 +549,4 @@ Worked end-to-end problems live in `examples/` (each with its own README):
 - `21cm_igm_evolution/` — toy global 21cm IGM thermal/ionisation history;
 - `mukhanov_sasaki/` — Mukhanov–Sasaki mode evolution.
 
+<!-- --8<-- [end:examples] -->

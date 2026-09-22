@@ -27,7 +27,20 @@ uv run pytest tests/test_examples.py -v
 # Format and lint
 uv run ruff format
 uv run ruff check --fix
+
+# Docs (mkdocs-material + mkdocstrings); the group installs neither CUDA nor
+# the project, since griffe reads solvers/ statically
+uv sync --only-group docs --no-install-project
+uv run --no-sync mkdocs serve      # or: mkdocs build --strict
 ```
+
+The site is `docs/` plus `mkdocs.yml`, and `.github/workflows/docs.yml`
+publishes it to GitHub Pages on every push to `master`. The long-form prose is
+*not* duplicated there: the pages pull sections out of `README.md`, the
+examples' READMEs and `wheels/README.md` with `pymdownx.snippets`, so
+`<!-- --8<-- [start:name] -->` / `[end:name]` markers in those files are
+load-bearing. Docstrings are rendered by mkdocstrings, so a cross-reference in
+one is written ``[`solvers._sparsity`][]`` rather than as a Sphinx role.
 
 Most solver tests need a GPU and are skipped when `numba_cuda_mlir` is unavailable.
 `tests/test_examples.py` runs anywhere: it compiles the examples' device

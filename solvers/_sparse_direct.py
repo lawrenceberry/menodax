@@ -12,18 +12,21 @@ The analysis happens once, on the host, when the kernel is built:
 
 1. **Order.** The pattern is symmetrised and handed to SuiteSparse's AMD through
    scikit-sparse, which returns a fill-reducing permutation (see
-   :func:`fill_reducing_order` for why AMD and not COLAMD).
+   [`fill_reducing_order`][solvers._sparse_direct.fill_reducing_order] for
+   why AMD and not COLAMD).
 2. **Factor symbolically.** The exact pattern of ``L + U`` for the permuted
    matrix, fill-in included, falls out of a pure-pattern Gaussian elimination
-   (:func:`fill_pattern`) -- no numbers, no device, no sample matrix.
+   ([`fill_pattern`][solvers._sparse_direct.fill_pattern]) -- no numbers, no
+   device, no sample matrix.
 3. **Lay out.** That pattern becomes one CSR image of ``L + U``, and the
-   ``(row, col) -> slot`` map it defines becomes the :class:`CompressedJacobian`
-   the AD sweeps write into. The buffer is exactly ``nnz(L + U)`` elements: the
+   ``(row, col) -> slot`` map it defines becomes the
+   [`CompressedJacobian`][solvers._sparsity.CompressedJacobian] the AD sweeps
+   write into. The buffer is exactly ``nnz(L + U)`` elements: the
    symbolic pass *is* the memory footprint.
 4. **Compile.** The factorisation and the two triangular solves become
    ``cuda.jit(device=True)`` functions, in the same
    ``factorize_local(lu, ipiv)`` / ``solve_local(lu, ipiv, rhs)`` shape
-   :func:`solvers.rodas5P.dense_lu_solver` has, so the kernel calls one or the
+   [`solvers.rodas5P.dense_lu_solver`][] has, so the kernel calls one or the
    other and has no branch. Where the structure is small enough they are emitted
    as straight-line code with every slot a literal; above that they fall back to
    loops over index tables in constant memory.
@@ -299,7 +302,7 @@ def analyse(
     """Order, factorise symbolically, and lay out ``L + U`` in CSR.
 
     ``pattern`` is the normalised form, one tuple of column indices per row, as
-    :func:`solvers._sparsity.normalize_sparsity` returns it.
+    [`solvers._sparsity.normalize_sparsity`][] returns it.
     """
     n_vars = len(pattern)
     order = fill_reducing_order(pattern, ordering)
@@ -471,7 +474,7 @@ def _make_factorize(layout: SparseLULayout, ops):
     them.
 
     Small structures get this unrolled, every slot a literal, for the reasons
-    :func:`_make_solve` gives. Table-driven, the inner loop runs over row ``k``'s
+    ``_make_solve`` gives. Table-driven, the inner loop runs over row ``k``'s
     upper entries -- which CSR holds contiguously, so the *source* needs no index
     and only the destination costs a broadcast load per multiply-add.
 
