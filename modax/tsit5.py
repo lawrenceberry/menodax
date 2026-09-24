@@ -8,7 +8,6 @@ import math
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from numba_cuda_mlir import cuda
 
 from modax._jax_common import make_custom_vmap_solver, normalize_y0_params
@@ -92,38 +91,10 @@ FACTOR_MAX = 10.0
 # the kernel are expressed relative to this.
 EXPONENT = -1.0 / 5.0
 
-# Hybrid backend. The shared-memory kernel keeps all stage vectors in on-chip
-# shared memory (one thread per trajectory, BLOCK = _SHARED_BLOCK). It wins in
-# the latency-bound regime -- small ensembles and/or low dimension, where the
-# device is under-occupied and shared memory's low latency dominates -- but
-# needs ~9 * _SHARED_BLOCK * n_vars * 8 bytes of static shared memory per block
-# (capping n_vars) and its low occupancy loses to the transposed-global kernel
-# once the ensemble is large enough to saturate the GPU. The thresholds bound
-# the regime where shared was measured to win on an RTX 4070 SUPER; outside it
-# the global kernel is used. Retune per GPU or override via ``backend``.
-_SHARED_BLOCK = 32
-_SHARED_MAX_NVARS = 16
-_SHARED_MAX_ENSEMBLE = 16384
-_GLOBAL_BLOCK = 128
-
-
-def _use_shared_backend(n: int, n_vars: int, backend: str) -> bool:
-    if backend == "global":
-        return False
-    if backend == "shared":
-        if n_vars > _SHARED_MAX_NVARS:
-            raise ValueError(
-                "shared backend requires a system size <= "
-                f"{_SHARED_MAX_NVARS}; got {n_vars}. A solve carrying forward "
-                "sensitivities integrates n_vars * (1 + n_sens) components, so "
-                "it may need backend='global' where the plain solve does not"
-            )
-        return True
-    if backend != "auto":
-        raise ValueError(
-            f"backend must be 'auto', 'shared', or 'global'; got {backend!r}"
-        )
-    return n_vars <= _SHARED_MAX_NVARS and n <= _SHARED_MAX_ENSEMBLE
+# One thread per trajectory. The stage vectors are global ``(n_vars, n)``
+# scratch arrays XLA allocates for the launch, transposed like the state so a
+# warp's accesses are coalesced; nothing on chip bounds the block size.
+_BLOCK = 128
 
 
 def clear_caches() -> None:
@@ -135,7 +106,6 @@ def clear_caches() -> None:
     """
     _make_body.cache_clear()
     _make_kernel.cache_clear()
-    _make_shared_kernel.cache_clear()
     _make_jax_launch.cache_clear()
     clear_sensitivity_caches()
     gc.collect()
@@ -152,12 +122,9 @@ def _make_body(
 ):
     """Build the per-trajectory Tsit5 integration loop as a CUDA device fn.
 
-    The body is storage-agnostic: ``i`` indexes the per-trajectory global arrays
-    (``y0``/``weights``/``hist``/stats) while ``s`` indexes the stage workspace
-    columns. The global kernel passes ``s = i`` (stage vectors are global
-    ``(n_vars, n)`` arrays); the shared kernel passes ``s = threadIdx.x`` (stage
-    vectors are per-block shared ``(n_vars, BLOCK)`` arrays). This keeps both
-    backends sharing a single integrator implementation.
+    ``i`` indexes the per-trajectory global arrays (``y0``/``weights``/``hist``/
+    stats) and ``s`` the column of the ``(n_vars, n)`` stage workspace; the
+    kernel passes the same trajectory index for both.
     """
     # PID step-control exponents (Soderlind). Defaults (0, 1, 0) give E1=EXPONENT
     # and E2=E3=0, recovering the elementary I-controller exactly.
@@ -409,7 +376,7 @@ def _make_kernel(
     dcoeff: float = 0.0,
     spec: SensitivitySpec | None = None,
 ):
-    """Transposed-global kernel: stage vectors are global ``(n_vars, n)`` arrays."""
+    """One thread per trajectory; stage vectors are global ``(n_vars, n)`` arrays."""
     body = _make_body(ode_fn, n_vars, pcoeff, icoeff, dcoeff, spec)
 
     @cuda.jit
@@ -469,82 +436,6 @@ def _make_kernel(
 
 
 @functools.cache
-def _make_shared_kernel(
-    ode_fn,
-    n_vars: int,
-    pcoeff: float = 0.0,
-    icoeff: float = 1.0,
-    dcoeff: float = 0.0,
-    spec: SensitivitySpec | None = None,
-):
-    """Shared-memory kernel: stage vectors live in per-block shared memory.
-
-    One thread per trajectory, ``_SHARED_BLOCK`` threads per block. The stage
-    workspace is nine ``(n_vars, _SHARED_BLOCK)`` shared arrays (transposed so
-    consecutive lanes are contiguous -> bank-conflict-free), indexed by
-    ``threadIdx.x``. No scratch is passed in or written out.
-    """
-    body = _make_body(ode_fn, n_vars, pcoeff, icoeff, dcoeff, spec)
-    shape = (n_vars if spec is None else spec.n_aug, _SHARED_BLOCK)
-
-    @cuda.jit
-    def kernel(
-        y0,
-        times,
-        params,
-        dt0,
-        rtol,
-        atol,
-        max_steps,
-        weights,
-        hist,
-        accepted_out,
-        rejected_out,
-        loop_out,
-    ):
-        i = cuda.grid(1)  # ty: ignore[unresolved-attribute]
-        tx = cuda.threadIdx.x  # ty: ignore[unresolved-attribute]
-        if i >= y0.shape[1]:
-            return
-        y = cuda.shared.array(shape=shape, dtype=np.float64)
-        u = cuda.shared.array(shape=shape, dtype=np.float64)
-        k1 = cuda.shared.array(shape=shape, dtype=np.float64)
-        k2 = cuda.shared.array(shape=shape, dtype=np.float64)
-        k3 = cuda.shared.array(shape=shape, dtype=np.float64)
-        k4 = cuda.shared.array(shape=shape, dtype=np.float64)
-        k5 = cuda.shared.array(shape=shape, dtype=np.float64)
-        k6 = cuda.shared.array(shape=shape, dtype=np.float64)
-        k7 = cuda.shared.array(shape=shape, dtype=np.float64)
-        body(
-            y0,
-            times,
-            params,
-            dt0,
-            rtol,
-            atol,
-            max_steps,
-            weights,
-            hist,
-            accepted_out,
-            rejected_out,
-            loop_out,
-            y,
-            u,
-            k1,
-            k2,
-            k3,
-            k4,
-            k5,
-            k6,
-            k7,
-            i,
-            tx,
-        )
-
-    return kernel
-
-
-@functools.cache
 def _make_jax_launch(
     ode_fn,
     n: int,
@@ -552,21 +443,13 @@ def _make_jax_launch(
     pcoeff: float = 0.0,
     icoeff: float = 1.0,
     dcoeff: float = 0.0,
-    uses_shared: bool = False,
     spec: SensitivitySpec | None = None,
 ):
     """Compile, load and size the kernel behind one JAX-side ensemble launch."""
-    if uses_shared:
-        # No scratch arrays: the shared kernel keeps its stage workspace on chip.
-        kernel = _make_shared_kernel(ode_fn, n_vars, pcoeff, icoeff, dcoeff, spec)
-        argtypes = SOLVER_ARGTYPES
-        threads = _SHARED_BLOCK
-    else:
-        kernel = _make_kernel(ode_fn, n_vars, pcoeff, icoeff, dcoeff, spec)
-        argtypes = SOLVER_ARGTYPES + (SCRATCH_ARGTYPE,) * 9
-        threads = _GLOBAL_BLOCK
-    blocks = (n + threads - 1) // threads
-    return make_launch(kernel, argtypes, grid=blocks, block=threads)
+    kernel = _make_kernel(ode_fn, n_vars, pcoeff, icoeff, dcoeff, spec)
+    argtypes = SOLVER_ARGTYPES + (SCRATCH_ARGTYPE,) * 9
+    blocks = (n + _BLOCK - 1) // _BLOCK
+    return make_launch(kernel, argtypes, grid=blocks, block=_BLOCK)
 
 
 def solve(
@@ -584,7 +467,6 @@ def solve(
     pcoeff=0.0,
     icoeff=1.0,
     dcoeff=0.0,
-    backend="auto",
     sens_error_control=True,
     sens_param_columns=None,
 ):
@@ -617,7 +499,6 @@ def solve(
         pcoeff=pcoeff,
         icoeff=icoeff,
         dcoeff=dcoeff,
-        backend=backend,
     )
     # The JVP rule wraps the vmap-aware solvers rather than the other way
     # round: custom_vmap's own JVP path instantiates symbolic zeros, which is
@@ -666,7 +547,6 @@ def _solve_impl(
     pcoeff=0.0,
     icoeff=1.0,
     dcoeff=0.0,
-    backend="auto",
     spec=None,
 ):
     y0_arr, params_arr, n, n_vars = normalize_y0_params(y0, params)
@@ -683,16 +563,10 @@ def _solve_impl(
         weights_host = augmented_error_weights(weights_host, spec)
     weights_arr = jnp.asarray(weights_host)
 
-    uses_shared = _use_shared_backend(n, n_system, backend)
-    launch = _make_jax_launch(
-        ode_fn, n, n_vars, pcoeff, icoeff, dcoeff, uses_shared, spec
-    )
-    # The shared kernel keeps its stage workspace on chip and so needs no
-    # scratch outputs; the global kernel's nine stage vectors are transposed
+    launch = _make_jax_launch(ode_fn, n, n_vars, pcoeff, icoeff, dcoeff, spec)
+    # The nine stage vectors are scratch outputs of the custom call, transposed
     # like the state.
-    scratch_specs = (
-        () if uses_shared else (jax.ShapeDtypeStruct((n_system, n), jnp.float64),) * 9
-    )
+    scratch_specs = (jax.ShapeDtypeStruct((n_system, n), jnp.float64),) * 9
     # State/stage/weights are transposed (n_system, n) so the kernel's warp
     # accesses are coalesced; XLA materializes the transpose as a C-contiguous
     # operand. hist keeps the (n, n_save, n_system) output layout.

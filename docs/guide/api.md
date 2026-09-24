@@ -84,10 +84,3 @@ history.
     then shrinks the history output to the final state, `(N, 1, n_vars)`. A
     hooked solve returns `(hist, hook_out)` and is a plain ensemble launch: no
     `jax.vmap`, no differentiation.
-
-## Arguments only Tsit5 takes
-
-`backend`
-:   `"auto"` (the default), `"shared"` or `"global"`, selecting whether the
-    stage workspace lives in shared memory or in global scratch. `"auto"`
-    picks on whether the state fits on chip; the two paths are bit-identical.

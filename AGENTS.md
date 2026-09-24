@@ -523,8 +523,10 @@ touching the code.
   a warp diverge and the block runs until its slowest trajectory finishes.
   Rodas5P needs no barrier at all: a finished thread simply returns.
 - In-kernel LU factorisation, entirely in thread-local memory.
-- `tsit5` has `backend="shared"` and `backend="global"` paths, selected by
-  whether the state fits in shared memory; the two are bit-identical.
+- `tsit5` keeps its stage vectors in `(n_vars, n)` global scratch arrays that
+  XLA allocates for the launch, transposed like the state so a warp's accesses
+  coalesce. It once had a shared-memory path too, chosen by a `backend`
+  argument when the state fit on chip; that was removed for simplicity.
 
 ### Reference and benchmarks
 

@@ -1,12 +1,12 @@
 solver_key,solver,ensemble_size,solve_time_ms
-modax tsit5,modax tsit5,3,3.444716101512313
-modax tsit5,modax tsit5,10,3.1196660129353404
-modax tsit5,modax tsit5,30,3.319905954413116
-modax tsit5,modax tsit5,100,3.329885075800121
-modax tsit5,modax tsit5,300,3.349356004036963
-modax tsit5,modax tsit5,1000,3.158536972478032
-modax tsit5,modax tsit5,3000,3.985055023804307
-modax tsit5,modax tsit5,10000,10.397767997346818
+modax tsit5,modax tsit5,3,5.1512360805645585
+modax tsit5,modax tsit5,10,4.474436980672181
+modax tsit5,modax tsit5,30,4.3260189704597
+modax tsit5,modax tsit5,100,6.994900992140174
+modax tsit5,modax tsit5,300,7.097769994288683
+modax tsit5,modax tsit5,1000,6.969470996409655
+modax tsit5,modax tsit5,3000,7.021591067314148
+modax tsit5,modax tsit5,10000,13.791142031550407
 modax tsit5,modax tsit5,30000,34.2137390980497
 modax tsit5,modax tsit5,100000,84.1475079068914
 diffrax tsit5,diffrax tsit5,3,119.35135500971228

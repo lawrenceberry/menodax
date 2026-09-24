@@ -476,9 +476,8 @@ still one CUDA thread per trajectory with no cross-trajectory communication.
 The asymptotics are not the only obstacle to differentiating the solver kernel
 itself with Enzyme, the way `ode_fn` is differentiated; it is impractical here
 for mechanical reasons too. The kernels are not ordinary functions: they are
-hand-written CUDA with per-trajectory adaptive stepping, hand-written linear
-algebra over thread-local buffers, and `syncthreads` barriers in Tsit5's shared
-backend.
+hand-written CUDA with per-trajectory adaptive stepping and hand-written
+linear algebra over thread-local buffers.
 Reverse mode through that, and through the step controller's data-dependent
 control flow, is exactly where Enzyme-GPU stops working, and a reverse pass would in any
 case need a tape of every stage of every step — at $10^5$ trajectories and

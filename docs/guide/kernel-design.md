@@ -10,8 +10,9 @@ and nothing synchronises inside a step.
 That is why `trajectories_per_block` is free to be anything — nothing on chip
 bounds it — and why `trajectories_per_block_or_default` defaults it to a warp.
 
-`tsit5` keeps two paths, `backend="shared"` and `backend="global"`, selected by
-whether the stage workspace fits in shared memory. They are bit-identical.
+`tsit5` keeps its stage vectors in `(n_vars, n)` global scratch arrays that
+XLA allocates for the launch, transposed like the state so a warp's accesses
+coalesce.
 
 ## How a solve reaches the GPU
 
