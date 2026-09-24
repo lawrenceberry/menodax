@@ -22,6 +22,60 @@
       "8": 383.4583340212703,
       "12": 380.5668100249022,
       "16": 381.49049400817603
+    },
+    "diffrax kvaerno5": {
+      "1": 491.79655802436173,
+      "2": 562.4831080203876,
+      "3": 632.2254369733855,
+      "4": 692.7564119687304,
+      "6": 830.8638219023123,
+      "8": 515.3276339406148,
+      "12": 394.38914693892,
+      "16": 397.78629899956286
+    },
+    "julia rodas5P EnsembleGPUArray": {
+      "1": 521.560488,
+      "2": 531.500344,
+      "3": 532.0543319999999,
+      "4": 536.7335899999999,
+      "6": 553.259362,
+      "8": 558.613919,
+      "12": 583.602482,
+      "16": 600.534722
+    },
+    "julia rodas5P EnsembleGPUKernel": {
+      "1": {
+        "status": "timeout",
+        "error": "exceeded timeout"
+      },
+      "2": {
+        "status": "timeout",
+        "error": "exceeded timeout"
+      },
+      "3": {
+        "status": "timeout",
+        "error": "exceeded timeout"
+      },
+      "4": {
+        "status": "timeout",
+        "error": "exceeded timeout"
+      },
+      "6": {
+        "status": "timeout",
+        "error": "exceeded timeout"
+      },
+      "8": {
+        "status": "timeout",
+        "error": "exceeded timeout"
+      },
+      "12": {
+        "status": "timeout",
+        "error": "exceeded timeout"
+      },
+      "16": {
+        "status": "timeout",
+        "error": "exceeded timeout"
+      }
     }
   }
 }

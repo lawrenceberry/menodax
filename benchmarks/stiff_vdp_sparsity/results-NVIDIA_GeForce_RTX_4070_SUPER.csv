@@ -15,3 +15,27 @@ modax rodas5P fp32 (dense),modax rodas5P fp32 (dense),6,0.1171875,380.7187270140
 modax rodas5P fp32 (dense),modax rodas5P fp32 (dense),8,0.1484375,383.4583340212703
 modax rodas5P fp32 (dense),modax rodas5P fp32 (dense),12,0.2109375,380.5668100249022
 modax rodas5P fp32 (dense),modax rodas5P fp32 (dense),16,0.265625,381.49049400817603
+diffrax kvaerno5,diffrax kvaerno5,1,0.0390625,491.79655802436173
+diffrax kvaerno5,diffrax kvaerno5,2,0.0546875,562.4831080203876
+diffrax kvaerno5,diffrax kvaerno5,3,0.0703125,632.2254369733855
+diffrax kvaerno5,diffrax kvaerno5,4,0.0859375,692.7564119687304
+diffrax kvaerno5,diffrax kvaerno5,6,0.1171875,830.8638219023123
+diffrax kvaerno5,diffrax kvaerno5,8,0.1484375,515.3276339406148
+diffrax kvaerno5,diffrax kvaerno5,12,0.2109375,394.38914693892
+diffrax kvaerno5,diffrax kvaerno5,16,0.265625,397.78629899956286
+julia rodas5P EnsembleGPUArray,julia rodas5P EnsembleGPUArray,1,0.0390625,521.560488
+julia rodas5P EnsembleGPUArray,julia rodas5P EnsembleGPUArray,2,0.0546875,531.500344
+julia rodas5P EnsembleGPUArray,julia rodas5P EnsembleGPUArray,3,0.0703125,532.0543319999999
+julia rodas5P EnsembleGPUArray,julia rodas5P EnsembleGPUArray,4,0.0859375,536.7335899999999
+julia rodas5P EnsembleGPUArray,julia rodas5P EnsembleGPUArray,6,0.1171875,553.259362
+julia rodas5P EnsembleGPUArray,julia rodas5P EnsembleGPUArray,8,0.1484375,558.613919
+julia rodas5P EnsembleGPUArray,julia rodas5P EnsembleGPUArray,12,0.2109375,583.602482
+julia rodas5P EnsembleGPUArray,julia rodas5P EnsembleGPUArray,16,0.265625,600.534722
+julia rodas5P EnsembleGPUKernel,julia rodas5P EnsembleGPUKernel,1,0.0390625,
+julia rodas5P EnsembleGPUKernel,julia rodas5P EnsembleGPUKernel,2,0.0546875,
+julia rodas5P EnsembleGPUKernel,julia rodas5P EnsembleGPUKernel,3,0.0703125,
+julia rodas5P EnsembleGPUKernel,julia rodas5P EnsembleGPUKernel,4,0.0859375,
+julia rodas5P EnsembleGPUKernel,julia rodas5P EnsembleGPUKernel,6,0.1171875,
+julia rodas5P EnsembleGPUKernel,julia rodas5P EnsembleGPUKernel,8,0.1484375,
+julia rodas5P EnsembleGPUKernel,julia rodas5P EnsembleGPUKernel,12,0.2109375,
+julia rodas5P EnsembleGPUKernel,julia rodas5P EnsembleGPUKernel,16,0.265625,

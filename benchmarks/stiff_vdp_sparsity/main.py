@@ -4,14 +4,15 @@ Fixes the system at 64 dimensions (n_osc = 32) and an ensemble of 1000
 identical trajectories, and sweeps the lattice's coupling range -- how many
 oscillators along the ring each one couples to -- from nearest neighbours to
 all-to-all. Each range gives the right-hand side a different Jacobian density,
-which is the x axis. Two cases: modax Rodas5P handed the Jacobian's sparsity
-pattern, which buys it one Enzyme sweep per colour of the pattern and the
-compiled sparse LU, and the same solver without it, which sweeps every column
-and factorises the dense matrix. The dense case does not depend on the
-density; the question is how far the sparse case's advantage stretches as the
-pattern fills in. A point that does not compile and solve within the case
-timeout is recorded as such and omitted from the plot. Outputs a CSV and a plot
-named after the GPU.
+which is the x axis. modax Rodas5P is timed twice: handed the Jacobian's
+sparsity pattern, which buys it one Enzyme sweep per colour of the pattern and
+the compiled sparse LU, and without it, sweeping every column and factorising
+the dense matrix. Diffrax Kvaerno5 and Julia Rodas5P on both DiffEqGPU
+ensemble backends, all dense, sit alongside for scale. The dense cases do not
+depend on the density; the question is how far the sparse case's advantage
+stretches as the pattern fills in. A point that fails, or does not compile and
+solve within the case timeout, is recorded as such and omitted from the plot.
+Outputs a CSV and a plot named after the GPU.
 
 Usage:
     uv run python benchmarks/stiff_vdp_sparsity/main.py
@@ -37,6 +38,8 @@ from benchmarks._sweep import (
     main,
 )
 from modax.rodas5P import solve as rodas5P_solve
+from reference.solvers.python.diffrax_kvaerno5 import solve as diffrax_kvaerno5_solve
+from reference.solvers.python.julia_rodas5P import solve as julia_rodas5P_solve
 from reference.systems.python import vdp
 
 jax.config.update("jax_enable_x64", True)
@@ -64,7 +67,11 @@ def _problem(coupling_range: int) -> Problem:
         _N_OSC, _ENSEMBLE_SIZE, divergence=IDENTICAL_DIVERGENCE
     )
     return Problem(
-        ode_fn, y0, params, sparsity=vdp.make_sparsity(_N_OSC, coupling_range)
+        ode_fn,
+        y0,
+        params,
+        julia_system_config={"n_osc": _N_OSC, "coupling_range": coupling_range},
+        sparsity=vdp.make_sparsity(_N_OSC, coupling_range),
     )
 
 
@@ -75,6 +82,8 @@ BENCHMARK = SweepBenchmark(
     values=_COUPLING_RANGES,
     t_span=vdp.TIMES,
     make_problem=_problem,
+    julia_solve=julia_rodas5P_solve,
+    julia_system="vdp",
     cases=(
         SweepCase(
             key="modax rodas5P fp32 (sparse)",
@@ -90,6 +99,30 @@ BENCHMARK = SweepBenchmark(
             color="#8c564b",
             marker="X",
             solve_fn=rodas5P_solve,
+            kwargs=_SOLVER_KWARGS,
+        ),
+        SweepCase(
+            key="diffrax kvaerno5",
+            color="#2ba84a",
+            marker="s",
+            solve_fn=diffrax_kvaerno5_solve,
+            kwargs=_SOLVER_KWARGS,
+        ),
+        SweepCase(
+            key="julia rodas5P EnsembleGPUArray",
+            color="#9b59b6",
+            marker="^",
+            mode="julia",
+            ensemble_backend="EnsembleGPUArray",
+            kwargs=_SOLVER_KWARGS,
+        ),
+        SweepCase(
+            key="julia rodas5P EnsembleGPUKernel",
+            color="#9b59b6",
+            marker="v",
+            linestyle="--",
+            mode="julia",
+            ensemble_backend="EnsembleGPUKernel",
             kwargs=_SOLVER_KWARGS,
         ),
     ),
