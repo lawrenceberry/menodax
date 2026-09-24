@@ -38,7 +38,6 @@ SOLVER_ARGTYPES = (
     _I32_1D,  # rejected steps
     _I32_1D,  # loop steps
 )
-SCRATCH_ARGTYPE = _F64_2D
 HOOK_OUT_ARGTYPE = _F64_2D
 """Per-trajectory rows a save hook accumulates into (``(n, hook_size)``)."""
 SOLVER_INPUT_KINDS = (
@@ -146,36 +145,13 @@ def as_cuda_device(fn):
     return cuda.jit(device=True)(fn)
 
 
-@functools.cache
-def make_cuda_transposed_vector_writer(fn, n_vars: int):
-    """A vector writer for transposed (SoA) state.
-
-    State/work arrays are laid out ``(n_vars, n)`` so that for a fixed component
-    the trajectory axis is contiguous. The strided column ``y[:, s]`` passed to
-    the callback is coalesced across the warp (all lanes read the same component
-    at consecutive ``s``), so no per-lane gather is needed. ``prow`` is the
-    trajectory's parameter row and ``s`` indexes the column of both the input
-    state and the output array; this lets the same writer drive a global
-    workspace (``s`` = global trajectory index) or a per-block shared workspace
-    (``s`` = thread-within-block index).
-    """
-    fn_device = as_cuda_device(fn)
-
-    @cuda.jit(device=True)
-    def write_vector(y, t, prow, out, s):
-        values = fn_device(y[:, s], t, prow)
-        for j in range(n_vars):
-            out[j, s] = values[j]
-
-    return write_vector
-
-
 def make_cuda_local_vector_writer(fn, n_vars: int):
     """A vector writer over one trajectory's own thread-local arrays.
 
-    Rodas5P runs one trajectory per thread, so there is no stripe to share: the
-    thread owning the trajectory writes the whole vector, and both ``y_row`` and
-    ``out`` are its own local memory rather than rows of a global scratch array.
+    Both kernels run one trajectory per thread, so there is no stripe to share:
+    the thread owning the trajectory writes the whole vector, and both
+    ``y_row`` and ``out`` are its own local memory rather than rows of a global
+    scratch array.
     """
     fn_device = as_cuda_device(fn)
 

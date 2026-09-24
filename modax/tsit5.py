@@ -1,4 +1,4 @@
-"""Generic Tsit5 custom kernel using numba-cuda."""
+"""Tsit5 custom kernel using numba-cuda: one thread per trajectory, thread-local storage."""
 
 from __future__ import annotations
 
@@ -6,26 +6,24 @@ import functools
 import gc
 import math
 
-import jax
 import jax.numpy as jnp
-from numba_cuda_mlir import cuda
+from numba_cuda_mlir import cuda, types
 
 from modax._jax_common import make_custom_vmap_solver, normalize_y0_params
 from modax._jax_numba_custom_call import make_launch
 from modax._numba_common import (
-    SCRATCH_ARGTYPE,
     SOLVER_ARGTYPES,
     build_error_weights,
     ensemble_ffi_call,
     initial_step,
-    make_cuda_transposed_vector_writer,
+    make_cuda_local_vector_writer,
     solver_stats,
 )
 from modax._sensitivity import (
     SensitivitySpec,
     augmented_error_weights,
     augmented_y0,
-    make_augmented_transposed_writer,
+    make_augmented_local_writer,
     make_sensitivity_solver,
 )
 from modax._sensitivity import (
@@ -91,9 +89,8 @@ FACTOR_MAX = 10.0
 # the kernel are expressed relative to this.
 EXPONENT = -1.0 / 5.0
 
-# One thread per trajectory. The stage vectors are global ``(n_vars, n)``
-# scratch arrays XLA allocates for the launch, transposed like the state so a
-# warp's accesses are coalesced; nothing on chip bounds the block size.
+# One thread per trajectory, every per-trajectory buffer thread-local, so
+# nothing on chip bounds the block size.
 _BLOCK = 128
 
 
@@ -104,7 +101,6 @@ def clear_caches() -> None:
     ``n_vars`` compiles a separate kernel, and nothing releases it because the
     module-level caches hold it.
     """
-    _make_body.cache_clear()
     _make_kernel.cache_clear()
     _make_jax_launch.cache_clear()
     clear_sensitivity_caches()
@@ -112,7 +108,7 @@ def clear_caches() -> None:
 
 
 @functools.cache
-def _make_body(
+def _make_kernel(
     ode_fn,
     n_vars: int,
     pcoeff: float = 0.0,
@@ -120,11 +116,11 @@ def _make_body(
     dcoeff: float = 0.0,
     spec: SensitivitySpec | None = None,
 ):
-    """Build the per-trajectory Tsit5 integration loop as a CUDA device fn.
+    """Build the Tsit5 kernel: one thread per trajectory, all storage thread-local.
 
-    ``i`` indexes the per-trajectory global arrays (``y0``/``weights``/``hist``/
-    stats) and ``s`` the column of the ``(n_vars, n)`` stage workspace; the
-    kernel passes the same trajectory index for both.
+    The state, the trial state and the seven stage vectors are the thread's
+    own ``cuda.local`` arrays, as in Rodas5P, so the launch carries no scratch
+    and ``y0``/``weights``/``hist`` keep their natural ``(n, ...)`` layouts.
     """
     # PID step-control exponents (Soderlind). Defaults (0, 1, 0) give E1=EXPONENT
     # and E2=E3=0, recovering the elementary I-controller exactly.
@@ -137,15 +133,15 @@ def _make_body(
     # integrator itself is unchanged -- forward sensitivities are just a larger
     # ODE, which is what makes them cheap to bolt onto an existing kernel.
     if spec is None:
-        ode_write = make_cuda_transposed_vector_writer(ode_fn, n_vars)
+        ode_write = make_cuda_local_vector_writer(ode_fn, n_vars)
         n_system = n_vars
     else:
-        ode_write = make_augmented_transposed_writer(ode_fn, spec)
+        ode_write = make_augmented_local_writer(ode_fn, spec)
         n_system = spec.n_aug
     n_error = n_vars if spec is None else spec.n_error
 
-    @cuda.jit(device=True)
-    def body(
+    @cuda.jit
+    def kernel(
         y0,
         times,
         params,
@@ -158,23 +154,27 @@ def _make_body(
         accepted_out,
         rejected_out,
         loop_out,
-        y,
-        u,
-        k1,
-        k2,
-        k3,
-        k4,
-        k5,
-        k6,
-        k7,
-        i,
-        s,
     ):
+        i = cuda.grid(1)  # ty: ignore[unresolved-attribute]
+        # Nothing in a step is collective, so a thread past the end of the
+        # ensemble simply leaves.
+        if i >= y0.shape[0]:
+            return
+        y = cuda.local.array(n_system, types.float64)
+        u = cuda.local.array(n_system, types.float64)
+        k1 = cuda.local.array(n_system, types.float64)
+        k2 = cuda.local.array(n_system, types.float64)
+        k3 = cuda.local.array(n_system, types.float64)
+        k4 = cuda.local.array(n_system, types.float64)
+        k5 = cuda.local.array(n_system, types.float64)
+        k6 = cuda.local.array(n_system, types.float64)
+        k7 = cuda.local.array(n_system, types.float64)
+
         prow = params[i]
         for j in range(n_system):
-            y[j, s] = y0[j, i]
-            hist[i, 0, j] = y0[j, i]
-            k7[j, s] = 0.0
+            y[j] = y0[i, j]
+            hist[i, 0, j] = y0[i, j]
+            k7[j] = 0.0
 
         n_save = times.shape[0]
         t = times[0]
@@ -199,64 +199,58 @@ def _make_body(
 
             if has_fsal:
                 for j in range(n_system):
-                    k1[j, s] = k7[j, s]
+                    k1[j] = k7[j]
             else:
-                ode_write(y, t, prow, k1, s)
+                ode_write(y, t, prow, k1)
 
             for j in range(n_system):
-                u[j, s] = y[j, s] + dt_use * (A21 * k1[j, s])
-            ode_write(u, t + C2 * dt_use, prow, k2, s)
+                u[j] = y[j] + dt_use * (A21 * k1[j])
+            ode_write(u, t + C2 * dt_use, prow, k2)
 
             for j in range(n_system):
-                u[j, s] = y[j, s] + dt_use * (A31 * k1[j, s] + A32 * k2[j, s])
-            ode_write(u, t + C3 * dt_use, prow, k3, s)
+                u[j] = y[j] + dt_use * (A31 * k1[j] + A32 * k2[j])
+            ode_write(u, t + C3 * dt_use, prow, k3)
 
             for j in range(n_system):
-                u[j, s] = y[j, s] + dt_use * (
-                    A41 * k1[j, s] + A42 * k2[j, s] + A43 * k3[j, s]
+                u[j] = y[j] + dt_use * (A41 * k1[j] + A42 * k2[j] + A43 * k3[j])
+            ode_write(u, t + C4 * dt_use, prow, k4)
+
+            for j in range(n_system):
+                u[j] = y[j] + dt_use * (
+                    A51 * k1[j] + A52 * k2[j] + A53 * k3[j] + A54 * k4[j]
                 )
-            ode_write(u, t + C4 * dt_use, prow, k4, s)
+            ode_write(u, t + C5 * dt_use, prow, k5)
 
             for j in range(n_system):
-                u[j, s] = y[j, s] + dt_use * (
-                    A51 * k1[j, s] + A52 * k2[j, s] + A53 * k3[j, s] + A54 * k4[j, s]
+                u[j] = y[j] + dt_use * (
+                    A61 * k1[j] + A62 * k2[j] + A63 * k3[j] + A64 * k4[j] + A65 * k5[j]
                 )
-            ode_write(u, t + C5 * dt_use, prow, k5, s)
+            ode_write(u, t + C6 * dt_use, prow, k6)
 
             for j in range(n_system):
-                u[j, s] = y[j, s] + dt_use * (
-                    A61 * k1[j, s]
-                    + A62 * k2[j, s]
-                    + A63 * k3[j, s]
-                    + A64 * k4[j, s]
-                    + A65 * k5[j, s]
+                u[j] = y[j] + dt_use * (
+                    B1 * k1[j]
+                    + B2 * k2[j]
+                    + B3 * k3[j]
+                    + B4 * k4[j]
+                    + B5 * k5[j]
+                    + B6 * k6[j]
                 )
-            ode_write(u, t + C6 * dt_use, prow, k6, s)
-
-            for j in range(n_system):
-                u[j, s] = y[j, s] + dt_use * (
-                    B1 * k1[j, s]
-                    + B2 * k2[j, s]
-                    + B3 * k3[j, s]
-                    + B4 * k4[j, s]
-                    + B5 * k5[j, s]
-                    + B6 * k6[j, s]
-                )
-            ode_write(u, t + C7 * dt_use, prow, k7, s)
+            ode_write(u, t + C7 * dt_use, prow, k7)
 
             err_sum = 0.0
             for j in range(n_system):
                 err_est = dt_use * (
-                    E1 * k1[j, s]
-                    + E2 * k2[j, s]
-                    + E3 * k3[j, s]
-                    + E4 * k4[j, s]
-                    + E5 * k5[j, s]
-                    + E6 * k6[j, s]
-                    + E7 * k7[j, s]
+                    E1 * k1[j]
+                    + E2 * k2[j]
+                    + E3 * k3[j]
+                    + E4 * k4[j]
+                    + E5 * k5[j]
+                    + E6 * k6[j]
+                    + E7 * k7[j]
                 )
-                scale = atol + rtol * max(abs(y[j, s]), abs(u[j, s]))
-                r = weights[j, i] * err_est / scale
+                scale = atol + rtol * max(abs(y[j]), abs(u[j]))
+                r = weights[i, j] * err_est / scale
                 err_sum += r * r
             err_norm = math.sqrt(err_sum / n_error)
             accept = err_norm <= 1.0 and not math.isnan(err_norm)
@@ -321,24 +315,24 @@ def _make_body(
                     )
                     b7 = 2.5 * (theta - 1.0) * (theta - 0.6) * theta * theta
                     for j in range(n_system):
-                        hist[i, save_idx, j] = y[j, s] + dt_use * (
-                            b1 * k1[j, s]
-                            + b2 * k2[j, s]
-                            + b3 * k3[j, s]
-                            + b4 * k4[j, s]
-                            + b5 * k5[j, s]
-                            + b6 * k6[j, s]
-                            + b7 * k7[j, s]
+                        hist[i, save_idx, j] = y[j] + dt_use * (
+                            b1 * k1[j]
+                            + b2 * k2[j]
+                            + b3 * k3[j]
+                            + b4 * k4[j]
+                            + b5 * k5[j]
+                            + b6 * k6[j]
+                            + b7 * k7[j]
                         )
                     save_idx += 1
                 for j in range(n_system):
-                    y[j, s] = u[j, s]
+                    y[j] = u[j]
                 accepted_steps += 1
                 has_fsal = True
             else:
                 rejected_steps += 1
                 for j in range(n_system):
-                    k7[j, s] = 0.0
+                    k7[j] = 0.0
                 has_fsal = False
 
             if math.isnan(err_norm) or err_norm > 1e18:
@@ -364,74 +358,6 @@ def _make_body(
         rejected_out[i] = rejected_steps
         loop_out[i] = n_steps
 
-    return body
-
-
-@functools.cache
-def _make_kernel(
-    ode_fn,
-    n_vars: int,
-    pcoeff: float = 0.0,
-    icoeff: float = 1.0,
-    dcoeff: float = 0.0,
-    spec: SensitivitySpec | None = None,
-):
-    """One thread per trajectory; stage vectors are global ``(n_vars, n)`` arrays."""
-    body = _make_body(ode_fn, n_vars, pcoeff, icoeff, dcoeff, spec)
-
-    @cuda.jit
-    def kernel(
-        y0,
-        times,
-        params,
-        dt0,
-        rtol,
-        atol,
-        max_steps,
-        weights,
-        hist,
-        accepted_out,
-        rejected_out,
-        loop_out,
-        y,
-        u,
-        k1,
-        k2,
-        k3,
-        k4,
-        k5,
-        k6,
-        k7,
-    ):
-        i = cuda.grid(1)  # ty: ignore[unresolved-attribute]
-        if i >= y0.shape[1]:
-            return
-        body(
-            y0,
-            times,
-            params,
-            dt0,
-            rtol,
-            atol,
-            max_steps,
-            weights,
-            hist,
-            accepted_out,
-            rejected_out,
-            loop_out,
-            y,
-            u,
-            k1,
-            k2,
-            k3,
-            k4,
-            k5,
-            k6,
-            k7,
-            i,
-            i,
-        )
-
     return kernel
 
 
@@ -447,9 +373,8 @@ def _make_jax_launch(
 ):
     """Compile, load and size the kernel behind one JAX-side ensemble launch."""
     kernel = _make_kernel(ode_fn, n_vars, pcoeff, icoeff, dcoeff, spec)
-    argtypes = SOLVER_ARGTYPES + (SCRATCH_ARGTYPE,) * 9
     blocks = (n + _BLOCK - 1) // _BLOCK
-    return make_launch(kernel, argtypes, grid=blocks, block=_BLOCK)
+    return make_launch(kernel, SOLVER_ARGTYPES, grid=blocks, block=_BLOCK)
 
 
 def solve(
@@ -564,16 +489,12 @@ def _solve_impl(
     weights_arr = jnp.asarray(weights_host)
 
     launch = _make_jax_launch(ode_fn, n, n_vars, pcoeff, icoeff, dcoeff, spec)
-    # The nine stage vectors are scratch outputs of the custom call, transposed
-    # like the state.
-    scratch_specs = (jax.ShapeDtypeStruct((n_system, n), jnp.float64),) * 9
-    # State/stage/weights are transposed (n_system, n) so the kernel's warp
-    # accesses are coalesced; XLA materializes the transpose as a C-contiguous
-    # operand. hist keeps the (n, n_save, n_system) output layout.
+    # No global scratch: the kernel keeps the state and the stage vectors in
+    # thread-local memory.
     hist, accepted, rejected, loop_steps = ensemble_ffi_call(
         launch,
-        (y0_arr.T, times, params_arr, weights_arr.T),
-        scratch_specs,
+        (y0_arr, times, params_arr, weights_arr),
+        (),
         n=n,
         n_vars=n_system,
         n_save=n_save,

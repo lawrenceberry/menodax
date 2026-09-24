@@ -196,65 +196,10 @@ def seed_table(spec: SensitivitySpec):
 
 
 @functools.cache
-def make_augmented_transposed_writer(ode_fn, spec: SensitivitySpec):
-    """Joint ``[f, J_y S + J_p]`` writer for Tsit5's transposed ``(n_aug, n)`` state.
-
-    One thread owns a whole trajectory here, so the columns can be written
-    straight out with no cross-lane coordination.  Each sensitivity direction
-    costs exactly one forward sweep, whatever ``n_vars`` is: its right-hand
-    side is the directional derivative of ``ode_fn`` seeded with
-    ``(S_k, 0, e_k)``, so no Jacobian is ever formed.
-    """
-    n_vars = spec.n_vars
-    n_sens = spec.n_sens
-    n_y0_dirs = spec.n_y0_dirs
-    n_params = spec.n_params
-    param_cols = spec.param_seed_columns
-    length = max(n_vars, n_params)
-    fn_device = as_cuda_device(ode_fn)
-    tangent_of = make_tangent(ode_fn, n_vars, n_params)
-    seeds = seed_table(spec)
-
-    @cuda.jit(device=True)
-    def write_vector(z, t, prow, out, s):
-        # The callback and the derivative both read only the leading n_vars
-        # entries of the column they are handed, so the augmented state can be
-        # passed where the plain state is expected. The slices are strided; the
-        # Enzyme entry point loads through the memref's own stride, so that is
-        # fine.
-        seed = cuda.const.array_like(seeds)
-        zs = z[:, s]
-        values = fn_device(zs, t, prow)
-        for j in range(n_vars):
-            out[j, s] = values[j]
-
-        tangent = cuda.local.array(n_vars, types.float64)
-        for k in range(n_sens):
-            base = n_vars + k * n_vars
-            # An initial-state direction has no parameter component; a
-            # parameter direction k seeds the unit vector for the parameter
-            # it was asked for, which need not be the k-th.
-            start = 0 if k < n_y0_dirs else length - param_cols[k - n_y0_dirs]
-            tangent_of(
-                tangent,
-                zs,
-                t,
-                prow,
-                z[base : base + n_vars, s],
-                0.0,
-                seed[start : start + n_params],
-            )
-            for r in range(n_vars):
-                out[base + r, s] = tangent[r]
-
-    return write_vector
-
-
-@functools.cache
 def make_augmented_local_writer(ode_fn, spec: SensitivitySpec):
-    """Joint ``[f, J_y S + J_p]`` writer for Rodas5P's thread-local state.
+    """Joint ``[f, J_y S + J_p]`` writer for a kernel's thread-local state.
 
-    Rodas5P runs one trajectory per thread, so the whole augmented vector --
+    Both kernels run one trajectory per thread, so the whole augmented vector --
     the state block and every sensitivity direction -- is written by the thread
     that owns it, out of and into its own local arrays.  The directions stay
     independent of one another (each is its own forward sweep seeded with
@@ -307,7 +252,6 @@ def clear_caches() -> None:
     make_tangent.cache_clear()
     make_second_tangent.cache_clear()
     seed_table.cache_clear()
-    make_augmented_transposed_writer.cache_clear()
     make_augmented_local_writer.cache_clear()
 
 

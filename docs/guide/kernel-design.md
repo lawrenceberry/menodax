@@ -10,9 +10,8 @@ and nothing synchronises inside a step.
 That is why `trajectories_per_block` is free to be anything — nothing on chip
 bounds it — and why `trajectories_per_block_or_default` defaults it to a warp.
 
-`tsit5` keeps its stage vectors in `(n_vars, n)` global scratch arrays that
-XLA allocates for the launch, transposed like the state so a warp's accesses
-coalesce.
+`tsit5` is the same shape: the state and its seven stage vectors are the
+thread's own `cuda.local` arrays, and the launch carries no scratch.
 
 ## How a solve reaches the GPU
 
@@ -23,9 +22,9 @@ XLA custom call.
    the kernel for this `ode_fn`, dimension and set of options.
 2. `modax._jax_numba_custom_call` compiles a launcher for that kernel,
    registers it as an XLA FFI target, and exposes it through `ffi_abi_call`.
-3. `modax._numba_common.ensemble_ffi_call` makes the call, with the state and
-   stage buffers transposed to `(n_vars, N)` so a warp's accesses are
-   coalesced. XLA materialises that transpose.
+3. `modax._numba_common.ensemble_ffi_call` makes the call. The inputs keep
+   their natural `(N, ...)` layouts, and there is no scratch: every
+   per-trajectory buffer is the thread's own local memory.
 4. `modax._jax_common.make_custom_vmap_solver` wraps the result, so an outer
    `jax.vmap` over a single solve lowers to one native ensemble launch rather
    than to a batched trace.
