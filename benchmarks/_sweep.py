@@ -96,7 +96,10 @@ class SweepCase(BenchmarkCase):
     DiffEqGPU ``ensemble_backend``, which reports its own solve time.
     ``sparse`` hands the problem's Jacobian pattern to the solver as
     ``sparsity=``. ``cleanup`` runs after each timing, for a solver that caches
-    per-dimension state between points.
+    per-dimension state between points. ``jit=False`` times a ``"jax"`` case
+    as a plain call instead of under ``jax.jit``, for a solver outside JAX
+    such as the torchdiffeq reference, which must then block on its device
+    before returning.
     """
 
     mode: str = "jax"
@@ -105,6 +108,7 @@ class SweepCase(BenchmarkCase):
     ensemble_backend: str | None = None
     sparse: bool = False
     cleanup: Callable[[], None] | None = None
+    jit: bool = True
 
 
 @dataclass(kw_only=True)
@@ -181,8 +185,16 @@ def measure(bench: SweepBenchmark, job: dict) -> float:
         if problem.sparsity is None:
             raise ValueError(f"{case.key} wants a sparsity pattern the problem lacks")
         kwargs["sparsity"] = problem.sparsity
-    make_run = jit_value_and_grad if case.mode == "jax_grad" else jit_solve
-    run = make_run(case.solve_fn, problem.ode_fn, bench.t_span, **kwargs)
+    if case.mode == "jax_grad":
+        run = jit_value_and_grad(case.solve_fn, problem.ode_fn, bench.t_span, **kwargs)
+    elif case.jit:
+        run = jit_solve(case.solve_fn, problem.ode_fn, bench.t_span, **kwargs)
+    else:
+        solve_fn, ode_fn, t_span = case.solve_fn, problem.ode_fn, bench.t_span
+
+        def run(y0, params):
+            return solve_fn(ode_fn, y0, t_span, params, **kwargs)
+
     try:
         ms, _ = time_blocked(lambda: run(problem.y0, problem.params), bench.n_runs)
         return ms

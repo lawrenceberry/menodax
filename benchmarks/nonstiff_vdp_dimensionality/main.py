@@ -2,7 +2,8 @@
 
 Sweeps ODE dimension from 2 to 128 (n_osc = 1 to 64) on a log scale with a
 fixed ensemble of 1000 identical trajectories and records solve time for modax
-Tsit5, Diffrax Tsit5, and Julia Tsit5 with both DiffEqGPU ensemble backends. A
+Tsit5, Diffrax Tsit5, torchdiffeq Dopri8 (one adaptive step shared by the
+whole ensemble) and Julia Tsit5 with both DiffEqGPU ensemble backends. A
 point that fails, or does not compile and solve within the case timeout, is
 recorded as such and omitted from the plot. Outputs a CSV and a log-log plot
 named after the GPU.
@@ -37,6 +38,9 @@ from modax.tsit5 import clear_caches as tsit5_clear_caches
 from modax.tsit5 import solve as tsit5_solve
 from reference.solvers.python.diffrax_tsit5 import solve as diffrax_tsit5_solve
 from reference.solvers.python.julia_tsit5 import solve as julia_tsit5_solve
+from reference.solvers.python.torchdiffeq_dopri8 import (
+    solve as torchdiffeq_dopri8_solve,
+)
 from reference.systems.python import vdp
 
 jax.config.update("jax_enable_x64", True)
@@ -95,6 +99,14 @@ BENCHMARK = SweepBenchmark(
             marker="s",
             solve_fn=diffrax_tsit5_solve,
             kwargs=_LOCAL_SOLVER_KWARGS,
+        ),
+        SweepCase(
+            key="torchdiffeq dopri8",
+            color="#d62728",
+            marker="D",
+            solve_fn=torchdiffeq_dopri8_solve,
+            kwargs=_SOLVER_KWARGS,
+            jit=False,
         ),
         SweepCase(
             key="julia tsit5 EnsembleGPUArray",

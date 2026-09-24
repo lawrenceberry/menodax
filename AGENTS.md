@@ -539,7 +539,15 @@ touching the code.
   against JAX's forward-mode AD of the same `ode_fn`.
   `_tuple_codegen.py` builds these callbacks for parameterised dimensions from
   one expression string per component, so every index is a literal.
-- `reference/solvers/python/` — Diffrax, scipy and Julia (DiffEqGPU) baselines.
+- `reference/solvers/python/` — Diffrax, scipy, Julia (DiffEqGPU) and
+  torchdiffeq baselines. The torchdiffeq one solves the ensemble as a single
+  `(n_vars, N)` tensor under one adaptive step, and applies the tuple-form
+  callback to that batch directly, which works because the non-stiff systems
+  are pure arithmetic. torch comes from PyTorch's CUDA 13 index so it shares
+  the CUDA 13 packages the rest of the environment uses -- its PyPI wheels
+  pull `nvidia-*-cu12` packages that unpack over the CUDA 13 ones -- and
+  `cuda-toolkit[nvvm]` in the dev group keeps NVVM on the toolkit release
+  torch pins, since a newer NVVM emits PTX the older nvJitLink refuses.
 - `benchmarks/` — scaling, dimensionality and divergence benchmarks behind the
   figures of the "Accelerating massive ensembles of ODEs" paper, plus a
   Jacobian-density sweep (`stiff_vdp_sparsity`) and a `value_and_grad` sweep

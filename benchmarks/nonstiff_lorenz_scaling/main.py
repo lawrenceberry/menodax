@@ -1,8 +1,9 @@
 """Solver scaling benchmark on the Lorenz system.
 
 Sweeps the size of an ensemble of identical trajectories from 3 to 100k on a
-log scale and records solve time for modax Tsit5, Diffrax Tsit5, and Julia
-Tsit5 with both DiffEqGPU ensemble backends. A point that does not compile and
+log scale and records solve time for modax Tsit5, Diffrax Tsit5, torchdiffeq
+Dopri8 (one adaptive step shared by the whole ensemble) and Julia Tsit5 with
+both DiffEqGPU ensemble backends. A point that does not compile and
 solve within the case timeout is recorded as such and omitted from the plot.
 Outputs a CSV and a log-log plot named after the GPU.
 
@@ -32,6 +33,9 @@ from benchmarks._sweep import (
 from modax.tsit5 import solve as tsit5_solve
 from reference.solvers.python.diffrax_tsit5 import solve as diffrax_tsit5_solve
 from reference.solvers.python.julia_tsit5 import solve as julia_tsit5_solve
+from reference.solvers.python.torchdiffeq_dopri8 import (
+    solve as torchdiffeq_dopri8_solve,
+)
 from reference.systems.python import lorenz
 
 jax.config.update("jax_enable_x64", True)
@@ -69,6 +73,14 @@ BENCHMARK = SweepBenchmark(
             marker="s",
             solve_fn=diffrax_tsit5_solve,
             kwargs=_LOCAL_SOLVER_KWARGS,
+        ),
+        SweepCase(
+            key="torchdiffeq dopri8",
+            color="#d62728",
+            marker="D",
+            solve_fn=torchdiffeq_dopri8_solve,
+            kwargs=_SOLVER_KWARGS,
+            jit=False,
         ),
         SweepCase(
             key="julia tsit5 EnsembleGPUArray",

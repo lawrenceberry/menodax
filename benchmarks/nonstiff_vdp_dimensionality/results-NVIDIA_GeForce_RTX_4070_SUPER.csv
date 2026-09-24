@@ -19,6 +19,16 @@ diffrax tsit5,diffrax tsit5,16,3.027913044206798
 diffrax tsit5,diffrax tsit5,32,4.365190048702061
 diffrax tsit5,diffrax tsit5,64,6.160245975479484
 diffrax tsit5,diffrax tsit5,128,10.120086022652686
+torchdiffeq dopri8,torchdiffeq dopri8,2,15.736578032374382
+torchdiffeq dopri8,torchdiffeq dopri8,4,21.109484019689262
+torchdiffeq dopri8,torchdiffeq dopri8,6,25.99657094106078
+torchdiffeq dopri8,torchdiffeq dopri8,8,30.858058016747236
+torchdiffeq dopri8,torchdiffeq dopri8,10,35.835945047438145
+torchdiffeq dopri8,torchdiffeq dopri8,12,40.62287195120007
+torchdiffeq dopri8,torchdiffeq dopri8,16,50.111417076550424
+torchdiffeq dopri8,torchdiffeq dopri8,32,89.79980205185711
+torchdiffeq dopri8,torchdiffeq dopri8,64,166.05007904581726
+torchdiffeq dopri8,torchdiffeq dopri8,128,319.3269530311227
 julia tsit5 EnsembleGPUArray,julia tsit5 EnsembleGPUArray,2,9.259719
 julia tsit5 EnsembleGPUArray,julia tsit5 EnsembleGPUArray,4,10.186556
 julia tsit5 EnsembleGPUArray,julia tsit5 EnsembleGPUArray,6,11.667672

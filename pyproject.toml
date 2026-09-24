@@ -84,6 +84,11 @@ dev = [
     # solvers. `uv sync` installs this group by default, so the examples run as
     # they always did.
     "blackjax @ git+https://github.com/handley-lab/blackjax@nested_sampling",
+    # torch pins the CUDA toolkit to one 13.x release, and NVVM has to come from
+    # the same one: a newer NVVM emits a PTX ISA the older nvJitLink refuses
+    # ("Unsupported .version 9.2; current version is '9.0'"), and numba-cuda-mlir
+    # links every kernel through nvJitLink. The metapackage's extra ties them.
+    "cuda-toolkit[nvvm]>=13.0.0",
     "diffrax>=0.7.2",
     "matplotlib>=3.10.8",
     "pre-commit>=4.4.0",
@@ -95,6 +100,13 @@ dev = [
     # The same type checker CI and the pre-commit hook run, so `uv run ty check`
     # locally is the identical check rather than whatever `uvx` last resolved.
     "ty>=0.0.83",
+    # The torchdiffeq baseline of the non-stiff benchmarks. torch comes from
+    # PyTorch's CUDA 13 index (see [tool.uv.sources]) so it shares the CUDA 13
+    # packages JAX and numba-cuda-mlir use; pinned because each release pins
+    # the whole NVIDIA stack exactly, which the rest of the environment then
+    # follows.
+    "torch==2.9.1",
+    "torchdiffeq>=0.2.5",
 ]
 
 [tool.pytest.ini_options]
@@ -149,3 +161,16 @@ possibly-missing-submodule = "ignore"
 typeCheckingMode = "recommended"
 venv = ".venv"
 venvPath = "."
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+
+# torch's PyPI wheels build against CUDA 12 and pull nvidia-*-cu12 wheels that
+# unpack into the same nvidia/ directories as the CUDA 13 ones JAX and
+# numba-cuda-mlir use, overwriting them. PyTorch's own CUDA 13 index pins the
+# same nvidia-* packages the rest of the environment uses. `explicit` keeps
+# every other package on PyPI.
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true

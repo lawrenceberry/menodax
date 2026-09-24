@@ -71,7 +71,10 @@ class DivergenceCase(BenchmarkCase):
 
     ``sort_by_steps`` pre-sorts the ensemble by attempted steps, most first, so
     that neighbouring threads do similar work. ``max_divergence`` skips the
-    larger sweep values for a case that cannot finish them.
+    larger sweep values for a case that cannot finish them. ``jit=False``
+    times a ``"timing"`` case as a plain call instead of under ``jax.jit``,
+    for a solver outside JAX such as the torchdiffeq reference, which must
+    then block on its device before returning.
     """
 
     mode: str = "stats"
@@ -80,6 +83,7 @@ class DivergenceCase(BenchmarkCase):
     max_divergence: float | None = None
     solve_fn: Callable[..., Any] | None = None
     kwargs: dict[str, Any] | None = None
+    jit: bool = True
 
 
 @dataclass(kw_only=True)
@@ -219,6 +223,13 @@ def _time_solve(
     if case.mode == "timing":
         assert case.solve_fn is not None
         kwargs = bench.solver_kwargs if case.kwargs is None else case.kwargs
+        if not case.jit:
+            solve_fn = case.solve_fn
+            ms, _ = time_blocked(
+                lambda: solve_fn(bench.ode_fn, y0, bench.t_span, params, **kwargs),
+                bench.n_runs,
+            )
+            return ms, None
         run = jit_solve(case.solve_fn, bench.ode_fn, bench.t_span, **kwargs)
         y0_j, params_j = jnp.asarray(y0), jnp.asarray(params)
         ms, _ = time_blocked(lambda: run(y0_j, params_j), bench.n_runs)
