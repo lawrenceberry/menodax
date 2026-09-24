@@ -1,4 +1,11 @@
-"""Stiff diffusively coupled van der Pol oscillator ring lattice."""
+"""Stiff diffusively coupled van der Pol oscillator ring lattice.
+
+The ring couples each oscillator to its two nearest neighbours. ``make_system``
+also takes a ``coupling_range`` -- every oscillator within that many places
+along the ring -- which changes the Jacobian's density without changing the
+dimension; ``make_sparsity`` and ``jacobian_density`` describe the pattern that
+results, for a solver that can exploit it.
+"""
 
 import jax.numpy as jnp
 import numpy as np
@@ -16,29 +23,85 @@ Y0 = jnp.array([2.0, 0.0] * N_OSC, dtype=jnp.float64)
 PARAMS = jnp.array([1.0], dtype=jnp.float64)
 
 
-def make_system(n_osc: int, *, mu: float = MU, d: float = D, omega: float = OMEGA):
+def neighbours(n_osc: int, osc: int, coupling_range: int = 1) -> list[int]:
+    """The oscillators within ``coupling_range`` places of ``osc`` along the ring.
+
+    One entry per place, so an oscillator the ring reaches from both sides
+    appears twice -- as the nearest-neighbour ring already counts the single
+    neighbour of ``n_osc == 2`` -- and ``osc`` itself is left out. The range
+    ``n_osc // 2`` couples every oscillator to every other.
+    """
+    if coupling_range < 1:
+        raise ValueError("coupling_range must be at least 1")
+    found = []
+    for offset in range(1, coupling_range + 1):
+        for other in ((osc - offset) % n_osc, (osc + offset) % n_osc):
+            if other != osc:
+                found.append(other)
+    return found
+
+
+def make_system(
+    n_osc: int,
+    *,
+    mu: float = MU,
+    d: float = D,
+    omega: float = OMEGA,
+    coupling_range: int = 1,
+):
     """Return (ode_fn, y0) for a ring of n_osc coupled van der Pol oscillators.
 
     Defaults reproduce the stiff baseline (mu=100, d=10, omega=1). Pass
     ``mu=1.0`` for the non-stiff variant used by explicit-method benchmarks.
+
+    ``coupling_range`` couples each oscillator diffusively to every oscillator
+    within that many places along the ring, with the coupling ``d`` divided by
+    the range so that the total coupling strength stays comparable; ``1`` is
+    the nearest-neighbour ring the other helpers assume.
     """
     y0 = jnp.array([2.0, 0.0] * n_osc, dtype=jnp.float64)
+    strength = d / coupling_range
     components = []
     for osc in range(n_osc):
         base = 2 * osc
-        left = 2 * ((osc - 1) % n_osc)
-        right = 2 * ((osc + 1) % n_osc)
         x, v = f"y[{base}]", f"y[{base + 1}]"
+        others = neighbours(n_osc, osc, coupling_range)
+        laplacian = " + ".join(
+            [f"y[{2 * other}]" for other in others] + [f"-{float(len(others))!r} * {x}"]
+        )
         components += [
             v,
             f"p[0] * {mu!r} * (1.0 - {x} * {x}) * {v}"
             f" + -{omega * omega!r} * {x}"
-            f" + {d!r} * (y[{left}] + -2.0 * {x} + y[{right}])",
+            f" + {strength!r} * ({laplacian})",
         ]
 
     ode_fn = make_tuple_callback("ode_fn", components)
 
     return ode_fn, y0
+
+
+def make_sparsity(n_osc: int, coupling_range: int = 1) -> np.ndarray:
+    """The ``(n_vars, n_vars)`` Jacobian mask of ``make_system``'s right-hand side.
+
+    Each position row depends on its own velocity; each velocity row on its own
+    position and velocity and on the positions of the oscillators it couples to.
+    """
+    n_vars = 2 * n_osc
+    mask = np.zeros((n_vars, n_vars), dtype=bool)
+    for osc in range(n_osc):
+        x, v = 2 * osc, 2 * osc + 1
+        mask[x, v] = True
+        mask[v, x] = mask[v, v] = True
+        for other in neighbours(n_osc, osc, coupling_range):
+            mask[v, 2 * other] = True
+    return mask
+
+
+def jacobian_density(n_osc: int, coupling_range: int = 1) -> float:
+    """The fraction of Jacobian entries that are structurally nonzero."""
+    mask = make_sparsity(n_osc, coupling_range)
+    return float(mask.sum()) / mask.size
 
 
 ode_fn, _ = make_system(N_OSC)

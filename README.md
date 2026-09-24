@@ -575,6 +575,10 @@ Worked end-to-end problems live in `examples/` (each with its own README):
 - `21cm_igm_evolution/` — toy global 21cm IGM thermal/ionisation history;
 - `mukhanov_sasaki/` — Mukhanov–Sasaki mode evolution.
 
-Scaling, dimensionality and divergence benchmarks are under `benchmarks/`.
+Scaling, dimensionality, divergence, Jacobian-density and gradient benchmarks
+are under `benchmarks/`, each a script that caches its timings in
+`results.json` and writes a CSV and a plot named after the GPU. Every point
+runs in a child process capped at 120 s, compilation included; one that
+overruns is recorded as a timeout and left off the plot.
 
 <!-- --8<-- [end:examples] -->

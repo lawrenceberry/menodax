@@ -23,6 +23,13 @@ In this test harness:
 - `Tsit5` runs as `Tsit5()` on `EnsembleGPUArray` and `GPUTsit5()` on `EnsembleGPUKernel`.
 - `Rodas5P` runs as `Rodas5P()` on `EnsembleGPUArray` and `GPURodas5P()` on `EnsembleGPUKernel`.
 
+The systems live in `reference/systems/julia/`, one file each, listed in
+`registry.jl`. `vdp_sens` is the coupled van der Pol ring with its forward
+sensitivities with respect to the damping scale integrated alongside the state:
+DiffEqGPU differentiates neither ensemble backend, so it is how a Julia GPU
+ensemble solve gets a gradient, and what `benchmarks/stiff_vdp_gradient`
+times against modax's differentiable solve.
+
 ## Environment
 
 The Python wrappers launch Julia with:

@@ -1,0 +1,17 @@
+solver_key,solver,coupling_range,jacobian_density,solve_time_ms
+modax rodas5P fp32 (sparse),modax rodas5P fp32 (sparse),1,0.0390625,5.605692975223064
+modax rodas5P fp32 (sparse),modax rodas5P fp32 (sparse),2,0.0546875,6.300691980868578
+modax rodas5P fp32 (sparse),modax rodas5P fp32 (sparse),3,0.0703125,7.306218962185085
+modax rodas5P fp32 (sparse),modax rodas5P fp32 (sparse),4,0.0859375,7.233278942294419
+modax rodas5P fp32 (sparse),modax rodas5P fp32 (sparse),6,0.1171875,8.415585034526885
+modax rodas5P fp32 (sparse),modax rodas5P fp32 (sparse),8,0.1484375,9.380953037180007
+modax rodas5P fp32 (sparse),modax rodas5P fp32 (sparse),12,0.2109375,
+modax rodas5P fp32 (sparse),modax rodas5P fp32 (sparse),16,0.265625,23.670702008530498
+modax rodas5P fp32 (dense),modax rodas5P fp32 (dense),1,0.0390625,382.9803040716797
+modax rodas5P fp32 (dense),modax rodas5P fp32 (dense),2,0.0546875,384.56178503111005
+modax rodas5P fp32 (dense),modax rodas5P fp32 (dense),3,0.0703125,384.7268670797348
+modax rodas5P fp32 (dense),modax rodas5P fp32 (dense),4,0.0859375,382.5524599524215
+modax rodas5P fp32 (dense),modax rodas5P fp32 (dense),6,0.1171875,380.71872701402754
+modax rodas5P fp32 (dense),modax rodas5P fp32 (dense),8,0.1484375,383.4583340212703
+modax rodas5P fp32 (dense),modax rodas5P fp32 (dense),12,0.2109375,380.5668100249022
+modax rodas5P fp32 (dense),modax rodas5P fp32 (dense),16,0.265625,381.49049400817603

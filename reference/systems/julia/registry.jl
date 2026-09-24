@@ -1,4 +1,5 @@
 include("vdp.jl")
+include("vdp_sens.jl")
 include("heat.jl")
 include("bateman.jl")
 include("lorenz.jl")
@@ -9,6 +10,8 @@ include("brusselator.jl")
 function make_system_spec(system_name::String, config)
     if system_name == "vdp"
         return make_vdp_spec(config)
+    elseif system_name == "vdp_sens"
+        return make_vdp_sens_spec(config)
     elseif system_name == "heat"
         return make_heat_spec(config)
     elseif system_name == "bateman"

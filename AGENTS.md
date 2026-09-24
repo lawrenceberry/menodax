@@ -538,6 +538,16 @@ touching the code.
   one expression string per component, so every index is a literal.
 - `reference/solvers/python/` — Diffrax, scipy and Julia (DiffEqGPU) baselines.
 - `benchmarks/` — scaling, dimensionality and divergence benchmarks behind the
-  figures of the "Accelerating massive ensembles of ODEs" paper. Each caches
-  timings in `results.json` and writes a per-GPU CSV and plot.
+  figures of the "Accelerating massive ensembles of ODEs" paper, plus a
+  Jacobian-density sweep (`stiff_vdp_sparsity`) and a `value_and_grad` sweep
+  (`stiff_vdp_gradient`). Each caches timings in `results.json` and writes a
+  per-GPU CSV and plot. Two drivers: `_sweep.py` for one axis over an
+  ensemble of identical trajectories, `_divergence.py` for the
+  divergence knob. Every point is measured in a child process
+  (`_worker.py`) capped at `CASE_TIMEOUT_SECONDS` (120 s), compilation
+  included, because neither an XLA compile nor a CUDA sync can be
+  interrupted from inside the process; an overrun is cached as a timeout and
+  left off the plot. The Julia gradient case integrates `vdp_sens`, the ring
+  with its hand-derived forward sensitivities, since DiffEqGPU differentiates
+  neither ensemble backend.
 - `examples/` — worked problems, each with its own README.
