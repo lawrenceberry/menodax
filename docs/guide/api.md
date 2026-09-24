@@ -84,3 +84,14 @@ history.
     then shrinks the history output to the final state, `(N, 1, n_vars)`. A
     hooked solve returns `(hist, hook_out)` and is a plain ensemble launch: no
     `jax.vmap`, no differentiation.
+
+## Arguments only Tsit5 takes
+
+`backend`
+:   `"auto"` (the default), `"shared"` or `"local"`, selecting whether the
+    state and stage vectors live in per-block shared memory or in the
+    thread's own local memory. The two are bit-identical and time within
+    noise of each other until the ensemble saturates the device, where shared
+    loses; `"auto"` picks shared whenever the system fits on chip (at most 16
+    components, sensitivities included) and the ensemble is at most 16384
+    trajectories.

@@ -1,4 +1,4 @@
-"""Tsit5 custom kernel using numba-cuda: one thread per trajectory, thread-local storage."""
+"""Tsit5 custom kernel using numba-cuda: one thread per trajectory, storage on chip or local."""
 
 from __future__ import annotations
 
@@ -89,9 +89,54 @@ FACTOR_MAX = 10.0
 # the kernel are expressed relative to this.
 EXPONENT = -1.0 / 5.0
 
-# One thread per trajectory, every per-trajectory buffer thread-local, so
-# nothing on chip bounds the block size.
-_BLOCK = 128
+# One thread per trajectory in both kernels; they differ only in where the nine
+# per-trajectory vectors (the state, the trial state and the seven stages) live.
+#
+# The thread-local kernel keeps them in the thread's own ``cuda.local`` arrays,
+# which the compiler promotes to registers where the indexing is resolvable and
+# otherwise places in local memory: off-chip DRAM, cached in L2, its latency
+# hidden by occupancy once the device is saturated. Nothing on chip bounds its
+# block size, but a block is a warp anyway, as in Rodas5P: a small ensemble
+# then spreads over as many SMs as it has warps instead of sitting on one, and
+# a large one is indifferent (Lorenz at 1000 trajectories, measured: 3.2 ms in
+# 32-thread blocks against 6.9 ms in 128-thread blocks; 83 ms either way at
+# 100000).
+#
+# The shared-memory kernel keeps the same nine vectors in per-block shared
+# memory, laid out ``(n_vars, _SHARED_BLOCK)`` so that consecutive lanes hold
+# consecutive words and a warp's access is bank-conflict-free. It costs
+# ``9 * n_vars * _SHARED_BLOCK * 8`` bytes of static shared memory per block,
+# which caps ``n_vars``, and by capping the blocks an SM can hold it loses to
+# the thread-local kernel once the ensemble saturates the device: up to 14%
+# at 100000 trajectories of 8 to 16 components. Below that the two are within
+# noise of each other on an RTX 4070 SUPER -- at these sizes the local arrays
+# are promoted to registers, and the on-chip copy buys nothing over them --
+# so ``"auto"`` takes shared wherever the system fits and the ensemble is
+# small enough, where it is never slower, and local beyond. ``backend``
+# overrides the choice.
+_LOCAL_BLOCK = 32
+_SHARED_BLOCK = 32
+_SHARED_MAX_NVARS = 16
+_SHARED_MAX_ENSEMBLE = 16384
+
+
+def _use_shared_backend(n: int, n_system: int, backend: str) -> bool:
+    if backend == "local":
+        return False
+    if backend == "shared":
+        if n_system > _SHARED_MAX_NVARS:
+            raise ValueError(
+                "shared backend requires a system size <= "
+                f"{_SHARED_MAX_NVARS}; got {n_system}. A solve carrying forward "
+                "sensitivities integrates n_vars * (1 + n_sens) components, so "
+                "it may need backend='local' where the plain solve does not"
+            )
+        return True
+    if backend != "auto":
+        raise ValueError(
+            f"backend must be 'auto', 'shared', or 'local'; got {backend!r}"
+        )
+    return n_system <= _SHARED_MAX_NVARS and n <= _SHARED_MAX_ENSEMBLE
 
 
 def clear_caches() -> None:
@@ -101,6 +146,7 @@ def clear_caches() -> None:
     ``n_vars`` compiles a separate kernel, and nothing releases it because the
     module-level caches hold it.
     """
+    _make_body.cache_clear()
     _make_kernel.cache_clear()
     _make_jax_launch.cache_clear()
     clear_sensitivity_caches()
@@ -108,7 +154,7 @@ def clear_caches() -> None:
 
 
 @functools.cache
-def _make_kernel(
+def _make_body(
     ode_fn,
     n_vars: int,
     pcoeff: float = 0.0,
@@ -116,11 +162,15 @@ def _make_kernel(
     dcoeff: float = 0.0,
     spec: SensitivitySpec | None = None,
 ):
-    """Build the Tsit5 kernel: one thread per trajectory, all storage thread-local.
+    """Build the per-trajectory Tsit5 integration loop as a CUDA device function.
 
-    The state, the trial state and the seven stage vectors are the thread's
-    own ``cuda.local`` arrays, as in Rodas5P, so the launch carries no scratch
-    and ``y0``/``weights``/``hist`` keep their natural ``(n, ...)`` layouts.
+    ``i`` is the trajectory, indexing the ensemble's global arrays (``y0``,
+    ``params``, ``weights``, ``hist`` and the counters). ``y``, ``u`` and
+    ``k1``..``k7`` are the nine per-trajectory vectors, each a 1-D array of
+    ``n_system`` components that the body reads and writes as its own: the
+    kernels below hand it either the thread's ``cuda.local`` arrays or one
+    column of a per-block ``cuda.shared`` array, and the body is the same
+    either way, which is what keeps the two bit-identical.
     """
     # PID step-control exponents (Soderlind). Defaults (0, 1, 0) give E1=EXPONENT
     # and E2=E3=0, recovering the elementary I-controller exactly.
@@ -140,8 +190,8 @@ def _make_kernel(
         n_system = spec.n_aug
     n_error = n_vars if spec is None else spec.n_error
 
-    @cuda.jit
-    def kernel(
+    @cuda.jit(device=True)
+    def body(
         y0,
         times,
         params,
@@ -154,22 +204,17 @@ def _make_kernel(
         accepted_out,
         rejected_out,
         loop_out,
+        y,
+        u,
+        k1,
+        k2,
+        k3,
+        k4,
+        k5,
+        k6,
+        k7,
+        i,
     ):
-        i = cuda.grid(1)  # ty: ignore[unresolved-attribute]
-        # Nothing in a step is collective, so a thread past the end of the
-        # ensemble simply leaves.
-        if i >= y0.shape[0]:
-            return
-        y = cuda.local.array(n_system, types.float64)
-        u = cuda.local.array(n_system, types.float64)
-        k1 = cuda.local.array(n_system, types.float64)
-        k2 = cuda.local.array(n_system, types.float64)
-        k3 = cuda.local.array(n_system, types.float64)
-        k4 = cuda.local.array(n_system, types.float64)
-        k5 = cuda.local.array(n_system, types.float64)
-        k6 = cuda.local.array(n_system, types.float64)
-        k7 = cuda.local.array(n_system, types.float64)
-
         prow = params[i]
         for j in range(n_system):
             y[j] = y0[i, j]
@@ -358,7 +403,203 @@ def _make_kernel(
         rejected_out[i] = rejected_steps
         loop_out[i] = n_steps
 
-    return kernel
+    return body
+
+
+@functools.cache
+def _make_kernel(
+    ode_fn,
+    n_vars: int,
+    pcoeff: float = 0.0,
+    icoeff: float = 1.0,
+    dcoeff: float = 0.0,
+    spec: SensitivitySpec | None = None,
+    shared: bool = False,
+):
+    """Build a Tsit5 kernel: one thread per trajectory, storage chosen by ``shared``.
+
+    Either way the launch carries no scratch and ``y0``/``weights``/``hist``
+    keep their natural ``(n, ...)`` layouts. ``shared=False`` allocates the
+    nine per-trajectory vectors as the thread's own ``cuda.local`` arrays, as
+    in Rodas5P. ``shared=True`` allocates them as nine ``(n_system,
+    _SHARED_BLOCK)`` ``cuda.shared`` arrays and hands the body the thread's
+    column of each: a strided 1-D view, which the body indexes exactly as it
+    does a local array. Every thread touches only its own column, so nothing
+    synchronises and a thread past the ensemble's end simply leaves.
+    """
+    body = _make_body(ode_fn, n_vars, pcoeff, icoeff, dcoeff, spec)
+    n_system = n_vars if spec is None else spec.n_aug
+
+    if not shared:
+
+        @cuda.jit
+        def local_kernel(
+            y0,
+            times,
+            params,
+            dt0,
+            rtol,
+            atol,
+            max_steps,
+            weights,
+            hist,
+            accepted_out,
+            rejected_out,
+            loop_out,
+        ):
+            i = cuda.grid(1)  # ty: ignore[unresolved-attribute]
+            if i >= y0.shape[0]:
+                return
+            y = cuda.local.array(n_system, types.float64)
+            u = cuda.local.array(n_system, types.float64)
+            k1 = cuda.local.array(n_system, types.float64)
+            k2 = cuda.local.array(n_system, types.float64)
+            k3 = cuda.local.array(n_system, types.float64)
+            k4 = cuda.local.array(n_system, types.float64)
+            k5 = cuda.local.array(n_system, types.float64)
+            k6 = cuda.local.array(n_system, types.float64)
+            k7 = cuda.local.array(n_system, types.float64)
+            body(
+                y0,
+                times,
+                params,
+                dt0,
+                rtol,
+                atol,
+                max_steps,
+                weights,
+                hist,
+                accepted_out,
+                rejected_out,
+                loop_out,
+                y,
+                u,
+                k1,
+                k2,
+                k3,
+                k4,
+                k5,
+                k6,
+                k7,
+                i,
+            )
+
+        return local_kernel
+
+    shape = (n_system, _SHARED_BLOCK)
+
+    # The column views are taken here, one device function down from the
+    # kernel, and not in the kernel itself: there the shared arrays' shapes are
+    # static and numba-cuda-mlir mis-types the slice (a ``memref.collapse_shape``
+    # whose stride it expects static and emits dynamic, which fails
+    # verification). As a device-function argument the array is a dynamic
+    # memref and the slice lowers as it should. Inlining folds the layer away.
+    @cuda.jit(device=True)
+    def run_column(
+        y0,
+        times,
+        params,
+        dt0,
+        rtol,
+        atol,
+        max_steps,
+        weights,
+        hist,
+        accepted_out,
+        rejected_out,
+        loop_out,
+        y,
+        u,
+        k1,
+        k2,
+        k3,
+        k4,
+        k5,
+        k6,
+        k7,
+        tx,
+        i,
+    ):
+        body(
+            y0,
+            times,
+            params,
+            dt0,
+            rtol,
+            atol,
+            max_steps,
+            weights,
+            hist,
+            accepted_out,
+            rejected_out,
+            loop_out,
+            y[:, tx],
+            u[:, tx],
+            k1[:, tx],
+            k2[:, tx],
+            k3[:, tx],
+            k4[:, tx],
+            k5[:, tx],
+            k6[:, tx],
+            k7[:, tx],
+            i,
+        )
+
+    @cuda.jit
+    def shared_kernel(
+        y0,
+        times,
+        params,
+        dt0,
+        rtol,
+        atol,
+        max_steps,
+        weights,
+        hist,
+        accepted_out,
+        rejected_out,
+        loop_out,
+    ):
+        i = cuda.grid(1)  # ty: ignore[unresolved-attribute]
+        tx = cuda.threadIdx.x  # ty: ignore[unresolved-attribute]
+        if i >= y0.shape[0]:
+            return
+        y = cuda.shared.array(shape, types.float64)
+        u = cuda.shared.array(shape, types.float64)
+        k1 = cuda.shared.array(shape, types.float64)
+        k2 = cuda.shared.array(shape, types.float64)
+        k3 = cuda.shared.array(shape, types.float64)
+        k4 = cuda.shared.array(shape, types.float64)
+        k5 = cuda.shared.array(shape, types.float64)
+        k6 = cuda.shared.array(shape, types.float64)
+        k7 = cuda.shared.array(shape, types.float64)
+        run_column(
+            y0,
+            times,
+            params,
+            dt0,
+            rtol,
+            atol,
+            max_steps,
+            weights,
+            hist,
+            accepted_out,
+            rejected_out,
+            loop_out,
+            y,
+            u,
+            k1,
+            k2,
+            k3,
+            k4,
+            k5,
+            k6,
+            k7,
+            tx,
+            i,
+        )
+
+    return shared_kernel
 
 
 @functools.cache
@@ -370,11 +611,13 @@ def _make_jax_launch(
     icoeff: float = 1.0,
     dcoeff: float = 0.0,
     spec: SensitivitySpec | None = None,
+    shared: bool = False,
 ):
     """Compile, load and size the kernel behind one JAX-side ensemble launch."""
-    kernel = _make_kernel(ode_fn, n_vars, pcoeff, icoeff, dcoeff, spec)
-    blocks = (n + _BLOCK - 1) // _BLOCK
-    return make_launch(kernel, SOLVER_ARGTYPES, grid=blocks, block=_BLOCK)
+    kernel = _make_kernel(ode_fn, n_vars, pcoeff, icoeff, dcoeff, spec, shared)
+    threads = _SHARED_BLOCK if shared else _LOCAL_BLOCK
+    blocks = (n + threads - 1) // threads
+    return make_launch(kernel, SOLVER_ARGTYPES, grid=blocks, block=threads)
 
 
 def solve(
@@ -392,10 +635,18 @@ def solve(
     pcoeff=0.0,
     icoeff=1.0,
     dcoeff=0.0,
+    backend="auto",
     sens_error_control=True,
     sens_param_columns=None,
 ):
     """JAX-callable Tsit5 custom-kernel solve.
+
+    ``backend`` chooses where the kernel keeps the state and its stage vectors:
+    ``"shared"`` in per-block shared memory, ``"local"`` in the thread's own
+    local memory. The two are bit-identical; shared is faster where the device
+    is under-occupied (small ensembles, low dimension) and local where it is
+    saturated, and ``"auto"`` picks by the ensemble's size and the system's,
+    taking shared whenever the system fits and the ensemble is small enough.
 
     The solve is an XLA custom call into the numba-cuda kernel, so it carries a
     ``jax.custom_jvp`` rule rather than being differentiated by XLA: asking for
@@ -424,6 +675,7 @@ def solve(
         pcoeff=pcoeff,
         icoeff=icoeff,
         dcoeff=dcoeff,
+        backend=backend,
     )
     # The JVP rule wraps the vmap-aware solvers rather than the other way
     # round: custom_vmap's own JVP path instantiates symbolic zeros, which is
@@ -472,6 +724,7 @@ def _solve_impl(
     pcoeff=0.0,
     icoeff=1.0,
     dcoeff=0.0,
+    backend="auto",
     spec=None,
 ):
     y0_arr, params_arr, n, n_vars = normalize_y0_params(y0, params)
@@ -488,9 +741,12 @@ def _solve_impl(
         weights_host = augmented_error_weights(weights_host, spec)
     weights_arr = jnp.asarray(weights_host)
 
-    launch = _make_jax_launch(ode_fn, n, n_vars, pcoeff, icoeff, dcoeff, spec)
-    # No global scratch: the kernel keeps the state and the stage vectors in
-    # thread-local memory.
+    uses_shared = _use_shared_backend(n, n_system, backend)
+    launch = _make_jax_launch(
+        ode_fn, n, n_vars, pcoeff, icoeff, dcoeff, spec, uses_shared
+    )
+    # No global scratch either way: the kernel keeps the state and the stage
+    # vectors on chip or in thread-local memory.
     hist, accepted, rejected, loop_steps = ensemble_ffi_call(
         launch,
         (y0_arr, times, params_arr, weights_arr),

@@ -523,11 +523,24 @@ touching the code.
   a warp diverge and the block runs until its slowest trajectory finishes.
   Rodas5P needs no barrier at all: a finished thread simply returns.
 - In-kernel LU factorisation, entirely in thread-local memory.
-- `tsit5` is the same shape: the state and its seven stage vectors are the
-  thread's own `cuda.local` arrays and the launch carries no scratch. It once
-  held them in transposed global scratch that XLA allocated, with a
-  shared-memory path beside it chosen by a `backend` argument when the state
-  fit on chip; both went, for simplicity.
+- `tsit5` is the same shape, with `backend="shared"` and `backend="local"`
+  choosing where the state and its seven stage vectors live: per-block
+  shared memory laid out `(n_vars, 32)`, or the thread's own `cuda.local`
+  arrays. The integrator is one device function over nine 1-D vectors and the
+  two kernels only allocate differently, so they are bit-identical
+  (`tests/test_solvers.py` pins it). Both run a warp per block, and that is
+  what a small ensemble's speed turns on: in 128-thread blocks a 1000-Lorenz
+  solve sat on one SM at 6.9 ms, in 32-thread blocks it is 3.2 ms in either
+  memory space, because at these sizes the local arrays are promoted to
+  registers. Shared's shared-memory footprint caps the blocks an SM holds
+  and loses by up to 14% at 100000 trajectories, so `"auto"` takes it only
+  where the system fits (16 components) and the ensemble is at most 16384;
+  measured on an RTX 4070 SUPER. The launch carries no scratch either way:
+  it once held the vectors in transposed global scratch that XLA allocated,
+  and that path went for simplicity. The shared kernel takes its column
+  views one device function below the kernel, because numba-cuda-mlir
+  mis-types a column slice of a statically shaped shared array in the kernel
+  itself.
 
 ### Reference and benchmarks
 

@@ -34,6 +34,40 @@ def test_tsit5_reference_system(benchmark, case):
     assert_case_output(result, case)
 
 
+def test_tsit5_shared_matches_local():
+    """The shared-memory and thread-local backends must be bit-identical."""
+    import numpy as np
+
+    from reference.systems.python import vdp
+
+    n_osc = 4  # dim = 8: fits the shared-memory backend
+    ode_fn, _ = vdp.make_system(n_osc, mu=1.0)
+    y0, params = vdp.make_scenario(n_osc, 256, divergence=1.0)
+    y0 = jnp.asarray(np.ascontiguousarray(y0))
+    params = jnp.asarray(np.ascontiguousarray(params))
+    t_span = jnp.asarray(vdp.TIMES)
+    kw = dict(first_step=1e-4, rtol=1e-6, atol=1e-8)
+
+    shared = tsit5numba_solve(ode_fn, y0, t_span, params, backend="shared", **kw)
+    local = tsit5numba_solve(ode_fn, y0, t_span, params, backend="local", **kw)
+    assert float(jnp.max(jnp.abs(shared - local))) == 0.0
+
+
+def test_tsit5_shared_backend_rejects_oversized_system():
+    """A system that cannot fit on chip is refused rather than silently moved."""
+    import numpy as np
+
+    from reference.systems.python import vdp
+
+    n_osc = 16  # dim = 32: past the shared-memory cap
+    ode_fn, _ = vdp.make_system(n_osc, mu=1.0)
+    y0, params = vdp.make_scenario(n_osc, 8, divergence=1.0)
+    y0 = jnp.asarray(np.ascontiguousarray(y0))
+    params = jnp.asarray(np.ascontiguousarray(params))
+    with pytest.raises(ValueError, match="shared backend requires"):
+        tsit5numba_solve(ode_fn, y0, jnp.asarray(vdp.TIMES), params, backend="shared")
+
+
 @pytest.mark.parametrize("solve_fn", (tsit5numba_solve, rodas5Pnumba_solve))
 def test_default_first_step_matches_explicit(solve_fn):
     """``first_step=None`` is derived inside the kernel, so it survives tracing.

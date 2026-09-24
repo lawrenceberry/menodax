@@ -10,8 +10,22 @@ and nothing synchronises inside a step.
 That is why `trajectories_per_block` is free to be anything — nothing on chip
 bounds it — and why `trajectories_per_block_or_default` defaults it to a warp.
 
-`tsit5` is the same shape: the state and its seven stage vectors are the
-thread's own `cuda.local` arrays, and the launch carries no scratch.
+`tsit5` is the same shape, with one choice on top: `backend="shared"` keeps
+the state and its seven stage vectors in per-block shared memory, laid out
+`(n_vars, 32)` so a warp's access is bank-conflict-free, and
+`backend="local"` keeps them in the thread's own `cuda.local` arrays. The
+integrator is one device function over nine 1-D vectors, handed either the
+local arrays or the thread's column of each shared array, so the two are
+bit-identical. Both kernels run a warp per block, so a small ensemble spreads
+over as many SMs as it has warps, and that, more than where the vectors live,
+is what keeps a small solve fast: at these sizes the local arrays are
+promoted to registers, and the two kernels time within noise of each other up
+to tens of thousands of trajectories. Shared costs `9 * n_vars * 32 * 8`
+bytes of static shared memory per block, which caps the system at 16
+components and, by capping the blocks an SM can hold, loses by up to 14% once
+the ensemble saturates the device. `"auto"` picks shared whenever the system
+fits and the ensemble is at most 16384 trajectories, and local beyond. Either
+way the launch carries no scratch.
 
 ## How a solve reaches the GPU
 
