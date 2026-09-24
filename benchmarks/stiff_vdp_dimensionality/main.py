@@ -2,8 +2,10 @@
 
 Sweeps ODE dimension from 2 to 128 (n_osc = 1 to 64) on a log scale with a
 fixed ensemble of 1000 identical trajectories and records solve time for modax
-Rodas5P with fp32 and fp64 LU precision, Diffrax Kvaerno5, and Julia Rodas5P
-with both DiffEqGPU ensemble backends. A point that fails, or does not compile
+Rodas5P with fp32 and fp64 LU precision, modax Rodas5P fp32 handed the
+lattice's Jacobian sparsity pattern (one Enzyme sweep per colour and the
+compiled sparse LU), Diffrax Kvaerno5, and Julia Rodas5P with both DiffEqGPU
+ensemble backends. A point that fails, or does not compile
 and solve within the case timeout, is recorded as such and omitted from the
 plot. Outputs a CSV and a log-log plot named after the GPU.
 
@@ -47,7 +49,13 @@ def _problem(dim: int) -> Problem:
     y0, params = vdp.make_scenario(
         n_osc, _ENSEMBLE_SIZE, divergence=IDENTICAL_DIVERGENCE
     )
-    return Problem(ode_fn, y0, params, julia_system_config={"n_osc": n_osc})
+    return Problem(
+        ode_fn,
+        y0,
+        params,
+        julia_system_config={"n_osc": n_osc},
+        sparsity=vdp.make_sparsity(n_osc),
+    )
 
 
 BENCHMARK = SweepBenchmark(
@@ -60,6 +68,15 @@ BENCHMARK = SweepBenchmark(
     julia_solve=julia_rodas5P_solve,
     julia_system="vdp",
     cases=(
+        SweepCase(
+            key="modax rodas5P fp32 (sparse)",
+            color="#8c564b",
+            marker="o",
+            linestyle=":",
+            solve_fn=rodas5P_solve,
+            kwargs={**_SOLVER_KWARGS, "lu_precision": "fp32"},
+            sparse=True,
+        ),
         SweepCase(
             key="modax rodas5P fp32",
             color="#8c564b",
