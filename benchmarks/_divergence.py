@@ -8,6 +8,10 @@ rejected) steps across the ensemble, taken from the modax solver's
 attempted step against the coefficient of variation of the attempted steps:
 how much a solver's throughput degrades as the trajectories in a warp diverge.
 
+Every point runs in a child process under
+:data:`~benchmarks.benchmark_common.CASE_TIMEOUT_SECONDS`, compilation
+included; a point that overruns is cached as a timeout and left off the plot.
+
 A script is the residue: a :class:`DivergenceBenchmark` and ``main(BENCHMARK)``.
 """
 
@@ -36,10 +40,11 @@ from benchmarks.benchmark_common import (
     load_cache,
     output_paths,
     print_plot_title,
+    run_jobs,
     save_cache,
     time_blocked,
-    timeout_cache_entry,
 )
+from reference.solvers.python.julia_common import _julia_executable
 
 _STATS_FIELDS = (
     "mean_steps",
@@ -106,6 +111,13 @@ class DivergenceBenchmark:
     @property
     def cache_path(self) -> Path:
         return self.script_dir / "results.json"
+
+    @property
+    def script_path(self) -> Path:
+        return self.script_dir / "main.py"
+
+    def case(self, key: str) -> DivergenceCase:
+        return next(case for case in self.cases if case.key == key)
 
     @property
     def csv_fields(self) -> tuple[str, ...]:
@@ -266,25 +278,25 @@ def _is_complete_row(bench: DivergenceBenchmark, value) -> bool:
     return isinstance(value, dict) and all(name in value for name in bench.csv_fields)
 
 
-def _collect_row(
-    bench: DivergenceBenchmark,
-    gpu_name: str,
-    case: DivergenceCase,
-    divergence: float,
-    summary: dict | None,
-    prefix: str,
-) -> dict | None:
-    print(prefix, end=" ", flush=True)
-    try:
-        row = _measure_row(bench, gpu_name, case, divergence, summary)
-    except TimeoutError:
-        print(TIMEOUT_ERROR, flush=True)
-        return timeout_cache_entry()
-    except Exception as exc:
-        print(f"FAILED ({exc})", flush=True)
-        return None
-    print(_format_row(row), flush=True)
-    return row
+def prepare(bench: DivergenceBenchmark, job: dict) -> None:
+    """Before the clock starts on a Julia job, run the toolchain check it would pay."""
+    if bench.case(job["case"]).mode == "julia":
+        _julia_executable()
+
+
+def measure(bench: DivergenceBenchmark, job: dict) -> dict:
+    """The row for ``job["case"]`` at ``job["divergence"]``; runs in the worker.
+
+    ``job["summary"]`` is the step statistics lent by the donor case's cached
+    row, or ``None`` when the case has to measure its own.
+    """
+    return _measure_row(
+        bench,
+        job["gpu"],
+        bench.case(job["case"]),
+        float(job["divergence"]),
+        job["summary"],
+    )
 
 
 def run_benchmarks(
@@ -295,37 +307,67 @@ def run_benchmarks(
     width = label_width(bench.cases)
     donor_key = bench.stats_donor_key
     rows: list[dict] = []
+
+    def prefix(case: DivergenceCase, divergence: float) -> str:
+        return f"  {case.key:<{width}} divergence={divergence:>4.2f} ..."
+
     for case in bench.cases:
         print(f"\n{case.key}:")
         case_cache = gpu_cache.setdefault(case.key, {})
+        jobs: list[dict] = []
         for divergence in bench.divergences:
             divergence_key = f"{divergence:.6g}"
-            prefix = f"  {case.key:<{width}} divergence={divergence:>4.2f} ..."
             if case.max_divergence is not None and divergence > case.max_divergence:
                 print(
-                    f"{prefix} SKIPPED (divergence > {case.max_divergence:g})",
+                    f"{prefix(case, divergence)} SKIPPED "
+                    f"(divergence > {case.max_divergence:g})",
                     flush=True,
                 )
                 case_cache.setdefault(divergence_key, None)
                 continue
             cached = case_cache.get(divergence_key)
             if is_timeout(cached) or _is_complete_row(bench, cached):
-                row = cached
-                text = TIMEOUT_ERROR if is_timeout(row) else _format_row(row)
-                print(f"{prefix} (cached) {text}", flush=True)
+                text = TIMEOUT_ERROR if is_timeout(cached) else _format_row(cached)
+                print(f"{prefix(case, divergence)} (cached) {text}", flush=True)
+                continue
+            donor_row = None
+            if donor_key is not None:
+                donor_row = gpu_cache.get(donor_key, {}).get(divergence_key)
+            summary = (
+                _stats_from_row(donor_row)
+                if _is_complete_row(bench, donor_row)
+                else None
+            )
+            jobs.append(
+                {
+                    "case": case.key,
+                    "divergence": divergence,
+                    "summary": summary,
+                    "gpu": gpu_name,
+                }
+            )
+
+        def on_started(job: dict) -> None:
+            print(prefix(case, job["divergence"]), end=" ", flush=True)
+
+        def on_result(job: dict, status: str, result: Any) -> None:
+            key = f"{job['divergence']:.6g}"
+            if status == "ok":
+                print(_format_row(result), flush=True)
+                case_cache[key] = result
+            elif status == "timeout":
+                print(TIMEOUT_ERROR, flush=True)
+                case_cache[key] = result
             else:
-                donor_row = None
-                if donor_key is not None:
-                    donor_row = gpu_cache.get(donor_key, {}).get(divergence_key)
-                summary = (
-                    _stats_from_row(donor_row)
-                    if _is_complete_row(bench, donor_row)
-                    else None
-                )
-                row = _collect_row(bench, gpu_name, case, divergence, summary, prefix)
-                case_cache[divergence_key] = row
-                save_cache(bench.cache_path, cache)
-            if row is not None and not is_timeout(row):
+                print(f"FAILED ({result})", flush=True)
+                case_cache[key] = None
+            save_cache(bench.cache_path, cache)
+
+        run_jobs(bench.script_path, jobs, on_started=on_started, on_result=on_result)
+
+        for divergence in bench.divergences:
+            row = case_cache.get(f"{divergence:.6g}")
+            if _is_complete_row(bench, row):
                 rows.append(row)
     return rows
 

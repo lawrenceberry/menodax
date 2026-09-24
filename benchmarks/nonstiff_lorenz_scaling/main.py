@@ -1,8 +1,10 @@
 """Solver scaling benchmark on the Lorenz system.
 
-Sweeps ensemble size from 3 to 100k on a log scale and records solve time for
-modax Tsit5, Diffrax Tsit5, and Julia Tsit5 with both DiffEqGPU ensemble
-backends. Outputs a CSV and a log-log plot per scenario named after the GPU.
+Sweeps the size of an ensemble of identical trajectories from 3 to 100k on a
+log scale and records solve time for modax Tsit5, Diffrax Tsit5, and Julia
+Tsit5 with both DiffEqGPU ensemble backends. A point that does not compile and
+solve within the case timeout is recorded as such and omitted from the plot.
+Outputs a CSV and a log-log plot named after the GPU.
 
 Usage:
     uv run python benchmarks/nonstiff_lorenz_scaling/main.py
@@ -19,7 +21,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 # the `reference.systems.python` modules build device arrays at import time,
 # which initialises the backend and fixes that policy for the whole process.
 import benchmarks.benchmark_common  # noqa: E402,F401
-from benchmarks._sweep import ENSEMBLE_SIZE, Problem, SweepBenchmark, SweepCase, main
+from benchmarks._sweep import (
+    ENSEMBLE_SIZE,
+    IDENTICAL_DIVERGENCE,
+    Problem,
+    SweepBenchmark,
+    SweepCase,
+    main,
+)
 from modax.tsit5 import solve as tsit5_solve
 from reference.solvers.python.diffrax_tsit5 import solve as diffrax_tsit5_solve
 from reference.solvers.python.julia_tsit5 import solve as julia_tsit5_solve
@@ -31,13 +40,15 @@ _SOLVER_KWARGS = {"first_step": 1e-4, "rtol": 1e-6, "atol": 1e-8}
 _LOCAL_SOLVER_KWARGS = {**_SOLVER_KWARGS, "pcoeff": 0.0, "icoeff": 1.0, "dcoeff": 0.0}
 
 
-def _problem(size: int, divergence: float) -> Problem:
-    return Problem(lorenz.ode_fn, *lorenz.make_scenario(size, divergence=divergence))
+def _problem(size: int) -> Problem:
+    return Problem(
+        lorenz.ode_fn, *lorenz.make_scenario(size, divergence=IDENTICAL_DIVERGENCE)
+    )
 
 
 BENCHMARK = SweepBenchmark(
     script_dir=Path(__file__).resolve().parent,
-    title="Tsit5 scaling — Lorenz ({scenario})",
+    title="Tsit5 scaling — Lorenz",
     axis=ENSEMBLE_SIZE,
     values=(3, 10, 30, 100, 300, 1000, 3000, 10000, 30000, 100000),
     t_span=lorenz.TIMES,

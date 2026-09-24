@@ -1,0 +1,55 @@
+solver_key,solver,ensemble_size,solve_time_ms
+modax rodas5P fp32,modax rodas5P fp32,1,1.6390570672228932
+modax rodas5P fp32,modax rodas5P fp32,3,1.2984969653189182
+modax rodas5P fp32,modax rodas5P fp32,10,1.3817870058119297
+modax rodas5P fp32,modax rodas5P fp32,30,1.2901680311188102
+modax rodas5P fp32,modax rodas5P fp32,100,1.3069279957562685
+modax rodas5P fp32,modax rodas5P fp32,300,1.3133269967511296
+modax rodas5P fp32,modax rodas5P fp32,1000,1.3039769837632775
+modax rodas5P fp32,modax rodas5P fp32,3000,1.7526670126244426
+modax rodas5P fp32,modax rodas5P fp32,10000,4.072081996127963
+modax rodas5P fp32,modax rodas5P fp32,30000,12.227075058035553
+modax rodas5P fp32,modax rodas5P fp32,100000,35.97108705434948
+modax rodas5P fp64,modax rodas5P fp64,1,2.003916073590517
+modax rodas5P fp64,modax rodas5P fp64,3,2.1720960503444076
+modax rodas5P fp64,modax rodas5P fp64,10,2.1158860763534904
+modax rodas5P fp64,modax rodas5P fp64,30,2.0422249799594283
+modax rodas5P fp64,modax rodas5P fp64,100,1.854225993156433
+modax rodas5P fp64,modax rodas5P fp64,300,1.9251960329711437
+modax rodas5P fp64,modax rodas5P fp64,1000,1.8713759491220117
+modax rodas5P fp64,modax rodas5P fp64,3000,2.4249849375337362
+modax rodas5P fp64,modax rodas5P fp64,10000,4.966730019077659
+modax rodas5P fp64,modax rodas5P fp64,30000,16.22209802735597
+modax rodas5P fp64,modax rodas5P fp64,100000,45.59132596477866
+diffrax kvaerno5,diffrax kvaerno5,1,857.6106519903988
+diffrax kvaerno5,diffrax kvaerno5,3,878.7384569877759
+diffrax kvaerno5,diffrax kvaerno5,10,883.3607550477609
+diffrax kvaerno5,diffrax kvaerno5,30,880.9665079461411
+diffrax kvaerno5,diffrax kvaerno5,100,918.4063689317554
+diffrax kvaerno5,diffrax kvaerno5,300,917.0597388874739
+diffrax kvaerno5,diffrax kvaerno5,1000,925.0005499925464
+diffrax kvaerno5,diffrax kvaerno5,3000,972.2116200719029
+diffrax kvaerno5,diffrax kvaerno5,10000,1240.6540770316496
+diffrax kvaerno5,diffrax kvaerno5,30000,1994.0270149381831
+diffrax kvaerno5,diffrax kvaerno5,100000,4694.840791984461
+julia rodas5P EnsembleGPUArray,julia rodas5P EnsembleGPUArray,3,135.143378
+julia rodas5P EnsembleGPUArray,julia rodas5P EnsembleGPUArray,10,135.124366
+julia rodas5P EnsembleGPUArray,julia rodas5P EnsembleGPUArray,30,135.179463
+julia rodas5P EnsembleGPUArray,julia rodas5P EnsembleGPUArray,100,136.480238
+julia rodas5P EnsembleGPUArray,julia rodas5P EnsembleGPUArray,300,140.353488
+julia rodas5P EnsembleGPUArray,julia rodas5P EnsembleGPUArray,1000,145.696875
+julia rodas5P EnsembleGPUArray,julia rodas5P EnsembleGPUArray,3000,215.63171
+julia rodas5P EnsembleGPUArray,julia rodas5P EnsembleGPUArray,10000,367.657214
+julia rodas5P EnsembleGPUArray,julia rodas5P EnsembleGPUArray,30000,3060.23153
+julia rodas5P EnsembleGPUArray,julia rodas5P EnsembleGPUArray,100000,
+julia rodas5P EnsembleGPUKernel,julia rodas5P EnsembleGPUKernel,1,
+julia rodas5P EnsembleGPUKernel,julia rodas5P EnsembleGPUKernel,3,4.770269
+julia rodas5P EnsembleGPUKernel,julia rodas5P EnsembleGPUKernel,10,4.774159
+julia rodas5P EnsembleGPUKernel,julia rodas5P EnsembleGPUKernel,30,4.795159
+julia rodas5P EnsembleGPUKernel,julia rodas5P EnsembleGPUKernel,100,5.571978
+julia rodas5P EnsembleGPUKernel,julia rodas5P EnsembleGPUKernel,300,5.370138
+julia rodas5P EnsembleGPUKernel,julia rodas5P EnsembleGPUKernel,1000,7.508853
+julia rodas5P EnsembleGPUKernel,julia rodas5P EnsembleGPUKernel,3000,13.431389
+julia rodas5P EnsembleGPUKernel,julia rodas5P EnsembleGPUKernel,10000,40.433707
+julia rodas5P EnsembleGPUKernel,julia rodas5P EnsembleGPUKernel,30000,131.284457
+julia rodas5P EnsembleGPUKernel,julia rodas5P EnsembleGPUKernel,100000,444.916768

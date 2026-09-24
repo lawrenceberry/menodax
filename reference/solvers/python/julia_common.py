@@ -95,7 +95,10 @@ def make_julia_solver(solver_name: str):
 
     ``solve`` returns the ensemble solution; ``solve_with_timing`` returns a
     :class:`JuliaSolveResult` with the solve-only timing the benchmark scripts
-    read through ``solve._julia_solve_with_timing``.
+    read through ``solve._julia_solve_with_timing``. ``timeout`` caps the
+    Julia subprocess in seconds, startup and compilation included, and
+    defaults to :data:`JULIA_SOLVE_TIMEOUT_SECONDS`; exceeding it raises
+    :class:`TimeoutError`.
     """
     if solver_name not in JULIA_SOLVERS:
         raise ValueError(
@@ -115,6 +118,7 @@ def make_julia_solver(solver_name: str):
         atol=1e-10,
         first_step=None,
         max_steps=100000,
+        timeout=None,
     ):
         if ensemble_backend not in JULIA_ENSEMBLE_BACKENDS:
             raise JuliaUnavailableError(
@@ -133,6 +137,7 @@ def make_julia_solver(solver_name: str):
             atol=atol,
             first_step=first_step,
             max_steps=max_steps,
+            timeout=timeout,
         )
 
     def solve(
@@ -147,6 +152,7 @@ def make_julia_solver(solver_name: str):
         atol=1e-10,
         first_step=None,
         max_steps=100000,
+        timeout=None,
     ):
         return solve_with_timing(
             system_name,
@@ -159,6 +165,7 @@ def make_julia_solver(solver_name: str):
             atol=atol,
             first_step=first_step,
             max_steps=max_steps,
+            timeout=timeout,
         ).ys
 
     solve.__doc__ = f"Solve an ensemble with Julia {solver_name}."
@@ -233,8 +240,11 @@ def _run_julia_solver(
     atol,
     first_step,
     max_steps,
+    timeout=None,
 ):
     julia_exe = _julia_executable()
+    if timeout is None:
+        timeout = JULIA_SOLVE_TIMEOUT_SECONDS
 
     y0_arr = np.ascontiguousarray(np.asarray(y0, dtype=np.float64))
     t_span_arr = np.ascontiguousarray(np.asarray(t_span, dtype=np.float64))
@@ -290,12 +300,11 @@ def _run_julia_solver(
                 check=False,
                 cwd=_JULIA_DIR,
                 env=_julia_subprocess_env(),
-                timeout=JULIA_SOLVE_TIMEOUT_SECONDS,
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
             raise TimeoutError(
-                "Julia reference solve exceeded "
-                f"{JULIA_SOLVE_TIMEOUT_SECONDS:g}s timeout.\n"
+                f"Julia reference solve exceeded {timeout:g}s timeout.\n"
                 f"Command: {' '.join(cmd)}"
             ) from exc
         wall_end = time.perf_counter()

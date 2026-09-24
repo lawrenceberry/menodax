@@ -1,11 +1,11 @@
 """Dimensionality scaling benchmark on the non-stiff coupled VDP lattice (Tsit5).
 
 Sweeps ODE dimension from 2 to 128 (n_osc = 1 to 64) on a log scale with a
-fixed ensemble of 1000 trajectories and records solve time for modax Tsit5,
-Diffrax Tsit5, and Julia Tsit5 with both DiffEqGPU ensemble backends.
-EnsembleGPUKernel failures (expected for large dimensions) are stored as null
-and omitted from the plot. Runs both "identical" and "divergent" scenarios;
-outputs a CSV and log-log plot per scenario, named after the GPU and scenario.
+fixed ensemble of 1000 identical trajectories and records solve time for modax
+Tsit5, Diffrax Tsit5, and Julia Tsit5 with both DiffEqGPU ensemble backends. A
+point that fails, or does not compile and solve within the case timeout, is
+recorded as such and omitted from the plot. Outputs a CSV and a log-log plot
+named after the GPU.
 
 Uses the non-stiff coupled VDP variant (mu = 1.0) so that explicit Tsit5
 remains an appropriate solver.
@@ -25,7 +25,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 # the `reference.systems.python` modules build device arrays at import time,
 # which initialises the backend and fixes that policy for the whole process.
 import benchmarks.benchmark_common  # noqa: E402,F401
-from benchmarks._sweep import DIMENSION, Problem, SweepBenchmark, SweepCase, main
+from benchmarks._sweep import (
+    DIMENSION,
+    IDENTICAL_DIVERGENCE,
+    Problem,
+    SweepBenchmark,
+    SweepCase,
+    main,
+)
 from modax.tsit5 import clear_caches as tsit5_clear_caches
 from modax.tsit5 import solve as tsit5_solve
 from reference.solvers.python.diffrax_tsit5 import solve as diffrax_tsit5_solve
@@ -43,10 +50,12 @@ _SOLVER_KWARGS = {"first_step": 1e-4, "rtol": 1e-6, "atol": 1e-8}
 _LOCAL_SOLVER_KWARGS = {**_SOLVER_KWARGS, "pcoeff": 0.0, "icoeff": 1.0, "dcoeff": 0.0}
 
 
-def _problem(dim: int, divergence: float) -> Problem:
+def _problem(dim: int) -> Problem:
     n_osc = dim // 2
     ode_fn, _ = vdp.make_system(n_osc, mu=_MU_NONSTIFF)
-    y0, params = vdp.make_scenario(n_osc, _ENSEMBLE_SIZE, divergence=divergence)
+    y0, params = vdp.make_scenario(
+        n_osc, _ENSEMBLE_SIZE, divergence=IDENTICAL_DIVERGENCE
+    )
     return Problem(
         ode_fn,
         y0,
@@ -62,9 +71,7 @@ def _problem(dim: int, divergence: float) -> Problem:
 
 BENCHMARK = SweepBenchmark(
     script_dir=Path(__file__).resolve().parent,
-    title=(
-        f"Tsit5 dimensionality — {{scenario}} — coupled VDP lattice (μ={_MU_NONSTIFF})"
-    ),
+    title=f"Tsit5 dimensionality — coupled VDP lattice (μ={_MU_NONSTIFF})",
     axis=DIMENSION,
     values=(2, 4, 6, 8, 10, 12, 16, 32, 64, 128),
     t_span=vdp.TIMES,

@@ -1,0 +1,41 @@
+solver_key,solver,ensemble_size,solve_time_ms
+modax tsit5,modax tsit5,3,3.444716101512313
+modax tsit5,modax tsit5,10,3.1196660129353404
+modax tsit5,modax tsit5,30,3.319905954413116
+modax tsit5,modax tsit5,100,3.329885075800121
+modax tsit5,modax tsit5,300,3.349356004036963
+modax tsit5,modax tsit5,1000,3.158536972478032
+modax tsit5,modax tsit5,3000,3.985055023804307
+modax tsit5,modax tsit5,10000,10.397767997346818
+modax tsit5,modax tsit5,30000,34.2137390980497
+modax tsit5,modax tsit5,100000,84.1475079068914
+diffrax tsit5,diffrax tsit5,3,119.35135500971228
+diffrax tsit5,diffrax tsit5,10,89.09669099375606
+diffrax tsit5,diffrax tsit5,30,83.18182802759111
+diffrax tsit5,diffrax tsit5,100,96.80246096104383
+diffrax tsit5,diffrax tsit5,300,104.0051419986412
+diffrax tsit5,diffrax tsit5,1000,105.3262100322172
+diffrax tsit5,diffrax tsit5,3000,132.1855370188132
+diffrax tsit5,diffrax tsit5,10000,136.37495099101216
+diffrax tsit5,diffrax tsit5,30000,196.42635597847402
+diffrax tsit5,diffrax tsit5,100000,452.9044450027868
+julia tsit5 EnsembleGPUArray,julia tsit5 EnsembleGPUArray,3,68.69877000000001
+julia tsit5 EnsembleGPUArray,julia tsit5 EnsembleGPUArray,10,69.741864
+julia tsit5 EnsembleGPUArray,julia tsit5 EnsembleGPUArray,30,68.85745299999999
+julia tsit5 EnsembleGPUArray,julia tsit5 EnsembleGPUArray,100,70.23244700000001
+julia tsit5 EnsembleGPUArray,julia tsit5 EnsembleGPUArray,300,78.29075200000001
+julia tsit5 EnsembleGPUArray,julia tsit5 EnsembleGPUArray,1000,82.207233
+julia tsit5 EnsembleGPUArray,julia tsit5 EnsembleGPUArray,3000,127.60563599999999
+julia tsit5 EnsembleGPUArray,julia tsit5 EnsembleGPUArray,10000,271.256197
+julia tsit5 EnsembleGPUArray,julia tsit5 EnsembleGPUArray,30000,2087.4652610000003
+julia tsit5 EnsembleGPUArray,julia tsit5 EnsembleGPUArray,100000,27176.297703
+julia tsit5 EnsembleGPUKernel,julia tsit5 EnsembleGPUKernel,3,5.36265
+julia tsit5 EnsembleGPUKernel,julia tsit5 EnsembleGPUKernel,10,5.38403
+julia tsit5 EnsembleGPUKernel,julia tsit5 EnsembleGPUKernel,30,5.385199999999999
+julia tsit5 EnsembleGPUKernel,julia tsit5 EnsembleGPUKernel,100,6.610477
+julia tsit5 EnsembleGPUKernel,julia tsit5 EnsembleGPUKernel,300,5.870948
+julia tsit5 EnsembleGPUKernel,julia tsit5 EnsembleGPUKernel,1000,8.013434
+julia tsit5 EnsembleGPUKernel,julia tsit5 EnsembleGPUKernel,3000,14.367840999999999
+julia tsit5 EnsembleGPUKernel,julia tsit5 EnsembleGPUKernel,10000,43.227685
+julia tsit5 EnsembleGPUKernel,julia tsit5 EnsembleGPUKernel,30000,145.841789
+julia tsit5 EnsembleGPUKernel,julia tsit5 EnsembleGPUKernel,100000,480.29763399999996

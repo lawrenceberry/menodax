@@ -1,12 +1,11 @@
 """Dimensionality scaling benchmark on the coupled VDP lattice system.
 
 Sweeps ODE dimension from 2 to 128 (n_osc = 1 to 64) on a log scale with a
-fixed ensemble of 1000 trajectories and records solve time for modax Rodas5P
-with fp32 and fp64 LU precision, Diffrax Kvaerno5, and Julia Rodas5P with both
-DiffEqGPU ensemble backends. EnsembleGPUKernel failures
-(expected for large dimensions) are stored as null and omitted from the plot.
-Runs both "identical" and "divergent" scenarios; outputs a CSV and log-log plot
-per scenario, named after the GPU and scenario.
+fixed ensemble of 1000 identical trajectories and records solve time for modax
+Rodas5P with fp32 and fp64 LU precision, Diffrax Kvaerno5, and Julia Rodas5P
+with both DiffEqGPU ensemble backends. A point that fails, or does not compile
+and solve within the case timeout, is recorded as such and omitted from the
+plot. Outputs a CSV and a log-log plot named after the GPU.
 
 Usage:
     uv run python benchmarks/stiff_vdp_dimensionality/main.py
@@ -23,7 +22,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 # the `reference.systems.python` modules build device arrays at import time,
 # which initialises the backend and fixes that policy for the whole process.
 import benchmarks.benchmark_common  # noqa: E402,F401
-from benchmarks._sweep import DIMENSION, Problem, SweepBenchmark, SweepCase, main
+from benchmarks._sweep import (
+    DIMENSION,
+    IDENTICAL_DIVERGENCE,
+    Problem,
+    SweepBenchmark,
+    SweepCase,
+    main,
+)
 from modax.rodas5P import solve as rodas5P_solve
 from reference.solvers.python.diffrax_kvaerno5 import solve as diffrax_kvaerno5_solve
 from reference.solvers.python.julia_rodas5P import solve as julia_rodas5P_solve
@@ -35,16 +41,18 @@ _ENSEMBLE_SIZE = 1000
 _SOLVER_KWARGS = {"first_step": 1e-4, "rtol": 1e-6, "atol": 1e-8}
 
 
-def _problem(dim: int, divergence: float) -> Problem:
+def _problem(dim: int) -> Problem:
     n_osc = dim // 2
     ode_fn, _ = vdp.make_system(n_osc)
-    y0, params = vdp.make_scenario(n_osc, _ENSEMBLE_SIZE, divergence=divergence)
+    y0, params = vdp.make_scenario(
+        n_osc, _ENSEMBLE_SIZE, divergence=IDENTICAL_DIVERGENCE
+    )
     return Problem(ode_fn, y0, params, julia_system_config={"n_osc": n_osc})
 
 
 BENCHMARK = SweepBenchmark(
     script_dir=Path(__file__).resolve().parent,
-    title="Rodas5P dimensionality — {scenario} — coupled VDP lattice",
+    title="Rodas5P dimensionality — coupled VDP lattice",
     axis=DIMENSION,
     values=(2, 4, 6, 8, 10, 12, 16, 32, 64, 96, 128),
     t_span=vdp.TIMES,
