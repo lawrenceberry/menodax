@@ -101,4 +101,4 @@ because the $D\to{}^4\mathrm{He}$ path through ${}^3\mathrm{He}$ and $T$ is omit
 3. R. J. Cooke, M. Pettini, C. C. Steidel (2018). *One Percent Determination of the Primordial Deuterium Abundance.* ApJ **855**, 102.
 4. E. Aver, K. A. Olive, E. D. Skillman (2015). *The effects of He I λ10830 on helium abundance determinations.* JCAP **07**, 011.
 5. J. Skilling (2006). *Nested sampling for general Bayesian computation.* Bayesian Analysis **1**, 833.
-6. D. Yallup, M. Kroupa, W. Handley (2026). *Nested slice sampling.* arXiv:2601.23252.
+6. D. Yallup, N. Kroupa, W. Handley (2026). *Nested Slice Sampling: Vectorized Nested Sampling for GPU-Accelerated Inference.* arXiv:2601.23252.

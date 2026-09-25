@@ -18,10 +18,8 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
 ]
 # Only what `modax/` itself needs. The Diffrax and BlackJAX baselines the
-# examples compare against, and the matplotlib their figures use, moved to the
-# dev group: nothing here solves an ODE without them, and PyPI rejects a
-# distribution whose metadata carries a direct URL dependency, which the
-# BlackJAX fork is.
+# examples compare against, and the matplotlib their figures use, live in the
+# dev group: nothing here solves an ODE without them.
 dependencies = [
     "jax>=0.9.1",
     # numba itself is still needed: numba-enzyme builds on it. numba-cuda is
@@ -83,7 +81,8 @@ dev = [
     # The example baselines and their plotting, not runtime dependencies of the
     # solvers. `uv sync` installs this group by default, so the examples run as
     # they always did.
-    "blackjax @ git+https://github.com/handley-lab/blackjax@nested_sampling",
+    # Nested slice sampling (`blackjax.ns`) has shipped on PyPI since 1.6.
+    "blackjax>=1.6",
     # torch pins the CUDA toolkit to one 13.x release, and NVVM has to come from
     # the same one: a newer NVVM emits a PTX ISA the older nvJitLink refuses
     # ("Unsupported .version 9.2; current version is '9.0'"), and numba-cuda-mlir

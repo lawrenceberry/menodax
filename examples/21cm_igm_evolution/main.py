@@ -37,6 +37,11 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from benchmarks.benchmark_common import (
+    MODAX_COLOR,
+    configure_latex_plot_style,
+    print_plot_title,
+)
 from examples._common import Backends, parse_args, run_benchmark
 from examples.dual_backend import build_fn, build_rhs
 from modax.rodas5P import solve as rodas5P_solve
@@ -390,30 +395,36 @@ def summarize(results):
 
 
 def plot_envelope(results, out_path=None):
-    """Plot the Monte Carlo 95% envelope and median global signal."""
+    """Plot the Monte Carlo 95% envelope and median global signal.
+
+    Drawn in the house style of ``benchmarks/``: LaTeX text, a dashed grid,
+    the modax colour, and the title printed rather than set on the figure.
+    """
     if out_path is None:
         out_path = Path(__file__).parent / "global_21cm_envelope.png"
+    configure_latex_plot_style(plt)
+    print_plot_title("Global 21-cm Monte Carlo envelope")
     q025, q50, q975 = results["quantiles_mK"]
     frequency = results["frequency_mhz"]
 
-    fig, ax = plt.subplots(figsize=(8, 4.8))
+    fig, ax = plt.subplots(figsize=(7, 5))
     ax.fill_between(
         frequency,
         q025,
         q975,
-        color="#7aa6c2",
-        alpha=0.35,
-        label="95% prior envelope",
+        color=MODAX_COLOR,
+        alpha=0.3,
+        linewidth=0,
+        label=r"95\% prior envelope",
     )
-    ax.plot(frequency, q50, color="#143d59", lw=2.2, label="median")
+    ax.plot(frequency, q50, color=MODAX_COLOR, lw=2, label="median")
     ax.axhline(0.0, color="0.25", lw=0.8, alpha=0.6)
-    ax.set_xlabel("observed frequency [MHz]")
-    ax.set_ylabel(r"$\delta T_b$ [mK]")
-    ax.set_title("Global 21-cm Monte Carlo envelope")
-    ax.legend(frameon=False)
-    ax.grid(alpha=0.25)
+    ax.set_xlabel("Observed frequency (MHz)")
+    ax.set_ylabel(r"$\delta T_b$ (mK)")
+    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.legend()
     fig.tight_layout()
-    fig.savefig(out_path, dpi=160)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return Path(out_path)
 

@@ -3,7 +3,7 @@
 A four-species Big Bang Nucleosynthesis network (n, p, D, 4He) is integrated
 with the Rodas5P kernel solver, with x = Q/T as the independent variable, and
 the baryon-to-photon ratio log10(eta_10) and N_eff are fitted to the observed
-abundances by nested sampling (handley-lab/blackjax). Every likelihood
+abundances by nested slice sampling (BlackJAX). Every likelihood
 evaluation is an independent stiff universe, so the sampler's population is
 one batched ensemble solve. The physics, the statistical model and the
 benchmark are laid out in README.md next to this file.
@@ -25,6 +25,11 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from benchmarks.benchmark_common import (
+    MODAX_COLOR,
+    configure_latex_plot_style,
+    print_plot_title,
+)
 from examples._common import Backends, parse_args, run_benchmark
 from examples.dual_backend import build_fn, build_rhs
 from modax.rodas5P import solve as rodas5P_solve
@@ -176,8 +181,8 @@ BBN_ODE = build_rhs(
 X_SPAN = jnp.array([Q / 10.0, Q / 0.01])  # x: 0.1293 -> 129.3 (T = 0.01 MeV)
 X_SAVE = X_SPAN  # save at start and end only
 
-SOLVER_RTOL = 1e-3
-SOLVER_ATOL = 1e-7
+SOLVER_RTOL = 1e-4
+SOLVER_ATOL = 1e-9
 SOLVER_FIRST_STEP = 0.1
 SOLVER_MAX_STEPS = 256
 
@@ -405,37 +410,38 @@ def run_nested_sampling():
 
 
 def _plot_posterior(w, eta10_samples, neff_samples):
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    """Posterior scatter and marginals, in the house style of ``benchmarks/``."""
+    configure_latex_plot_style(plt)
+    print_plot_title("BBN posterior from nested slice sampling")
+    fig, axes = plt.subplots(1, 3, figsize=(10.5, 3.5))
 
-    # 2D scatter coloured by weight
+    # 2D scatter coloured by posterior weight
     sc = axes[0].scatter(
         eta10_samples,
         neff_samples,
         c=w,
-        s=2,
+        s=4,
         cmap="viridis",
-        alpha=0.6,
+        alpha=0.7,
+        linewidths=0,
     )
-    plt.colorbar(sc, ax=axes[0], label="weight")
+    fig.colorbar(sc, ax=axes[0], label="Posterior weight")
     axes[0].set_xlabel(r"$\eta_{10}$")
     axes[0].set_ylabel(r"$N_\mathrm{eff}$")
-    axes[0].set_title("Posterior samples")
 
-    # eta_10 marginal
-    axes[1].hist(eta10_samples, weights=w, bins=40, color="steelblue", density=True)
+    # marginals
+    axes[1].hist(eta10_samples, weights=w, bins=40, color=MODAX_COLOR, density=True)
     axes[1].set_xlabel(r"$\eta_{10}$")
-    axes[1].set_ylabel("density")
-    axes[1].set_title(r"Marginal $\eta_{10}$")
-
-    # N_eff marginal
-    axes[2].hist(neff_samples, weights=w, bins=40, color="coral", density=True)
+    axes[1].set_ylabel("Posterior density")
+    axes[2].hist(neff_samples, weights=w, bins=40, color=MODAX_COLOR, density=True)
     axes[2].set_xlabel(r"$N_\mathrm{eff}$")
-    axes[2].set_ylabel("density")
-    axes[2].set_title(r"Marginal $N_\mathrm{eff}$")
+    axes[2].set_ylabel("Posterior density")
 
+    for ax in axes:
+        ax.grid(True, linestyle="--", alpha=0.4)
     fig.tight_layout()
     out = Path(__file__).parent / "posterior.png"
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, dpi=150, bbox_inches="tight")
     print(f"Plot saved to {out}")
     plt.close(fig)
 
