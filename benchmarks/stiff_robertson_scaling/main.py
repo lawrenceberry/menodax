@@ -30,6 +30,11 @@ from benchmarks._sweep import (
     SweepCase,
     main,
 )
+from benchmarks.benchmark_common import (  # noqa: E402
+    DIFFRAX_COLOR,
+    JULIA_COLOR,
+    MODAX_COLOR,
+)
 from modax.rodas5P import solve as rodas5P_solve
 from reference.solvers.python.diffrax_kvaerno5 import solve as diffrax_kvaerno5_solve
 from reference.solvers.python.julia_rodas5P import solve as julia_rodas5P_solve
@@ -71,7 +76,7 @@ BENCHMARK = SweepBenchmark(
     cases=(
         SweepCase(
             key="modax rodas5P fp32",
-            color="#8c564b",
+            color=MODAX_COLOR,
             marker="P",
             linestyle="--",
             solve_fn=rodas5P_solve,
@@ -79,21 +84,21 @@ BENCHMARK = SweepBenchmark(
         ),
         SweepCase(
             key="modax rodas5P fp64",
-            color="#8c564b",
+            color=MODAX_COLOR,
             marker="X",
             solve_fn=rodas5P_solve,
             kwargs={**_SOLVER_KWARGS, "lu_precision": "fp64"},
         ),
         SweepCase(
             key="diffrax kvaerno5",
-            color="#2ba84a",
+            color=DIFFRAX_COLOR,
             marker="s",
             solve_fn=diffrax_kvaerno5_solve,
             kwargs=_SOLVER_KWARGS,
         ),
         SweepCase(
             key="julia rodas5P EnsembleGPUArray",
-            color="#9b59b6",
+            color=JULIA_COLOR,
             marker="^",
             mode="julia",
             ensemble_backend="EnsembleGPUArray",
@@ -101,7 +106,7 @@ BENCHMARK = SweepBenchmark(
         ),
         SweepCase(
             key="julia rodas5P EnsembleGPUKernel",
-            color="#9b59b6",
+            color=JULIA_COLOR,
             marker="v",
             linestyle="--",
             mode="julia",

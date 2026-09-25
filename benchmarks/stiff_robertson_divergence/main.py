@@ -21,6 +21,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 # which initialises the backend and fixes that policy for the whole process.
 import benchmarks.benchmark_common  # noqa: E402,F401
 from benchmarks._divergence import DivergenceBenchmark, DivergenceCase, main
+from benchmarks.benchmark_common import (  # noqa: E402
+    JULIA_COLOR,
+    MODAX_COLOR,
+)
 from modax.rodas5P import solve as rodas5P_solve
 from reference.solvers.python.julia_rodas5P import solve as julia_rodas5P_solve
 from reference.systems.python import robertson
@@ -47,16 +51,16 @@ BENCHMARK = DivergenceBenchmark(
     julia_solve=julia_rodas5P_solve,
     julia_system="robertson",
     cases=(
-        DivergenceCase(key="modax rodas5P fp32", color="#f0a202", marker="s"),
+        DivergenceCase(key="modax rodas5P fp32", color=MODAX_COLOR, marker="s"),
         DivergenceCase(
             key="modax rodas5P fp32 (sorted)",
-            color="#f0a202",
+            color=MODAX_COLOR,
             marker="P",
             sort_by_steps=True,
         ),
         # DivergenceCase(
         #     key="diffrax kvaerno5",
-        #     color="#2ba84a",
+        #     color=DIFFRAX_COLOR,
         #     marker="^",
         #     mode="timing",
         #     solve_fn=diffrax_kvaerno5_solve,
@@ -65,14 +69,14 @@ BENCHMARK = DivergenceBenchmark(
         # ),
         # DivergenceCase(
         #     key="julia rodas5P EnsembleGPUArray",
-        #     color="#9b59b6",
+        #     color=JULIA_COLOR,
         #     marker="D",
         #     mode="julia",
         #     ensemble_backend="EnsembleGPUArray",
         # ),
         DivergenceCase(
             key="julia rodas5P EnsembleGPUKernel",
-            color="#d35400",
+            color=JULIA_COLOR,
             marker="v",
             mode="julia",
             ensemble_backend="EnsembleGPUKernel",
@@ -80,7 +84,7 @@ BENCHMARK = DivergenceBenchmark(
         ),
         DivergenceCase(
             key="julia rodas5P EnsembleGPUKernel (sorted)",
-            color="#d35400",
+            color=JULIA_COLOR,
             marker="X",
             mode="julia",
             ensemble_backend="EnsembleGPUKernel",

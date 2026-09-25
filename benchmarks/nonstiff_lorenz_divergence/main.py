@@ -23,6 +23,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 # which initialises the backend and fixes that policy for the whole process.
 import benchmarks.benchmark_common  # noqa: E402,F401
 from benchmarks._divergence import DivergenceBenchmark, DivergenceCase, main
+from benchmarks.benchmark_common import (  # noqa: E402
+    JULIA_COLOR,
+    MODAX_COLOR,
+    TORCHDIFFEQ_COLOR,
+)
 from modax.tsit5 import solve as tsit5_solve
 from reference.solvers.python.julia_tsit5 import solve as julia_tsit5_solve
 from reference.solvers.python.torchdiffeq_dopri8 import (
@@ -52,16 +57,16 @@ BENCHMARK = DivergenceBenchmark(
     julia_system="lorenz",
     legend_loc="upper left",
     cases=(
-        DivergenceCase(key="modax tsit5", color="#f0a202", marker="s"),
+        DivergenceCase(key="modax tsit5", color=MODAX_COLOR, marker="s"),
         DivergenceCase(
             key="modax tsit5 (sorted)",
-            color="#f0a202",
+            color=MODAX_COLOR,
             marker="P",
             sort_by_steps=True,
         ),
         DivergenceCase(
             key="torchdiffeq dopri8",
-            color="#d62728",
+            color=TORCHDIFFEQ_COLOR,
             marker="D",
             mode="timing",
             solve_fn=torchdiffeq_dopri8_solve,
@@ -69,14 +74,14 @@ BENCHMARK = DivergenceBenchmark(
         ),
         DivergenceCase(
             key="julia tsit5 EnsembleGPUKernel",
-            color="#d35400",
+            color=JULIA_COLOR,
             marker="v",
             mode="julia",
             ensemble_backend="EnsembleGPUKernel",
         ),
         DivergenceCase(
             key="julia tsit5 EnsembleGPUKernel (sorted)",
-            color="#d35400",
+            color=JULIA_COLOR,
             marker="X",
             mode="julia",
             ensemble_backend="EnsembleGPUKernel",

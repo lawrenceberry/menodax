@@ -61,6 +61,14 @@ def print_plot_title(title: str) -> None:
     print(f"Plot title: {title}")
 
 
+# One colour per solver, the same in every plot; within a solver the marker and
+# the line style tell its cases apart (LU precision, sparsity, sorting, backend).
+MODAX_COLOR = "#f0a202"
+JULIA_COLOR = "#9b59b6"
+DIFFRAX_COLOR = "#1f77b4"
+TORCHDIFFEQ_COLOR = "#d62728"
+
+
 @dataclass(frozen=True, kw_only=True)
 class BenchmarkCase:
     key: str

@@ -34,6 +34,12 @@ from benchmarks._sweep import (
     SweepCase,
     main,
 )
+from benchmarks.benchmark_common import (  # noqa: E402
+    DIFFRAX_COLOR,
+    JULIA_COLOR,
+    MODAX_COLOR,
+    TORCHDIFFEQ_COLOR,
+)
 from modax.tsit5 import clear_caches as tsit5_clear_caches
 from modax.tsit5 import solve as tsit5_solve
 from reference.solvers.python.diffrax_tsit5 import solve as diffrax_tsit5_solve
@@ -85,7 +91,7 @@ BENCHMARK = SweepBenchmark(
     cases=(
         SweepCase(
             key="modax tsit5",
-            color="#f0a202",
+            color=MODAX_COLOR,
             marker="P",
             solve_fn=tsit5_solve,
             kwargs=_LOCAL_SOLVER_KWARGS,
@@ -95,14 +101,14 @@ BENCHMARK = SweepBenchmark(
         ),
         SweepCase(
             key="diffrax tsit5",
-            color="#2ba84a",
+            color=DIFFRAX_COLOR,
             marker="s",
             solve_fn=diffrax_tsit5_solve,
             kwargs=_LOCAL_SOLVER_KWARGS,
         ),
         SweepCase(
             key="torchdiffeq dopri8",
-            color="#d62728",
+            color=TORCHDIFFEQ_COLOR,
             marker="D",
             solve_fn=torchdiffeq_dopri8_solve,
             kwargs=_SOLVER_KWARGS,
@@ -110,7 +116,7 @@ BENCHMARK = SweepBenchmark(
         ),
         SweepCase(
             key="julia tsit5 EnsembleGPUArray",
-            color="#9b59b6",
+            color=JULIA_COLOR,
             marker="^",
             mode="julia",
             ensemble_backend="EnsembleGPUArray",
@@ -118,7 +124,7 @@ BENCHMARK = SweepBenchmark(
         ),
         SweepCase(
             key="julia tsit5 EnsembleGPUKernel",
-            color="#9b59b6",
+            color=JULIA_COLOR,
             marker="v",
             linestyle="--",
             mode="julia",

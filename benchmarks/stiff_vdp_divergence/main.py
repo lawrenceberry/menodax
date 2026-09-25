@@ -22,6 +22,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 # which initialises the backend and fixes that policy for the whole process.
 import benchmarks.benchmark_common  # noqa: E402,F401
 from benchmarks._divergence import DivergenceBenchmark, DivergenceCase, main
+from benchmarks.benchmark_common import (  # noqa: E402
+    MODAX_COLOR,
+)
 from modax.rodas5P import solve as rodas5P_solve
 from reference.solvers.python.julia_rodas5P import solve as julia_rodas5P_solve
 from reference.systems.python import vdp
@@ -53,10 +56,10 @@ BENCHMARK = DivergenceBenchmark(
     julia_system_config={"n_osc": _N_OSC},
     extra_fields={"n_osc": _N_OSC},
     cases=(
-        DivergenceCase(key="modax rodas5P fp32", color="#f0a202", marker="s"),
+        DivergenceCase(key="modax rodas5P fp32", color=MODAX_COLOR, marker="s"),
         DivergenceCase(
             key="modax rodas5P fp32 (sorted)",
-            color="#f0a202",
+            color=MODAX_COLOR,
             marker="P",
             sort_by_steps=True,
         ),
